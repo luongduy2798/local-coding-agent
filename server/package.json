@@ -4,11 +4,11 @@
   "private": true,
   "type": "module",
   "description": "Local MCP server that lets ChatGPT Web work with files and commands on your own machine.",
-  "author": "Long Nguyễn",
+  "author": "Lương Duy",
   "license": "AGPL-3.0-or-later",
   "repository": {
     "type": "git",
-    "url": "https://github.com/LongNgn204/local-coding-agent.git"
+    "url": "https://github.com/luongduy2798/local-coding-agent.git"
   },
   "scripts": {
     "start": "node server.mjs",

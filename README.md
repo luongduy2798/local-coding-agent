@@ -190,5 +190,5 @@ lca
 
 ## License
 
-[AGPL-3.0-or-later](LICENSE) © 2026 Long Nguyễn
-([@LongNgn204](https://github.com/LongNgn204)).
+[AGPL-3.0-or-later](LICENSE) © 2026 Lương Duy
+([@luongduy2798](https://github.com/luongduy2798)).

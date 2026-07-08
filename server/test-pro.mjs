@@ -1,5 +1,5 @@
 // Local Coding Agent Pro regression tests
-// Copyright (c) 2026 Long Nguyen
+// Copyright (c) 2026 Lương Duy
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";

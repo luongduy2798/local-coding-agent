@@ -23,7 +23,7 @@ start Local Coding Agent.
    - `node -v` must be 18 or newer.
    - `git --version` should work.
 2. Clone the repo if needed:
-   - `git clone https://github.com/LongNgn204/local-coding-agent.git`
+   - `git clone https://github.com/luongduy2798/local-coding-agent.git`
 3. Enter the repo and run setup wizard:
    - Windows: `scripts\lca.cmd setup`
    - macOS/Linux/WSL: `bash scripts/lca setup`

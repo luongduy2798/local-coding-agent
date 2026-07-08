@@ -6,7 +6,7 @@ Prompt này dùng khi đã có clone `local-coding-agent` và muốn update an t
 Hãy update Local Coding Agent an toàn.
 
 Repository:
-https://github.com/LongNgn204/local-coding-agent
+https://github.com/luongduy2798/local-coding-agent
 
 Mục tiêu:
 - Pull bản mới nếu không có conflict.

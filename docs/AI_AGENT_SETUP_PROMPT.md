@@ -6,7 +6,7 @@ Copy prompt này vào Codex, Claude Code, Cursor hoặc agent local khác nếu 
 Hãy cài Local Coding Agent theo flow TUI mới.
 
 Repository:
-https://github.com/LongNgn204/local-coding-agent
+https://github.com/luongduy2798/local-coding-agent
 
 Mục tiêu:
 - Clone repo nếu chưa có.

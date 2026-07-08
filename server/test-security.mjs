@@ -1,5 +1,5 @@
 // Local Coding Agent security regression tests
-// Copyright (c) 2026 Long Nguyen
+// Copyright (c) 2026 Lương Duy
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import { spawnSync } from "node:child_process";
