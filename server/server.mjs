@@ -17,7 +17,7 @@ import {
   copyFile,
   cp
 } from "node:fs/promises";
-import { readFileSync, existsSync, realpathSync } from "node:fs";
+import { createWriteStream, readFileSync, existsSync, realpathSync } from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
@@ -76,6 +76,9 @@ const WORKSPACE_DATA_DIR = path.join(DATA_DIR, "workspaces", WORKSPACE_ID);
 const NOTES_PATH = path.resolve(WORKSPACE_DATA_DIR, "notes.json");
 const CHECKPOINT_PATH = path.resolve(WORKSPACE_DATA_DIR, "checkpoint.json");
 const AUDIT_PATH = path.resolve(DATA_DIR, "audit.log");
+const AUDIT_ENABLED = process.env.AGENT_AUDIT !== "0";
+const AUDIT_ARGS = process.env.AGENT_AUDIT_ARGS !== "0";
+const HTTP_LOG = process.env.AGENT_HTTP_LOG === "1";
 
 // v2.1 Repo index cache
 const INDEX_PATH = path.resolve(WORKSPACE_DATA_DIR, "index.json");
@@ -183,6 +186,7 @@ const SAFE_MODE_BLOCKS = [
 // ----------------------------------------------------------------------------
 const processes = new Map(); // id -> { id, name, command, child, status, exitCode, startedAt, stdout, stderr }
 let approvalLock = Promise.resolve();
+let auditStream = null;
 
 // ----------------------------------------------------------------------------
 // Bootstrap
@@ -193,6 +197,10 @@ await mkdir(PRIMARY_ROOT, { recursive: true });
 await mkdir(BACKUPS_DIR, { recursive: true });
 await mkdir(APPROVALS_DIR, { recursive: true });
 await mkdir(AGENT_STATE_DIR, { recursive: true });
+if (AUDIT_ENABLED) {
+  auditStream = createWriteStream(AUDIT_PATH, { flags: "a" });
+  auditStream.on("error", () => {});
+}
 
 // v2.8 Load workspace profile on startup
 await loadWorkspaceProfile();
@@ -217,7 +225,7 @@ function detectRg() {
 const httpServer = http.createServer(async (req, res) => {
   try {
     const requestUrl = new URL(req.url || "/", `http://${req.headers.host || HOST}`);
-    log(`${req.method} ${requestUrl.pathname} ua=${req.headers["user-agent"] || ""}`);
+    if (HTTP_LOG) log(`${req.method} ${requestUrl.pathname} ua=${req.headers["user-agent"] || ""}`);
     if (!originAllowed(req)) {
       return sendJson(res, 403, { error: "browser_origin_not_allowed" });
     }
@@ -298,6 +306,7 @@ for (const sig of ["SIGINT", "SIGTERM"]) {
   process.on(sig, () => {
     log(`${sig} received, shutting down`);
     for (const proc of processes.values()) killProcessTree(proc);
+    try { auditStream?.end(); } catch {}
     httpServer.close(() => process.exit(0));
     setTimeout(() => process.exit(0), 1500).unref();
   });
@@ -528,7 +537,8 @@ function reg(mcp, name, def, handler) {
   mcp.registerTool(name, def, async (args, extra) => {
     const startedAt = isoNow();
     const startedMs = performance.now();
-    const inChars = safeLen(args);
+    const argSummary = AUDIT_ENABLED && AUDIT_ARGS ? summarizeArgs(args) : "";
+    const inChars = argSummary.length;
     let result;
     let ok = true;
     try {
@@ -542,7 +552,7 @@ function reg(mcp, name, def, handler) {
     const outChars = resultLen(result);
     const durationMs = Math.max(0, Math.round((performance.now() - startedMs) * 10) / 10);
     const errText = success ? null : firstText(result).slice(0, 200);
-    audit({ ts: startedAt, tool: name, ok: success, durationMs, inChars, outChars, error: errText || undefined, args: summarizeArgs(args) });
+    audit({ ts: startedAt, tool: name, ok: success, durationMs, inChars, outChars, error: errText || undefined, args: argSummary || undefined });
     return result;
   });
 }
@@ -2197,14 +2207,6 @@ function parseSkillMeta(text, fallbackName) {
   return { name, description };
 }
 
-function safeLen(args) {
-  try {
-    return JSON.stringify(args ?? {}).length;
-  } catch {
-    return 0;
-  }
-}
-
 function resultLen(result) {
   try {
     let n = 0;
@@ -2329,7 +2331,13 @@ function log(message) {
 }
 
 function audit(entry) {
-  appendFile(AUDIT_PATH, `${JSON.stringify(entry)}\n`, "utf8").catch(() => {});
+  if (!AUDIT_ENABLED) return;
+  const line = `${JSON.stringify(entry)}\n`;
+  if (auditStream && !auditStream.destroyed) {
+    auditStream.write(line);
+    return;
+  }
+  appendFile(AUDIT_PATH, line, "utf8").catch(() => {});
 }
 
 function textResult(text) {

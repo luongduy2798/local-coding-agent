@@ -60,6 +60,9 @@ npm start
 | `MCP_ALLOWED_ORIGINS` | _(empty)_ | Trusted browser origins for `/mcp`. Empty rejects browser-origin MCP calls. |
 | `AGENT_APPROVAL_TOKEN` | _(empty)_ | Secret for token-based approval tools. In `policy=balanced`, set this to approve risky actions without switching to `policy=full`. |
 | `AGENT_APPROVAL_TTL_MINUTES` | `10` | Exact approval expiry, clamped to 1-30 minutes. |
+| `AGENT_AUDIT` | `1` | Set `0` to disable audit logging for maximum hot-path speed. |
+| `AGENT_AUDIT_ARGS` | `1` | Set `0` to keep audit events but skip argument serialization/redaction. |
+| `AGENT_HTTP_LOG` | `0` | Set `1` to print every HTTP request. Disabled by default to keep tunnel traffic quiet. |
 | `AGENT_MAX_BATCH_READ_CHARS` | `500000` | Combined text cap for one `read_many` response. |
 | `AGENT_READ_DEFAULT` | `30000` | Default chars `read_file` returns (raise per-call via `max_chars`). Keeps payloads + context small. |
 | `AGENT_CMD_OUTPUT_DEFAULT` | `20000` | Default chars of command output returned (use `tail_lines`/`head_lines`/`max_output_chars`). |
