@@ -72,7 +72,6 @@ function defaultOptions() {
     organizationId: process.env.OPENAI_ORGANIZATION || process.env.OPENAI_ORG_ID || "",
     runtimeKeyEnv: "CONTROL_PLANE_API_KEY",
     runtimeKey: "",
-    tunnelHealthPort: process.env.TUNNEL_HEALTH_PORT || "",
     noTunnel: false
   };
 }
@@ -95,6 +94,7 @@ Usage:
   node scripts/local-coding-agent.mjs profile [options]
   node scripts/local-coding-agent.mjs url
   node scripts/local-coding-agent.mjs logs
+  node scripts/local-coding-agent.mjs config                 # interactive TUI
   node scripts/local-coding-agent.mjs config show|path|set <key> <value>|unset <key>
   node scripts/local-coding-agent.mjs key set|clear
   node scripts/local-coding-agent.mjs update
@@ -271,7 +271,7 @@ export function normalize(opts) {
   out.port = String(out.port || DEFAULT_PORT);
   delete out.dashboardPort;
   delete out.openWebUi;
-  out.tunnelHealthPort = String(out.tunnelHealthPort || "");
+  delete out.tunnelHealthPort;
   out.mode = out.mode || "safe";
   out.policy = out.policy || "balanced";
   out.runtimeKeyEnv = out.runtimeKeyEnv || "CONTROL_PLANE_API_KEY";
@@ -984,6 +984,7 @@ function stripRuntimeFields(cfg) {
   delete out.force;
   delete out.dashboardPort;
   delete out.openWebUi;
+  delete out.tunnelHealthPort;
   return out;
 }
 
@@ -1175,6 +1176,25 @@ async function stop(flags) {
   console.log("Stopped.");
 }
 
+async function runningStatusForConfig(cfg = effectiveOptions()) {
+  const state = readPidState();
+  const health = await readJson(`http://127.0.0.1:${cfg.port}/healthz`);
+  return {
+    state,
+    health,
+    running: Boolean(health?.status === "ok" || isPidAlive(state.serverPid) || isPidAlive(state.tunnelPid))
+  };
+}
+
+async function restartIfRunning(beforeCfg, afterCfg) {
+  const before = await runningStatusForConfig(beforeCfg);
+  if (!before.running) return false;
+  console.log("Config changed; restarting running agent...");
+  await stop(beforeCfg);
+  await start({ ...afterCfg, background: true });
+  return true;
+}
+
 async function status(flags) {
   const opts = effectiveOptions(flags);
   const state = readPidState();
@@ -1220,15 +1240,90 @@ async function doctor(flags) {
   if (failed) process.exitCode = 1;
 }
 
+function redactConfigForDisplay(cfg) {
+  const visible = { ...cfg };
+  if (visible.runtimeKey) visible.runtimeKey = "<saved>";
+  if (visible.authToken) visible.authToken = "<saved>";
+  delete visible.dashboardPort;
+  delete visible.openWebUi;
+  delete visible.tunnelHealthPort;
+  return visible;
+}
+
+async function promptConfigWizard() {
+  if (!input.isTTY || !output.isTTY) {
+    throw new Error("Interactive terminal required. Use `lca config show` for non-interactive output.");
+  }
+  const beforeCfg = normalize(loadConfig());
+  const cfg = { ...beforeCfg };
+  const rl = createPromptInterface({ input, output });
+  let saved = false;
+  try {
+    while (true) {
+      console.log("\nLocal Coding Agent config");
+      console.log(`  Workspace: ${cfg.workspace || "(not set)"}`);
+      console.log(`  Mode:      ${cfg.mode}`);
+      console.log(`  Policy:    ${cfg.policy}`);
+      console.log(`  MCP port:  ${cfg.port}`);
+      console.log(`  Tunnel:    ${cfg.noTunnel ? "disabled" : "enabled"}`);
+      console.log("");
+      const action = await promptChoice(rl, "Choose what to change", [
+        { id: "mode", label: "Mode" },
+        { id: "policy", label: "Policy" },
+        { id: "workspace", label: "Workspace path" },
+        { id: "port", label: "MCP port" },
+        { id: "tunnel", label: "Tunnel on/off" },
+        { id: "show", label: "Show full config" },
+        { id: "save", label: "Save and apply" },
+        { id: "cancel", label: "Cancel" }
+      ], "save");
+      if (action.id === "mode") {
+        cfg.mode = (await promptChoice(rl, "Mode", [
+          { id: "safe", label: "safe - recommended command guardrail" },
+          { id: "full", label: "full - fewer command blocks" }
+        ], cfg.mode)).id;
+      } else if (action.id === "policy") {
+        cfg.policy = (await promptChoice(rl, "Policy", [
+          { id: "balanced", label: "balanced - recommended" },
+          { id: "strict", label: "strict - tighter/read-review focused" },
+          { id: "full", label: "full - fewer approval gates" }
+        ], cfg.policy)).id;
+      } else if (action.id === "workspace") {
+        cfg.workspace = await promptLine(rl, "Workspace path", cfg.workspace || process.cwd());
+      } else if (action.id === "port") {
+        cfg.port = await promptLine(rl, "MCP port", cfg.port || DEFAULT_PORT);
+      } else if (action.id === "tunnel") {
+        cfg.noTunnel = await promptYesNo(rl, "Server only, no tunnel", cfg.noTunnel);
+      } else if (action.id === "show") {
+        console.log(JSON.stringify(redactConfigForDisplay(cfg), null, 2));
+      } else if (action.id === "save") {
+        validate(cfg);
+        await saveConfig(stripRuntimeFields(cfg));
+        saved = true;
+        console.log("Saved config.");
+        const restarted = await restartIfRunning(beforeCfg, cfg);
+        if (!restarted) console.log("Agent is not running; next `lca` will use the new config.");
+        break;
+      } else if (action.id === "cancel") {
+        console.log("Canceled.");
+        break;
+      }
+    }
+  } finally {
+    rl.close();
+  }
+  return saved;
+}
+
 async function configCommand(rest) {
   const [sub, key, ...valueParts] = rest;
+  const beforeCfg = normalize(loadConfig());
   const cfg = loadConfig();
-  if (!sub || sub === "show") {
-    const visible = { ...cfg };
-    if (visible.runtimeKey) visible.runtimeKey = "<saved>";
-    if (visible.authToken) visible.authToken = "<saved>";
-    delete visible.dashboardPort;
-    console.log(JSON.stringify(visible, null, 2));
+  if (!sub) {
+    return promptConfigWizard();
+  }
+  if (sub === "show") {
+    console.log(JSON.stringify(redactConfigForDisplay(cfg), null, 2));
     return;
   }
   if (sub === "path") {
@@ -1237,15 +1332,18 @@ async function configCommand(rest) {
   }
   if (sub === "set") {
     if (!key || valueParts.length === 0) throw new Error("Usage: config set <key> <value>");
-    if (key === "dashboardPort") {
+    if (key === "dashboardPort" || key === "openWebUi" || key === "tunnelHealthPort") {
       delete cfg.dashboardPort;
+      delete cfg.openWebUi;
+      delete cfg.tunnelHealthPort;
       await saveConfig(cfg);
-      console.log("Ignored removed key dashboardPort.");
+      console.log(`Ignored removed key ${key}.`);
       return;
     }
     cfg[key] = valueParts.join(" ");
     await saveConfig(cfg);
     console.log(`Set ${key}.`);
+    await restartIfRunning(beforeCfg, normalize(cfg));
     return;
   }
   if (sub === "unset") {
@@ -1253,6 +1351,7 @@ async function configCommand(rest) {
     delete cfg[key];
     await saveConfig(cfg);
     console.log(`Unset ${key}.`);
+    await restartIfRunning(beforeCfg, normalize(cfg));
     return;
   }
   throw new Error(`Unknown config command: ${sub}`);

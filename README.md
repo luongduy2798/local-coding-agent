@@ -54,6 +54,7 @@ lca           # set workspace = repo hiện tại, start server + tunnel
 lca stop      # dừng server + tunnel
 lca status    # xem trạng thái
 lca workspace # mở TUI chọn workspace
+lca config    # mở TUI cấu hình mode/policy/workspace/port
 lca doctor    # kiểm tra cấu hình local
 ```
 
@@ -122,9 +123,43 @@ workspace sẽ là git root của repo đó. Nếu không nằm trong git repo, 
 - Không commit `.env.local`.
 - Không in API key, Tunnel ID, token hoặc local config có secret.
 - Chỉ mở workspace bạn tin tưởng.
-- `mode=safe` là mặc định khuyên dùng.
-- `full` mode mạnh hơn nhưng rủi ro hơn.
-- Với `policy=balanced`, đặt `AGENT_APPROVAL_TOKEN` nếu muốn duyệt action rủi ro mà không chuyển sang `policy=full`.
+
+### Mode Và Policy
+
+`Mode` là lớp an toàn cho command:
+
+- `safe`: mặc định khuyên dùng. Chặn nhiều command nguy hiểm như xoá hệ thống, thao tác destructive, hoặc shell pattern rủi ro.
+- `full`: ít chặn hơn ở tầng command. Chỉ dùng khi bạn tin workspace và chấp nhận rủi ro cao hơn.
+
+`Policy` là lớp quyền cho tool/action:
+
+- `balanced`: mặc định khuyên dùng. Cho workflow coding bình thường, nhưng action rủi ro cần approval token.
+- `strict`: chặt hơn, phù hợp khi chỉ muốn agent đọc/review/inspect.
+- `full`: bỏ policy approval gate, ít bị hỏi duyệt hơn nhưng rủi ro hơn.
+
+Khuyên dùng:
+
+```text
+Mode: safe
+Policy: balanced
+```
+
+Nếu muốn giảm approval nhưng vẫn giữ command guardrail:
+
+```text
+Mode: safe
+Policy: full
+```
+
+Đổi lại sau setup bằng TUI:
+
+```bash
+lca config
+```
+
+Chọn `Mode` hoặc `Policy`, lưu lại, và nếu agent đang chạy thì `lca config` sẽ tự restart để áp dụng cấu hình mới.
+
+Với `policy=balanced`, đặt `AGENT_APPROVAL_TOKEN` nếu muốn duyệt action rủi ro mà không chuyển sang `policy=full`.
 
 ## Troubleshooting
 
