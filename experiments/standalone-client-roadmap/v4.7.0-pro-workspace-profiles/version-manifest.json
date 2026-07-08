@@ -1,0 +1,10 @@
+{
+  "productName": "Local Agent Studio",
+  "version": "v4.7.0-pro",
+  "channel": "workspace-profiles",
+  "defaultPort": 5179,
+  "defaultMcpEndpoint": "http://127.0.0.1:8787/mcp",
+  "defaultModel": "gpt-4.1-mini",
+  "providers": ["openai", "anthropic", "ollama"],
+  "features": ["mcpTools", "toolTimeline", "modelRouter", "profiles", "serverSupervisor"]
+}

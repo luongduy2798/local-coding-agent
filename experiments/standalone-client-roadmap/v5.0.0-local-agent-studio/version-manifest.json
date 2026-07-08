@@ -1,0 +1,13 @@
+{
+  "productName": "Local Agent Studio",
+  "version": "v5.0.0",
+  "buildNumber": 500000,
+  "channel": "local-agent-studio",
+  "releaseStage": "preview",
+  "minimumNodeVersion": "22.5.0",
+  "defaultPort": 5182,
+  "defaultMcpEndpoint": "http://127.0.0.1:8787/mcp",
+  "defaultModel": "gpt-4.1-mini",
+  "providers": ["openai", "anthropic", "ollama"],
+  "features": ["mcpTools", "toolTimeline", "modelRouter", "profiles", "skills", "dashboard", "fileViewer", "approvals", "supportBundle", "serverSupervisor", "packaging", "embeddedDesktopRuntime", "asarPackaging", "customerUpdateFlow", "signedUpdates", "secureUpdateStaging", "platformSignatureGate", "osCredentialStorage", "secureLicenseStorage"]
+}

@@ -1,0 +1,183 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  server:
+    name: Server (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+      - name: Install server dependencies
+        run: npm ci
+        working-directory: server
+      - name: Guard source and check syntax
+        working-directory: server
+        run: |
+          node -e "const b=require('fs').readFileSync('server.mjs');const n=[...b].filter(x=>x===0).length;if(n)throw new Error('server.mjs contains '+n+' NUL byte(s)')"
+          node --check server.mjs
+          node --check test-agent.mjs
+          node --check test-security.mjs
+          node --check security-test.mjs
+          node --check test-pro.mjs
+          node --check test-hardening.mjs
+          node --check ../evals/run.mjs
+          node --check ../scripts/local-coding-agent.mjs
+          node --check ../scripts/network-doctor.mjs
+          node --test ../scripts/network-doctor.test.mjs
+          node --check ../scripts/validate-skills.mjs
+          node ../scripts/local-coding-agent.mjs --help
+          node ../scripts/network-doctor.mjs --help
+          node ../scripts/validate-skills.mjs
+          node ../scripts/local-coding-agent.mjs skills validate
+      - name: Parse PowerShell launchers
+        run: |
+          [void][scriptblock]::Create((Get-Content -Raw ../install.ps1))
+          [void][scriptblock]::Create((Get-Content -Raw ../scripts/start-tunnel.ps1))
+        working-directory: server
+      - name: Parse Bash launchers
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          bash -n install.sh
+          bash -n scripts/start-tunnel.sh
+          bash -n scripts/lca
+      - name: Run MCP and runtime-security tests
+        working-directory: server
+        run: |
+          $port = 18987
+          $ws = Join-Path ([System.IO.Path]::GetTempPath()) ("lca-ci-" + [guid]::NewGuid().ToString("N"))
+          New-Item -ItemType Directory -Force -Path $ws | Out-Null
+          $env:PORT = "$port"
+          $env:AGENT_WORKSPACE = $ws
+          $env:AGENT_MODE = "safe"
+          $env:AGENT_POLICY = "full"
+          $env:AGENT_EXTRA_ROOTS_JSON = "[]"
+          $env:DASHBOARD_PORT = "0"
+          $env:TEST_ENDPOINT = "http://127.0.0.1:$port/mcp"
+          $out = Join-Path $PWD "ci-server.out.log"
+          $err = Join-Path $PWD "ci-server.err.log"
+          $server = Start-Process -FilePath "node" -ArgumentList "server.mjs" -WorkingDirectory $PWD -PassThru -RedirectStandardOutput $out -RedirectStandardError $err
+          try {
+            $ready = $false
+            for ($i = 0; $i -lt 40; $i++) {
+              try {
+                Invoke-WebRequest -Uri "http://127.0.0.1:$port/healthz" -UseBasicParsing -TimeoutSec 2 | Out-Null
+                $ready = $true
+                break
+              } catch {
+                Start-Sleep -Milliseconds 500
+              }
+            }
+            if (-not $ready) {
+              Get-Content $out -ErrorAction SilentlyContinue
+              Get-Content $err -ErrorAction SilentlyContinue
+              throw "server did not become healthy"
+            }
+            npm run test:agent
+            npm run test:pro
+            npm run test:security
+            npm run test:hardening
+          } finally {
+            Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $ws -Recurse -Force -ErrorAction SilentlyContinue
+          }
+
+  security-baseline:
+    name: Security baseline
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+      - run: npm ci
+        working-directory: server
+      - name: Run baseline security suite
+        working-directory: server
+        env:
+          PORT: "8799"
+          DASHBOARD_PORT: "0"
+          AGENT_MODE: safe
+          AGENT_POLICY: full
+        run: |
+          WORKSPACE="$(mktemp -d)"
+          AGENT_WORKSPACE="$WORKSPACE" node server.mjs > sec.log 2>&1 &
+          SERVER_PID=$!
+          trap 'kill "$SERVER_PID" 2>/dev/null || true; rm -rf "$WORKSPACE"' EXIT
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:8799/healthz >/dev/null && break; sleep 1; done
+          TEST_ENDPOINT=http://127.0.0.1:8799/mcp AUDIT_LOG=data/audit.log npm run test:security:baseline
+
+  eval:
+    name: Eval suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+      - run: npm ci
+        working-directory: server
+      - run: npm run eval
+        working-directory: server
+
+  studio-v5:
+    name: Studio v5 security (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: experiments/standalone-client-roadmap/v5.0.0-local-agent-studio/package-lock.json
+      - name: Install locked Studio dependencies
+        run: npm ci
+        working-directory: experiments/standalone-client-roadmap/v5.0.0-local-agent-studio
+      - name: Verify Studio source and security boundaries
+        run: |
+          npm run check
+          npm test
+          npm run security:audit
+          npm run release:doctor
+          npm audit --omit=dev
+        working-directory: experiments/standalone-client-roadmap/v5.0.0-local-agent-studio
+
+  tray-windows:
+    name: Tray app (Windows)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Publish tray app
+        run: powershell -ExecutionPolicy Bypass -File build.ps1
+        working-directory: tray-app

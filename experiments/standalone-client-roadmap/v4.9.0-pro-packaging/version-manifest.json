@@ -1,0 +1,10 @@
+{
+  "productName": "Local Agent Studio",
+  "version": "v4.9.0-pro",
+  "channel": "packaging",
+  "defaultPort": 5181,
+  "defaultMcpEndpoint": "http://127.0.0.1:8787/mcp",
+  "defaultModel": "gpt-4.1-mini",
+  "providers": ["openai", "anthropic", "ollama"],
+  "features": ["mcpTools", "toolTimeline", "modelRouter", "profiles", "skills", "dashboard", "fileViewer", "approvals", "supportBundle", "serverSupervisor", "packaging", "customerUpdateFlow"]
+}

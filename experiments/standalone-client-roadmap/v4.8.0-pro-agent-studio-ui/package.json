@@ -1,0 +1,14 @@
+{
+  "name": "local-agent-studio-v4-8-agent-studio-ui",
+  "version": "4.8.0-pro",
+  "private": true,
+  "type": "module",
+  "description": "Standalone Local Agent Studio prototype with richer UI and skills visibility.",
+  "scripts": {
+    "start": "node server.mjs",
+    "check": "node --check server.mjs && node --check standalone-app.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.20.0"
+  }
+}

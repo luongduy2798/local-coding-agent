@@ -1,0 +1,14 @@
+{
+  "name": "local-agent-studio-v4-7-workspace-profiles",
+  "version": "4.7.0-pro",
+  "private": true,
+  "type": "module",
+  "description": "Standalone Local Agent Studio prototype with workspace profiles.",
+  "scripts": {
+    "start": "node server.mjs",
+    "check": "node --check server.mjs && node --check standalone-app.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.20.0"
+  }
+}

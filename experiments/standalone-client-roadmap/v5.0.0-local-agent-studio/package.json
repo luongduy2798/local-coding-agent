@@ -1,0 +1,83 @@
+{
+  "name": "local-agent-studio-v5",
+  "version": "5.0.0",
+  "private": true,
+  "type": "module",
+  "author": "Local Coding Agent",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "description": "Productized standalone Local Agent Studio prototype.",
+  "main": "desktop/main.mjs",
+  "scripts": {
+    "start": "node server.mjs",
+    "check": "node --check server.mjs && node --check standalone-app.mjs && node --check desktop/main.mjs && node --check desktop/preload.mjs && node --check desktop/privileged-actions.mjs && node --check desktop/credential-store.mjs && node --check scripts/generate-license-keypair.mjs && node --check scripts/generate-license-token.mjs && node --check scripts/generate-update-manifest.mjs && node --check scripts/verify-platform-signature.mjs && node --check scripts/release-doctor.mjs && node --check scripts/smoke-desktop.mjs && node --check scripts/smoke-safe-storage.mjs && node --check core/agent-tool-policy.mjs && node --check core/context-compactor.mjs && node --check core/dashboard-proxy.mjs && node --check core/patch-review-service.mjs && node --check core/license-token.mjs && node --check core/turn-manager.mjs && node --check core/security.mjs && node --check core/permission-broker.mjs && node --check core/platform-signature.mjs && node --check core/redaction.mjs && node --check core/thread-store.mjs && node --check core/secret-store.mjs && node --check core/license-service.mjs && node --check core/integrity-service.mjs && node --check core/update-service.mjs && tsc --noEmit",
+    "ui:build": "vite build",
+    "desktop:dev": "electron .",
+    "desktop:pack": "npm run ui:build && electron-builder --dir",
+    "desktop:dist": "npm run ui:build && electron-builder",
+    "desktop:smoke": "node scripts/smoke-desktop.mjs",
+    "desktop:smoke:packaged": "node scripts/smoke-desktop.mjs --artifact \"dist/win-unpacked/Local Agent Studio.exe\"",
+    "test": "node --test test/*.test.mjs",
+    "credential:smoke": "electron scripts/smoke-safe-storage.mjs",
+    "license:keygen": "node scripts/generate-license-keypair.mjs",
+    "license:issue": "node scripts/generate-license-token.mjs",
+    "signature:verify": "node scripts/verify-platform-signature.mjs",
+    "update:manifest": "node scripts/generate-update-manifest.mjs",
+    "security:audit": "node scripts/security-audit.mjs",
+    "release:doctor": "node scripts/release-doctor.mjs",
+    "integrity:generate": "node scripts/generate-integrity-manifest.mjs"
+  },
+  "build": {
+    "appId": "dev.localcodingagent.studio",
+    "productName": "Local Agent Studio",
+    "asar": true,
+    "files": [
+      "core/**/*",
+      "desktop/**/*",
+      "dist/ui/**/*",
+      "standalone-app.mjs",
+      "version-manifest.json",
+      "license-public-key.pem",
+      "release-public-key.pem",
+      "update-public-key.pem",
+      "integrity-manifest.json",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ]
+    },
+    "mac": {
+      "target": [
+        "dmg"
+      ]
+    },
+    "linux": {
+      "target": [
+        "AppImage"
+      ]
+    }
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.20.0"
+  },
+  "devDependencies": {
+    "@tanstack/react-virtual": "^3.14.5",
+    "@types/react": "^19.2.4",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.3",
+    "electron": "^43.0.0",
+    "electron-builder": "^26.15.3",
+    "lucide-react": "^1.23.0",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "typescript": "^5.9.2",
+    "vite": "^8.1.2"
+  },
+  "allowScripts": {
+    "electron-winstaller": false
+  }
+}
