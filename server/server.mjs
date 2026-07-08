@@ -25,6 +25,7 @@ import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
+import { summarizeArgs } from "./core/redaction.mjs";
 
 // ----------------------------------------------------------------------------
 // Configuration (all overridable via environment variables)
@@ -358,17 +359,16 @@ async function handleMcp(req, res) {
 
 const SERVER_INSTRUCTIONS = [
   "Local Coding Agent Pro MCP: tool calls cross a tunnel, so start with workspace_snapshot or workspace_doctor, then use read_many/search_text/run_commands to batch work; prefer dedicated tools over run_command. Policy may require token approval via AGENT_APPROVAL_TOKEN for risky delete/install/network/mutating-git actions; exact action batches can use request_approval_batch. File tools are root-confined, but commands are not an OS sandbox.",
-  "WORKFLOW: (1) Start with workspace_snapshot for repo/git/test/policy in one call; use workspace_doctor when you need operational readiness. (2) Use preview_patch/validate_patch before apply_patch for large edits. (3) After editing source, run quality_gate, run_tests, or run_changed_tests. (4) Before marking 'done', call review_diff and session_report. (5) For multi-step tasks, use task_plan + decision_log to maintain state across chats.",
+  "WORKFLOW: (1) Start with workspace_snapshot for repo/git/policy in one call; use workspace_doctor when you need operational readiness. (2) Use read_many/search_text/repo_symbols to gather context in batches. (3) Use preview_patch/validate_patch before apply_patch for large edits. (4) Before marking 'done', call review_diff and session_report; run tests/build/lint only when the user explicitly asks. (5) For multi-step tasks, use task_plan + decision_log to maintain state across chats.",
   "POLICY: Check policy_status if you are unsure whether an action is allowed. In balanced policy, risky operations (delete, install, network, mutating git, risky processes) require one-time approval with request_approval/request_approval_batch followed by approve_request using AGENT_APPROVAL_TOKEN.",
   "Use the DEDICATED tools instead of run_command for these — they are faster and cheaper:",
   "- Find files by name -> find_files (NOT dir/ls/Get-ChildItem/where).",
   "- Search file contents -> search_text with context= (NOT grep/findstr/Select-String).",
   "- Read files -> read_many for several or targeted ranges, read_file for one (NOT type/cat/Get-Content).",
-  "- Run independent checks -> run_commands once; keep parallel=false unless commands cannot race.",
   "- Map a repo -> workspace_snapshot first, repo_map for deeper tree detail; use workspace_doctor for readiness checks.",
   "- Create/edit files -> write_file / apply_patch (with a unified `diff` for many edits) (NOT echo>/Set-Content).",
   "- Symbol search -> repo_symbols for function/class definitions.",
-  "Reserve run_command for builds, tests, installs, running programs, and git. When you do use it:",
+  "Reserve run_command for explicit user-requested builds, tests, installs, running programs, and git. When you do use it:",
   "- Pass the `cwd` argument instead of cd/pushd.",
   "- Combine multiple steps into ONE command (&& on cmd/bash, ; on PowerShell).",
   "- Keep output small with tail_lines/head_lines/max_output_chars.",
@@ -1005,6 +1005,35 @@ async function buildTree(start, maxDepth, maxEntries) {
   }
   await walk(start, 1);
   return { tree, dirs, files };
+}
+
+async function buildTreeFast(start, maxDepth, maxEntries) {
+  const listed = await listRepoFilesFast(start, Math.max(maxEntries * 4, 4000));
+  if (listed.engine === "scan") return { ...(await buildTree(start, maxDepth, maxEntries)), engine: "scan" };
+  const tree = [];
+  const dirs = new Set();
+  const files = [];
+  const seen = new Set();
+  const addEntry = (entry) => {
+    if (tree.length >= maxEntries || seen.has(entry)) return;
+    seen.add(entry);
+    tree.push(entry);
+  };
+  for (const abs of listed.files) {
+    const rel = path.relative(start, abs).split(path.sep).join("/");
+    const parts = rel.split("/").filter(Boolean);
+    for (let i = 1; i < parts.length && i <= maxDepth; i++) {
+      const dirAbs = path.resolve(start, ...parts.slice(0, i));
+      dirs.add(dirAbs);
+      addEntry(`${dirAbs}${path.sep}`);
+    }
+    if (parts.length <= maxDepth) {
+      files.push(abs);
+      addEntry(abs);
+    }
+    if (tree.length >= maxEntries) break;
+  }
+  return { tree, dirs: [...dirs], files, engine: listed.engine };
 }
 
 // ----------------------------------------------------------------------------
@@ -1892,6 +1921,21 @@ async function findFiles(start, glob, limit) {
   return { engine: "scan", files };
 }
 
+async function listRepoFilesFast(start, limit = 4000) {
+  if (RG_BIN) {
+    const out = await spawnFilesList(RG_BIN, ["--files"], start);
+    if (out !== null) {
+      return { engine: "ripgrep", files: out.slice(0, limit).map((p) => path.resolve(start, p)) };
+    }
+  }
+  const gitOut = await spawnFilesList("git", ["-C", start, "ls-files", "--cached", "--others", "--exclude-standard"], null);
+  if (gitOut !== null) {
+    return { engine: "git", files: gitOut.slice(0, limit).map((p) => path.resolve(start, p)) };
+  }
+  const all = await listEntries(start, { recursive: true, limit });
+  return { engine: "scan", files: all.filter((e) => e.type === "file").map((e) => resolvePath(e.path)) };
+}
+
 function spawnFilesList(file, args, cwd) {
   return new Promise((resolve) => {
     let out = "";
@@ -2293,39 +2337,6 @@ function trimOutput(s, { tail_lines, head_lines, max_chars }) {
   return s.length > max_chars ? s.slice(0, max_chars) : s;
 }
 
-// Fields whose values may carry secrets or large payloads — redact them in the
-// audit log so data/audit.log never stores tokens/keys/file contents/commands.
-const AUDIT_REDACT = /^(content|body|diff|patch|old_text|new_text|command|token|approval_token|mcp_auth_token|control_plane_api_key|key|secret|password|authorization|auth|api[_-]?key)$/i;
-
-// Recursively redact sensitive keys at ANY depth (e.g. apply_patch.operations[].content,
-// .edits[].new_text) and truncate long strings, so data/audit.log never stores secrets.
-function redactDeep(v, depth = 0) {
-  if (depth > 8) return "…";
-  if (Array.isArray(v)) return v.slice(0, 50).map((x) => redactDeep(x, depth + 1));
-  if (v && typeof v === "object") {
-    const o = {};
-    for (const [k, val] of Object.entries(v)) {
-      if (AUDIT_REDACT.test(k)) {
-        o[k] = typeof val === "string" ? `[redacted ${val.length} chars]` : "[redacted]";
-      } else {
-        o[k] = redactDeep(val, depth + 1);
-      }
-    }
-    return o;
-  }
-  if (typeof v === "string" && v.length > 200) return `${v.slice(0, 200)}…(${v.length} chars)`;
-  return v;
-}
-
-function summarizeArgs(args) {
-  try {
-    const s = JSON.stringify(redactDeep(args || {}));
-    return s.length > 800 ? `${s.slice(0, 800)}…` : s;
-  } catch {
-    return "<unserializable>";
-  }
-}
-
 function log(message) {
   console.log(`${isoNow()} ${message}`);
 }
@@ -2436,6 +2447,78 @@ async function writeRepoIndex(data) {
 function indexFresh(idx) {
   if (!idx || !idx.ts) return false;
   return Date.now() - new Date(idx.ts).getTime() < REPO_INDEX_TTL_MS;
+}
+
+function indexMatches(idx, rootDir) {
+  return Boolean(idx && idx.rootDir === rootDir && indexFresh(idx));
+}
+
+function treeCovers(idx, { depth, maxEntries }) {
+  const tree = idx?.tree;
+  if (!tree || Number(tree.depth || 0) < depth) return false;
+  if (tree.truncated && Number(tree.max_entries || tree.entries?.length || 0) < maxEntries) return false;
+  return true;
+}
+
+function symbolsCover(idx, { maxFiles, maxMatches }) {
+  const meta = idx?.symbols_meta;
+  return Array.isArray(idx?.symbols) &&
+    Number(meta?.max_files || 0) >= maxFiles &&
+    Number(meta?.max_matches || 0) >= maxMatches;
+}
+
+function relEntriesToAbs(rootDir, entries = []) {
+  return entries.filter((entry) => !entry.endsWith("/")).map((entry) => path.resolve(rootDir, entry));
+}
+
+async function buildRepoIndex(rootDir, { depth = 3, maxEntries = 800, includeSymbols = false, symbolMaxFiles = 500, symbolMaxMatches = 2000, refresh = false } = {}) {
+  const cached = await readRepoIndex();
+  if (!refresh && indexMatches(cached, rootDir) && treeCovers(cached, { depth, maxEntries })) {
+    if (includeSymbols && !symbolsCover(cached, { maxFiles: symbolMaxFiles, maxMatches: symbolMaxMatches })) {
+      const seeded = relEntriesToAbs(rootDir, cached.tree?.entries || []);
+      cached.symbols = await scanSymbols(rootDir, { files: seeded, maxFiles: symbolMaxFiles, maxMatches: symbolMaxMatches }).catch(() => []);
+      cached.symbols_meta = { max_files: symbolMaxFiles, max_matches: symbolMaxMatches };
+      cached.ts = isoNow();
+      cached.generated_at = cached.ts;
+      await writeRepoIndex(cached);
+    }
+    return { ...cached, cached: true };
+  }
+
+  const [profile, treePack, importantFiles, git] = await Promise.all([
+    detectProjectProfile(rootDir).catch(() => ({ languages: [], frameworks: [], packageManagers: [], manifests: [], scripts: {} })),
+    buildTreeFast(rootDir, depth, maxEntries),
+    collectImportantFiles(rootDir).catch(() => []),
+    compactGitStatus(rootDir)
+  ]);
+  const treeEntries = treePack.tree.map(toRel).slice(0, maxEntries);
+  const symbols = includeSymbols
+    ? await scanSymbols(rootDir, { files: treePack.files, maxFiles: symbolMaxFiles, maxMatches: symbolMaxMatches }).catch(() => [])
+    : undefined;
+  const ts = isoNow();
+  const next = {
+    ts,
+    generated_at: ts,
+    rootDir,
+    ttl_ms: REPO_INDEX_TTL_MS,
+    profile: { rootDir, ...profile },
+    tree: {
+      depth,
+      max_entries: maxEntries,
+      engine: treePack.engine || "scan",
+      dirs: treePack.dirs.length,
+      files: treePack.files.length,
+      truncated: treePack.tree.length >= maxEntries,
+      entries: treeEntries
+    },
+    important_files: importantFiles.slice(0, 120),
+    git,
+    ripgrep_status: { available: Boolean(RG_BIN), bin: RG_BIN || null },
+    symbols,
+    symbols_meta: includeSymbols ? { max_files: symbolMaxFiles, max_matches: symbolMaxMatches } : undefined
+  };
+  await writeRepoIndex(next);
+  return { ...next, cached: false };
 }
 
 async function detectProjectProfile(rootDir) {
@@ -2558,11 +2641,23 @@ async function detectProjectProfile(rootDir) {
 }
 
 // Scan source files for symbol definitions
-async function scanSymbols(rootDir, { maxFiles = 500, maxMatches = 2000 } = {}) {
+async function scanSymbols(rootDir, { maxFiles = 500, maxMatches = 2000, files: seededFiles = null } = {}) {
   const symbols = [];
-  const exts = new Set([".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".py"]);
+  const files = [];
+  const exts = new Set([".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".py", ".cs"]);
+  const preferredDirs = new Map([
+    ["src", 0],
+    ["app", 1],
+    ["lib", 2],
+    ["server", 3],
+    ["scripts", 4],
+    ["test", 5],
+    ["tests", 5],
+    ["evals", 6],
+    ["skills", 7],
+    ["experiments", 50]
+  ]);
 
-  // JS/TS patterns
   const jsPatterns = [
     { re: /^(?:export\s+)?(?:async\s+)?function\s+(\w+)\s*\(/, kind: "function" },
     { re: /^(?:export\s+)?class\s+(\w+)(?:\s|{)/, kind: "class" },
@@ -2570,59 +2665,83 @@ async function scanSymbols(rootDir, { maxFiles = 500, maxMatches = 2000 } = {}) 
     { re: /^\s{0,4}(\w+)\s*\([^)]*\)\s*\{/, kind: "method" },
     { re: /router\.(get|post|put|patch|delete)\s*\(\s*['"`]([^'"`]+)/, kind: "route" }
   ];
-  // Python patterns
   const pyPatterns = [
     { re: /^def\s+(\w+)\s*\(/, kind: "function" },
     { re: /^class\s+(\w+)(?:\s|:)/, kind: "class" },
     { re: /^\s{4}def\s+(\w+)\s*\(/, kind: "method" }
   ];
+  const csPatterns = [
+    { re: /^\s*(?:public|private|protected|internal)?\s*(?:sealed\s+|partial\s+|static\s+)?(?:class|record|struct|interface)\s+(\w+)/, kind: "class" },
+    { re: /^\s*(?:public|private|protected|internal)\s+(?:static\s+|async\s+)?[\w<>\[\],?\s]+\s+(\w+)\s*\(/, kind: "method" }
+  ];
 
-  async function walk(dir, depth) {
-    if (depth > 6) return;
+  function entryRank(entry) {
+    if (!entry.isDirectory()) return 100;
+    return preferredDirs.get(entry.name) ?? 20;
+  }
+
+  function symbolRank(symbol) {
+    const rel = symbol.path.split(path.sep).join("/");
+    const first = rel.split("/")[0] || "";
+    const firstRank = preferredDirs.get(first) ?? 20;
+    const depth = rel.split("/").length;
+    const kindRank = { route: 0, function: 1, class: 2, const: 3, method: 4 }[symbol.kind] ?? 5;
+    return firstRank * 1000 + depth * 20 + kindRank;
+  }
+
+  async function collectFiles(dir, depth) {
+    if (depth > 6 || files.length >= maxFiles) return;
     let entries;
     try {
       entries = await readdir(dir, { withFileTypes: true });
     } catch {
       return;
     }
-    for (const e of entries) {
-      if (symbols.length >= maxMatches) return;
-      if (SKIP_DIRS.has(e.name)) continue;
-      const abs = path.join(dir, e.name);
-      if (e.isDirectory()) {
-        await walk(abs, depth + 1);
-      } else if (exts.has(path.extname(e.name).toLowerCase())) {
-        if (symbols.length >= maxMatches) return;
-        let content;
-        try {
-          content = await readFile(abs, "utf8");
-        } catch {
-          continue;
-        }
-        const isPy = e.name.endsWith(".py");
-        const patterns = isPy ? pyPatterns : jsPatterns;
-        const lines = content.split(/\r?\n/);
-        let fileCount = 0;
-        for (let i = 0; i < lines.length && symbols.length < maxMatches; i++) {
-          for (const pat of patterns) {
-            const m = lines[i].match(pat.re);
-            if (m) {
-              let name = m[1];
-              if (pat.kind === "route") name = `${m[1].toUpperCase()} ${m[2]}`;
-              if (name && name.length < 60) {
-                symbols.push({ path: toRel(abs), line: i + 1, kind: pat.kind, name });
-                fileCount++;
-                break; // one match per line
-              }
-            }
-          }
+    entries.sort((a, b) => entryRank(a) - entryRank(b) || a.name.localeCompare(b.name));
+    for (const entry of entries) {
+      if (files.length >= maxFiles) return;
+      if (SKIP_DIRS.has(entry.name)) continue;
+      const abs = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        await collectFiles(abs, depth + 1);
+      } else if (exts.has(path.extname(entry.name).toLowerCase())) {
+        files.push(abs);
+      }
+    }
+  }
+
+  if (Array.isArray(seededFiles) && seededFiles.length) {
+    files.push(...seededFiles.map((f) => path.isAbsolute(f) ? f : path.resolve(rootDir, f)).filter((f) => exts.has(path.extname(f).toLowerCase())).slice(0, maxFiles));
+  } else {
+    await collectFiles(rootDir, 1);
+  }
+
+  for (const abs of files) {
+    if (symbols.length >= maxMatches) break;
+    let content;
+    try {
+      content = await readFile(abs, "utf8");
+    } catch {
+      continue;
+    }
+    const ext = path.extname(abs).toLowerCase();
+    const patterns = ext === ".py" ? pyPatterns : ext === ".cs" ? csPatterns : jsPatterns;
+    const lines = content.split(/\r?\n/);
+    for (let i = 0; i < lines.length && symbols.length < maxMatches; i++) {
+      for (const pattern of patterns) {
+        const match = lines[i].match(pattern.re);
+        if (!match) continue;
+        let name = match[1];
+        if (pattern.kind === "route") name = `${match[1].toUpperCase()} ${match[2]}`;
+        if (name && name.length < 60) {
+          symbols.push({ path: toRel(abs), line: i + 1, kind: pattern.kind, name });
+          break;
         }
       }
     }
   }
 
-  await walk(rootDir, 1);
-  return symbols;
+  return symbols.sort((a, b) => symbolRank(a) - symbolRank(b) || a.path.localeCompare(b.path) || a.line - b.line);
 }
 
 async function collectImportantFiles(rootDir) {
@@ -2711,31 +2830,26 @@ async function compactGitStatus(rootDir) {
   };
 }
 
-function recommendNextActions({ profile, git, commands, truncated }) {
+function recommendNextActions({ profile, git, truncated }) {
   const actions = [];
   if (git?.is_git_repo && git.count > 0) {
-    actions.push("Review current changes with git_diff/change_summary before large edits.");
+    actions.push("Review current changes with review_diff or git_diff before large edits.");
   }
   if (truncated) {
     actions.push("Call repo_map with a narrower path/depth if you need more tree detail.");
   }
-  if (commands?.test || commands?.build || commands?.lint) {
-    const gates = [commands.lint && "lint", commands.typecheck && "typecheck", commands.test && "test", commands.build && "build"].filter(Boolean).join(",");
-    actions.push(`Use quality_gate after edits (include: ${gates}) for one structured verification report.`);
-  } else {
-    actions.push("No test/build/lint command detected; provide explicit command when verifying changes.");
-  }
   if ((profile?.languages || []).length) {
     actions.push(`Detected stack: ${(profile.languages || []).join(", ")}${profile.frameworks?.length ? ` / ${(profile.frameworks || []).join(", ")}` : ""}.`);
   }
-  actions.push("Prefer read_many/search_text/apply_patch batches to keep MCP tunnel round-trips low.");
+  actions.push("Use recommended_reads with read_many to gather context in one call.");
+  actions.push("Use search_text and repo_symbols before opening many files.");
+  actions.push("Prefer apply_patch batches to keep MCP tunnel round-trips low.");
   return actions.slice(0, 6);
 }
 
 async function collectWorkspaceDoctor(rootDir) {
-  const [profile, commands, git, importantFiles] = await Promise.all([
+  const [profile, git, importantFiles] = await Promise.all([
     detectProjectProfile(rootDir).catch(() => ({ languages: [], frameworks: [], packageManagers: [], manifests: [], scripts: {} })),
-    getTestCommandsMerged(rootDir).catch((error) => ({ error: error?.message || String(error) })),
     compactGitStatus(rootDir),
     collectImportantFiles(rootDir).catch(() => [])
   ]);
@@ -2744,14 +2858,13 @@ async function collectWorkspaceDoctor(rootDir) {
 
   add("version", "pass", "Version", `Local Coding Agent ${VERSION} (${PRODUCT_TIER})`, null);
   add("roots", ROOTS.length ? "pass" : "fail", "Workspace roots", `${ROOTS.length} root(s) configured`, ROOTS.length ? null : "Set AGENT_WORKSPACE to the repository you want to work on.");
-  add("policy", AGENT_POLICY === "balanced" ? "pass" : "warn", "Policy", `AGENT_POLICY=${AGENT_POLICY}`, AGENT_POLICY === "full" ? "Use balanced for day-to-day work unless this is trusted automation." : AGENT_POLICY === "strict" ? "Strict is safe but write/test flows will be blocked." : null);
+  add("policy", AGENT_POLICY === "balanced" ? "pass" : "warn", "Policy", `AGENT_POLICY=${AGENT_POLICY}`, AGENT_POLICY === "full" ? "Use balanced for day-to-day work unless this is trusted automation." : AGENT_POLICY === "strict" ? "Strict is safe but write flows will be blocked." : null);
   add("mode", MODE === "safe" ? "pass" : "warn", "Command mode", `AGENT_MODE=${MODE}`, MODE === "full" ? "Use safe mode for normal agent work; full is best reserved for trusted automation." : null);
   add("auth", AUTH_TOKEN ? "pass" : "warn", "MCP auth", AUTH_TOKEN ? "Bearer auth enabled" : "MCP_AUTH_TOKEN is not set", AUTH_TOKEN ? null : "Set MCP_AUTH_TOKEN if exposing beyond the private OpenAI tunnel/local loopback.");
   add("origin", ALLOWED_ORIGINS.size ? "warn" : "pass", "Browser Origin policy", ALLOWED_ORIGINS.size ? `${ALLOWED_ORIGINS.size} browser origin(s) allowed` : "Browser-origin MCP calls blocked by default", ALLOWED_ORIGINS.size ? "Keep MCP_ALLOWED_ORIGINS as narrow as possible." : null);
   add("rg", RG_BIN ? "pass" : "warn", "ripgrep", RG_BIN ? `Found: ${RG_BIN}` : "ripgrep not found; search_text falls back to slower scanning", RG_BIN ? null : "Install ripgrep for faster searches on large repos.");
   add("git", git.is_git_repo ? "pass" : "warn", "Git repository", git.is_git_repo ? `${git.clean ? "clean" : `${git.count} changed file(s)`} on ${git.branch || "unknown branch"}` : "Not a git repo or git unavailable", git.is_git_repo ? (git.count > 0 ? "Review current changes before large edits." : null) : "Initialize git or run from the repository root for better change tracking.");
   add("profile", (profile.languages || []).length ? "pass" : "warn", "Project profile", (profile.languages || []).length ? `Detected ${(profile.languages || []).join(", ")}` : "No language/framework detected", (profile.languages || []).length ? null : "Add standard manifests or verify AGENT_WORKSPACE points at the repo root.");
-  add("commands", commands?.test || commands?.build || commands?.lint ? "pass" : "warn", "Quality commands", JSON.stringify(commands), commands?.test || commands?.build || commands?.lint ? null : "Add package scripts or use quality_gate with explicit commands through profile.testCommands.");
   const hasReadme = importantFiles.some((f) => /^README/i.test(path.basename(f.path)));
   const hasSecurityDoc = importantFiles.some((f) => /^security\.md$/i.test(path.basename(f.path)));
   add("docs", hasReadme ? "pass" : "warn", "README", "README presence checked", hasReadme ? null : "Add a README so agents and contributors understand the repo quickly.");
@@ -2772,7 +2885,6 @@ async function collectWorkspaceDoctor(rootDir) {
     checks,
     summary: { pass: checks.filter((c) => c.status === "pass").length, warn, fail },
     profile,
-    commands,
     git,
     important_files: importantFiles.slice(0, 80),
     recommendations: checks.filter((c) => c.recommendation).map((c) => ({ id: c.id, recommendation: c.recommendation })).slice(0, 10)
@@ -2844,13 +2956,155 @@ async function buildSessionReport(rootDir) {
   };
 }
 
+function recommendedReads({ importantFiles = [], treeEntries = [] }) {
+  const picked = [];
+  const add = (file, reason) => {
+    if (!file || picked.some((item) => item.path === file)) return;
+    picked.push({ path: file, reason });
+  };
+  for (const item of importantFiles) {
+    const base = path.basename(item.path).toLowerCase();
+    if (base.startsWith("readme")) add(item.path, "project overview");
+    else if (base === "agents.md") add(item.path, "agent/project conventions");
+    else if (base === "package.json") add(item.path, "scripts and dependencies");
+    else if (base === "pyproject.toml" || base === "go.mod" || base === "cargo.toml" || base.endsWith(".csproj") || base.endsWith(".sln")) add(item.path, "main project manifest");
+  }
+  for (const entry of treeEntries) {
+    if (picked.length >= 8) break;
+    const normalized = entry.split(path.sep).join("/");
+    if (/^(src|app|lib|server)\/(index|main|app|server)\.(js|ts|tsx|jsx|mjs|py|cs)$/.test(normalized)) {
+      add(entry, "likely entrypoint");
+    }
+  }
+  return picked.slice(0, 8);
+}
+
+function isSourceFile(file) {
+  return /\.(js|ts|mjs|cjs|jsx|tsx|py|cs|go|rs|java)$/i.test(file) && !isTestFile(file);
+}
+
+function isTestFile(file) {
+  return /(^|\/)(__tests__|tests?|spec)\//i.test(file) || /\.(test|spec)\.(js|ts|mjs|cjs|jsx|tsx)$/i.test(file) || /(^|\/)test_.*\.py$/i.test(file) || /_test\.(py|go|rs)$/i.test(file);
+}
+
+function isConfigFile(file) {
+  return /(^|\/)(package\.json|tsconfig.*\.json|pyproject\.toml|go\.mod|cargo\.toml|.*\.csproj|.*\.sln|dockerfile|docker-compose.*\.ya?ml|\.github\/workflows\/.*\.ya?ml)$/i.test(file);
+}
+
+function parseDiffSummary(diff) {
+  const files = new Map();
+  let current = null;
+  let newLine = 0;
+  for (const line of diff.split(/\r?\n/)) {
+    if (line.startsWith("+++ ")) {
+      const file = line.slice(4).replace(/^b\//, "").trim();
+      if (file === "/dev/null") {
+        current = null;
+      } else {
+        current = files.get(file) || { path: file, added: 0, deleted: 0 };
+        files.set(file, current);
+      }
+      continue;
+    }
+    if (line.startsWith("@@ ")) {
+      const match = line.match(/@@ -\d+(?:,\d+)? \+(\d+)/);
+      newLine = match ? Number(match[1]) - 1 : 0;
+      continue;
+    }
+    if (!current) continue;
+    if (line.startsWith("+") && !line.startsWith("+++")) {
+      newLine++;
+      current.added++;
+    } else if (line.startsWith("-") && !line.startsWith("---")) {
+      current.deleted++;
+    } else if (!line.startsWith("\\")) {
+      newLine++;
+    }
+  }
+  const changed = [...files.values()];
+  return {
+    changed_files: changed.length,
+    source_files: changed.filter((f) => isSourceFile(f.path)).length,
+    test_files: changed.filter((f) => isTestFile(f.path)).length,
+    config_files: changed.filter((f) => isConfigFile(f.path)).length,
+    added_lines: changed.reduce((sum, f) => sum + f.added, 0),
+    deleted_lines: changed.reduce((sum, f) => sum + f.deleted, 0),
+    files: changed.slice(0, 80)
+  };
+}
+
+function analyzeDiff(diff) {
+  const findings = [];
+  const summary = parseDiffSummary(diff);
+  let currentFile = null;
+  let lineNum = 0;
+  let addedStreak = 0;
+  let streakStart = 0;
+  const secretPatterns = [
+    { name: "private key", re: /-----BEGIN [A-Z ]*PRIVATE KEY-----/ },
+    { name: "github token", re: /gh[pousr]_[A-Za-z0-9]{20,}/ },
+    { name: "slack token", re: /xox[baprs]-[0-9A-Za-z-]{20,}/ },
+    { name: "api key assignment", re: /\b(api[_-]?key|token|secret|password)\b\s*[:=]\s*['"][^'"]{10,}['"]/i }
+  ];
+  const addFinding = (priority, loc, issue) => {
+    if (findings.length < 150) findings.push({ priority, loc, issue });
+  };
+
+  for (const line of diff.split(/\r?\n/)) {
+    if (line.startsWith("+++ ")) {
+      currentFile = line.slice(4).replace(/^b\//, "").trim();
+      addedStreak = 0;
+      streakStart = 0;
+      continue;
+    }
+    if (line.startsWith("@@ ")) {
+      const match = line.match(/@@ -\d+(?:,\d+)? \+(\d+)/);
+      lineNum = match ? Number(match[1]) - 1 : 0;
+      addedStreak = 0;
+      streakStart = 0;
+      continue;
+    }
+    if (line.startsWith("+") && !line.startsWith("+++")) {
+      lineNum++;
+      addedStreak++;
+      if (addedStreak === 1) streakStart = lineNum;
+      const added = line.slice(1);
+      const loc = `${currentFile}:${lineNum}`;
+      for (const pattern of secretPatterns) {
+        if (pattern.re.test(added)) addFinding("P1", loc, `Secret-like ${pattern.name} added`);
+      }
+      if (/\beval\s*\(/.test(added)) addFinding("P1", loc, "eval() usage; potential code injection");
+      if (/\binnerHTML\s*=/.test(added)) addFinding("P1", loc, "innerHTML assignment; potential XSS");
+      if (/dangerouslySetInnerHTML/.test(added)) addFinding("P1", loc, "dangerouslySetInnerHTML; XSS risk");
+      if (/\bchild_process\.exec\s*\(/.test(added) || /\brequire\(['"]child_process['"]\)/.test(added)) addFinding("P1", loc, "child_process exec; command injection risk");
+      if (/\b(subprocess\.(Popen|run|call)|os\.system)\s*\(/.test(added)) addFinding("P2", loc, "Process execution added; verify arguments are trusted");
+      if (/\bconsole\.(log|debug|info)\s*\(/.test(added)) addFinding("P2", loc, "console.log/debug left in code");
+      if (/\bdebugger\b/.test(added)) addFinding("P2", loc, "debugger statement");
+      const todo = added.match(/\b(TODO|FIXME|HACK)\b/);
+      if (todo) addFinding(todo[1].toUpperCase() === "HACK" ? "P3" : "P2", loc, `${todo[1]} comment added`);
+      if (addedStreak === 101) addFinding("P3", `${currentFile}:~${streakStart}`, "Very large added block (>100 lines); consider splitting");
+    } else if (line.startsWith("-") && !line.startsWith("---")) {
+      // Deleted lines do not advance the new-file line counter.
+    } else if (!line.startsWith("\\")) {
+      lineNum++;
+      addedStreak = 0;
+    }
+  }
+
+  if (summary.source_files > 0 && summary.test_files === 0) {
+    const firstSource = summary.files.find((file) => isSourceFile(file.path));
+    if (firstSource) addFinding("P3", firstSource.path, "Source file changed without a corresponding test file change");
+  }
+  return { summary, findings };
+}
+
 function registerRepoIntelTools(mcp) {
   reg(
     mcp,
     "workspace_doctor",
     {
       title: "Workspace doctor Pro",
-      description: "PRO readiness check for the active workspace: roots, safety settings, auth/origin posture, git state, ripgrep, project profile, quality commands, docs, score, and recommendations.",
+      description: "PRO readiness check for the active workspace: roots, safety settings, auth/origin posture, git state, ripgrep, project profile, docs, score, and recommendations.",
       inputSchema: {
         path: z.string().optional().describe("Root dir to inspect (default: primary root).")
       }
@@ -2866,7 +3120,7 @@ function registerRepoIntelTools(mcp) {
     "workspace_snapshot",
     {
       title: "Workspace snapshot Pro",
-      description: "PRO one-call briefing: roots, mode/policy, project profile, important files, compact tree, git status, test/build/lint commands, and recommended next actions. Use this FIRST to reduce MCP round-trips.",
+      description: "PRO one-call briefing: roots, mode/policy, project profile, important files, compact tree, git status, ripgrep/cache status, recommended reads, and next actions. Use this FIRST to reduce MCP round-trips.",
       inputSchema: {
         path: z.string().optional().describe("Root dir to inspect (default: primary root)."),
         depth: z.number().int().min(1).max(5).optional().describe("Tree depth (default 3)."),
@@ -2877,25 +3131,12 @@ function registerRepoIntelTools(mcp) {
     },
     async ({ path: rel = ".", depth = 3, max_entries = 350, include_symbols = false, refresh = false }) => {
       const rootDir = resolvePath(rel);
-      const idx = await readRepoIndex();
-      let profile;
-      if (!refresh && idx && indexFresh(idx) && idx.profile && idx.profile.rootDir === rootDir) {
-        profile = idx.profile;
-      } else {
-        profile = await detectProjectProfile(rootDir);
-        const newIdx = { ...(idx || {}), ts: isoNow(), profile: { rootDir, ...profile } };
-        await writeRepoIndex(newIdx);
-        profile = newIdx.profile;
-      }
-
-      const [{ tree, dirs, files }, importantFiles, commands, git, symbols] = await Promise.all([
-        buildTree(rootDir, depth, max_entries),
-        collectImportantFiles(rootDir),
-        getTestCommandsMerged(rootDir).catch((error) => ({ error: error?.message || String(error) })),
-        compactGitStatus(rootDir),
-        include_symbols ? scanSymbols(rootDir, { maxFiles: 120, maxMatches: 80 }).catch(() => []) : Promise.resolve([])
-      ]);
-      const next = recommendNextActions({ profile, git, commands, treeCount: tree.length, truncated: tree.length >= max_entries });
+      const idx = await buildRepoIndex(rootDir, { depth, maxEntries: max_entries, includeSymbols: include_symbols, refresh });
+      const profile = idx.profile || {};
+      const tree = idx.tree || { depth, dirs: 0, files: 0, truncated: false, entries: [] };
+      const importantFiles = idx.important_files || [];
+      const git = idx.git || {};
+      const next = recommendNextActions({ profile, git, truncated: tree.truncated });
 
       return jsonResult({
         kind: "workspace_snapshot",
@@ -2921,17 +3162,27 @@ function registerRepoIntelTools(mcp) {
           manifests: profile.manifests || [],
           scripts: profile.scripts || {}
         },
-        commands,
         git,
         tree: {
-          depth,
-          dirs: dirs.length,
-          files: files.length,
-          truncated: tree.length >= max_entries,
-          entries: tree.map(toRel).slice(0, max_entries)
+          depth: tree.depth || depth,
+          engine: tree.engine || "scan",
+          dirs: tree.dirs || 0,
+          files: tree.files || 0,
+          truncated: Boolean(tree.truncated),
+          entries: (tree.entries || []).slice(0, max_entries)
         },
         important_files: importantFiles.slice(0, 80),
-        symbols: include_symbols ? symbols.slice(0, 80) : undefined,
+        symbols: include_symbols ? (idx.symbols || []).slice(0, 80) : undefined,
+        ripgrep: idx.ripgrep_status || { available: Boolean(RG_BIN), bin: RG_BIN || null },
+        cache: { hit: Boolean(idx.cached), generated_at: idx.generated_at || idx.ts, ttl_seconds: Math.floor(REPO_INDEX_TTL_MS / 1000) },
+        recommended_reads: recommendedReads({ importantFiles, treeEntries: tree.entries || [] }),
+        workflow_hints: [
+          "Use read_many for recommended_reads or multiple targeted files.",
+          "Use search_text with context before reading many files.",
+          "Use repo_symbols for navigation.",
+          "Use review_diff for a fast local heuristic review.",
+          "Run tests/build/lint only when explicitly requested."
+        ],
         next_best_actions: next
       });
     }
@@ -2984,7 +3235,7 @@ function registerRepoIntelTools(mcp) {
     "repo_map",
     {
       title: "Repo map",
-      description: "One call: directory tree + detected manifests + package scripts + project profile summary. Use this FIRST to understand a repo. Results cached 5 min.",
+      description: "One call: fast directory tree + detected manifests + project profile summary. Uses ripgrep file listing when available. Results cached 5 min.",
       inputSchema: {
         path: z.string().optional(),
         depth: z.number().int().min(1).max(6).optional(),
@@ -2994,35 +3245,28 @@ function registerRepoIntelTools(mcp) {
     },
     async ({ path: rel = ".", depth = 3, max_entries = 800, refresh = false }) => {
       const rootDir = resolvePath(rel);
-      const idx = await readRepoIndex();
-      let profile;
-      if (!refresh && idx && indexFresh(idx) && idx.profile && idx.profile.rootDir === rootDir) {
-        profile = idx.profile;
-      } else {
-        profile = await detectProjectProfile(rootDir);
-        const newIdx = { ...(idx || {}), ts: isoNow(), profile: { rootDir, ...profile } };
-        await writeRepoIndex(newIdx);
-        profile = newIdx.profile;
-      }
-
-      const { tree, dirs, files } = await buildTree(rootDir, depth, max_entries);
-      const manifests = files.filter((f) => MANIFEST_NAMES.has(path.basename(f).toLowerCase()));
+      const idx = await buildRepoIndex(rootDir, { depth, maxEntries: max_entries, includeSymbols: false, refresh });
+      const tree = idx.tree || { depth, dirs: 0, files: 0, truncated: false, entries: [] };
+      const manifests = (tree.entries || []).filter((f) => MANIFEST_NAMES.has(path.basename(f).toLowerCase()));
+      const profile = idx.profile || {};
 
       return jsonResult({
         root: toRel(rootDir),
-        depth,
-        dirs: dirs.length,
-        files: files.length,
-        truncated: tree.length >= max_entries,
-        manifests: manifests.map(toRel).slice(0, 100),
-        tree: tree.map(toRel),
+        depth: tree.depth || depth,
+        engine: tree.engine || "scan",
+        dirs: tree.dirs || 0,
+        files: tree.files || 0,
+        truncated: Boolean(tree.truncated),
+        manifests: manifests.slice(0, 100),
+        tree: (tree.entries || []).slice(0, max_entries),
         profile: {
-          languages: profile.languages,
-          frameworks: profile.frameworks,
-          packageManagers: profile.packageManagers,
+          languages: profile.languages || [],
+          frameworks: profile.frameworks || [],
+          packageManagers: profile.packageManagers || [],
           scripts: profile.scripts || {}
         },
-        cached: !refresh && idx && indexFresh(idx)
+        cached: Boolean(idx.cached),
+        ripgrep: idx.ripgrep_status || { available: Boolean(RG_BIN), bin: RG_BIN || null }
       });
     }
   );
@@ -3042,9 +3286,21 @@ function registerRepoIntelTools(mcp) {
     },
     async ({ path: rel = ".", max_files = 500, max_matches = 2000, kind }) => {
       const rootDir = resolvePath(rel);
-      const symbols = await scanSymbols(rootDir, { maxFiles: max_files, maxMatches: max_matches });
+      const idx = await buildRepoIndex(rootDir, {
+        depth: 6,
+        maxEntries: Math.max(max_files * 2, 800),
+        includeSymbols: true,
+        symbolMaxFiles: max_files,
+        symbolMaxMatches: max_matches,
+        refresh: false
+      });
+      let symbols = Array.isArray(idx.symbols) ? idx.symbols : [];
+      if (symbols.length > max_matches || max_files < 500) {
+        const seeded = relEntriesToAbs(rootDir, idx.tree?.entries || []).slice(0, max_files);
+        symbols = await scanSymbols(rootDir, { files: seeded, maxFiles: max_files, maxMatches: max_matches });
+      }
       const filtered = kind ? symbols.filter((s) => s.kind === kind) : symbols;
-      return jsonResult({ count: filtered.length, symbols: filtered });
+      return jsonResult({ count: filtered.length, cached: Boolean(idx.cached), symbols: filtered.slice(0, max_matches) });
     }
   );
 
@@ -3067,7 +3323,10 @@ function registerRepoIntelTools(mcp) {
         age_seconds: Math.floor(ageMs / 1000),
         ttl_seconds: Math.floor(REPO_INDEX_TTL_MS / 1000),
         profile_languages: idx.profile?.languages || [],
-        profile_frameworks: idx.profile?.frameworks || []
+        profile_frameworks: idx.profile?.frameworks || [],
+        tree_engine: idx.tree?.engine || null,
+        ripgrep: idx.ripgrep_status || { available: Boolean(RG_BIN), bin: RG_BIN || null },
+        symbols_cached: Array.isArray(idx.symbols)
       });
     }
   );
@@ -3471,7 +3730,7 @@ function registerTestRunnerTools(mcp) {
     "quality_gate",
     {
       title: "Quality gate Pro",
-      description: "PRO structured verification runner. Detects and runs lint/typecheck/test/build commands in order, with compact pass/fail summaries. Use after code edits before reporting done.",
+      description: "Manual verification runner. Detects and runs lint/typecheck/test/build commands only when explicitly requested, with compact pass/fail summaries.",
       inputSchema: {
         cwd: z.string().optional(),
         include: z.array(z.enum(["lint", "typecheck", "test", "build"])).optional().describe("Gate order/subset. Default: lint,typecheck,test,build."),
@@ -3685,86 +3944,12 @@ function registerReviewTools(mcp) {
         return jsonResult({ ok: false, error: "Not a git repo or git error.", diff: "" });
       }
       const diff = result.stdout || "";
-      if (!diff.trim()) return jsonResult({ ok: true, verdict: "CLEAN", findings: [], message: "No changes in working tree." });
+      if (!diff.trim()) return jsonResult({ ok: true, verdict: "CLEAN", summary: { changed_files: 0, source_files: 0, test_files: 0, config_files: 0, added_lines: 0, deleted_lines: 0, files: [] }, findings: [], message: "No changes in working tree." });
 
-      const findings = [];
-      // Parse diff to check added lines
-      let currentFile = null;
-      let lineNum = 0;
-      const diffLines = diff.split(/\r?\n/);
-
-      for (let i = 0; i < diffLines.length; i++) {
-        const line = diffLines[i];
-        if (line.startsWith("--- ") || line.startsWith("+++ ")) {
-          if (line.startsWith("+++ ")) {
-            currentFile = line.slice(4).replace(/^b\//, "").trim();
-          }
-          continue;
-        }
-        if (line.startsWith("@@ ")) {
-          const m = line.match(/@@ -\d+(?:,\d+)? \+(\d+)/);
-          lineNum = m ? Number(m[1]) - 1 : 0;
-          continue;
-        }
-        if (line.startsWith("+") && !line.startsWith("+++")) {
-          lineNum++;
-          const added = line.slice(1);
-          const loc = `${currentFile}:${lineNum}`;
-
-          // P1: dangerous calls
-          if (/\beval\s*\(/.test(added)) findings.push({ priority: "P1", loc, issue: "eval() usage — potential code injection" });
-          if (/\binnerHTML\s*=/.test(added)) findings.push({ priority: "P1", loc, issue: "innerHTML assignment — potential XSS" });
-          if (/dangerouslySetInnerHTML/.test(added)) findings.push({ priority: "P1", loc, issue: "dangerouslySetInnerHTML — XSS risk" });
-          if (/\bchild_process\.exec\s*\(/.test(added) || /\brequire\(['"]child_process['"]\)/.test(added)) {
-            findings.push({ priority: "P1", loc, issue: "child_process exec — command injection risk" });
-          }
-          if (/\bexec\s*\(/.test(added) && /python|subprocess/.test(added)) {
-            findings.push({ priority: "P1", loc, issue: "exec() in Python context — verify input is sanitized" });
-          }
-
-          // P2: code hygiene
-          if (/\bconsole\.(log|debug|info)\s*\(/.test(added)) {
-            findings.push({ priority: "P2", loc, issue: "console.log/debug left in code" });
-          }
-          if (/\bdebugger\b/.test(added)) findings.push({ priority: "P2", loc, issue: "debugger statement" });
-          if (/\b(TODO|FIXME)\b/.test(added)) findings.push({ priority: "P2", loc, issue: `${added.match(/\b(TODO|FIXME)\b/)[1]} comment added` });
-
-          // P3: style
-          if (/\bHACK\b/.test(added)) findings.push({ priority: "P3", loc, issue: "HACK comment added" });
-        } else if (!line.startsWith("-")) {
-          lineNum++;
-        }
-      }
-
-      // Check large added functions (>100 consecutive added lines)
-      let addedStreak = 0;
-      let streakStart = null;
-      let streakFile = null;
-      for (const line of diffLines) {
-        if (line.startsWith("+++ ")) { streakFile = line.slice(4).replace(/^b\//, ""); streakStart = 0; addedStreak = 0; }
-        else if (line.startsWith("@@ ")) { addedStreak = 0; }
-        else if (line.startsWith("+") && !line.startsWith("+++")) {
-          addedStreak++;
-          if (addedStreak === 1) streakStart = lineNum;
-          if (addedStreak > 100) {
-            findings.push({ priority: "P3", loc: `${streakFile}:~${streakStart}`, issue: "Very large added block (>100 lines) — consider splitting" });
-            addedStreak = -9999; // don't repeat
-          }
-        } else if (!line.startsWith("-")) {
-          addedStreak = 0;
-        }
-      }
-
-      // Check changed src without test change
-      const changedSrc = diffLines.filter((l) => l.startsWith("+++ ")).map((l) => l.slice(4).replace(/^b\//, "")).filter((f) => /\.(js|ts|mjs|cjs|jsx|tsx|py)$/.test(f) && !/test|spec|__tests__/.test(f));
-      const changedTest = diffLines.filter((l) => l.startsWith("+++ ")).map((l) => l.slice(4).replace(/^b\//, "")).filter((f) => /test|spec|__tests__/.test(f));
-      if (changedSrc.length > 0 && changedTest.length === 0) {
-        findings.push({ priority: "P3", loc: changedSrc[0], issue: "Source file changed without a corresponding test file change" });
-      }
-
+      const { summary, findings } = analyzeDiff(diff);
       const p1 = findings.filter((f) => f.priority === "P1").length;
       const verdict = p1 > 0 ? "BLOCK" : findings.length > 0 ? "WARN" : "PASS";
-      return jsonResult({ ok: verdict !== "BLOCK", verdict, findings_count: findings.length, findings: findings.slice(0, 100), p1, p2: findings.filter((f) => f.priority === "P2").length, p3: findings.filter((f) => f.priority === "P3").length });
+      return jsonResult({ ok: verdict !== "BLOCK", verdict, summary, findings_count: findings.length, findings: findings.slice(0, 100), p1, p2: findings.filter((f) => f.priority === "P2").length, p3: findings.filter((f) => f.priority === "P3").length });
     }
   );
 
@@ -3998,7 +4183,7 @@ const POLICY_RULES = {
     allowed_patterns: []
   },
   balanced: {
-    description: "Read + edit + test/build allowed. Delete, install, network commands need approval.",
+    description: "Read + edit allowed. Manual verification tools remain available only when explicitly requested. Delete, install, network commands need approval.",
     blocked: [],
     needs_approval: [],
     dangerous_patterns: [
@@ -4372,7 +4557,7 @@ function registerProfileTools(mcp) {
         return jsonResult({
           loaded: false,
           path: path.join(PRIMARY_ROOT, ".agent", "profile.json"),
-          message: "No profile.json found. Create one to configure test commands, ignored dirs, conventions, and policy.",
+          message: "No profile.json found. Create one to configure ignored dirs, conventions, policy, and optional manual test commands.",
           schema: {
             mode: "safe|full",
             policy: "strict|balanced|full",
@@ -4403,7 +4588,7 @@ function registerProfileTools(mcp) {
   );
 }
 
-// Helper: get test commands merging profile overrides
+// Helper for explicit manual verification tools: get test commands merging profile overrides.
 async function getTestCommandsMerged(rootDir) {
   const detected = await detectTestCommands(rootDir);
   if (WORKSPACE_PROFILE && WORKSPACE_PROFILE.testCommands) {

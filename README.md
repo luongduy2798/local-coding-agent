@@ -32,9 +32,9 @@ bash scripts/lca setup
 scripts\lca.cmd setup
 ```
 
-Wizard sẽ cho chọn hệ điều hành, kiểm tra prerequisite, mở trang tạo Tunnel/API key, tạo/cập nhật `.env.local`, cài dependency trong `server/`, tải `tools/tunnel-client`, ghi config local và cài global command `lca`.
+Wizard sẽ tự detect hệ điều hành hiện tại, kiểm tra prerequisite, mở trang tạo Tunnel/API key, tạo/cập nhật `.env.local`, cài dependency trong `server/`, tải `tools/tunnel-client`, ghi config local và cài global command `lca`.
 
-Nếu bạn chọn hệ điều hành khác máy đang chạy, wizard chỉ in hướng dẫn cho OS đó và không chạy command sai nền tảng.
+Nếu cần xem hướng dẫn cho hệ điều hành khác máy đang chạy, dùng `node scripts/local-coding-agent.mjs setup --choose-os`.
 
 ## Dùng Hằng Ngày
 

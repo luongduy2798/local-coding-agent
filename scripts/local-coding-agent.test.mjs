@@ -6,6 +6,8 @@ import {
   normalize,
   normalizeTunnelArch,
   parseDotEnv,
+  ripgrepInstallCommand,
+  setupSecurityDefaults,
   tunnelAssetName,
   tunnelAssetUrl
 } from "./local-coding-agent.mjs";
@@ -48,4 +50,26 @@ test("parses and merges dotenv without dropping unrelated values", () => {
 test("empty dotenv merge starts with the requested key", () => {
   const merged = mergeDotEnvText("", { CONTROL_PLANE_TUNNEL_ID: "tunnel_new" });
   assert.equal(merged, "CONTROL_PLANE_TUNNEL_ID=tunnel_new\n");
+});
+
+test("setup defaults to safe and balanced unless flags override", () => {
+  assert.deepEqual(setupSecurityDefaults({}), { mode: "safe", policy: "balanced" });
+  assert.deepEqual(setupSecurityDefaults({ mode: "full", policy: "full" }), { mode: "full", policy: "full" });
+});
+
+test("selects ripgrep install command by platform", () => {
+  assert.deepEqual(ripgrepInstallCommand({ id: "darwin" }, ["brew"]), {
+    label: "Homebrew",
+    command: "brew",
+    args: ["install", "ripgrep"]
+  });
+  assert.deepEqual(ripgrepInstallCommand({ id: "win32" }, ["winget"]), {
+    label: "winget",
+    command: "winget",
+    args: ["install", "--id", "BurntSushi.ripgrep.MSVC", "-e"]
+  });
+  const linux = ripgrepInstallCommand({ id: "linux" }, ["apt-get"]);
+  assert.equal(linux.label, "apt-get");
+  assert.match(`${linux.command} ${linux.args.join(" ")}`, /apt-get .*install -y ripgrep|apt-get install -y ripgrep/);
+  assert.equal(ripgrepInstallCommand({ id: "linux" }, []), null);
 });

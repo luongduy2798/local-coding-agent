@@ -119,6 +119,7 @@ Tunnel options:
   --profile-dir <path>        Tunnel profile directory
   --runtime-key-env <name>    Env var containing Runtime API key
   --runtime-key <key>         Runtime API key for this process
+  --choose-os                 With setup, show OS picker instead of auto-detect
   --save                      With setup, save provided options to config
   --force                     With update, continue even when local changes exist
 
@@ -142,10 +143,12 @@ Usage:
   scripts\\lca.cmd setup          # Windows
   node scripts/local-coding-agent.mjs setup
 
-The wizard uses only Node.js built-ins. It checks prerequisites, creates or
-updates .env.local, installs server dependencies, downloads tunnel-client when
-possible, writes local CLI config, installs the global lca command, and prints
-health/status checks.
+The wizard uses only Node.js built-ins. It auto-detects the current OS, checks
+prerequisites, creates or updates .env.local, installs server dependencies,
+downloads tunnel-client when possible, writes local CLI config, installs the
+global lca command, and prints health/status checks.
+
+Use --choose-os only when you want instruction mode for another OS.
 `);
 }
 
@@ -219,6 +222,9 @@ function parseArgs(argv) {
       case "--runtime-key":
         flags.runtimeKey = next();
         break;
+      case "--choose-os":
+        flags.chooseOs = true;
+        break;
       case "--save":
         flags.save = true;
         break;
@@ -281,6 +287,13 @@ export function normalize(opts) {
   out.node = out.node || "node";
   out.noTunnel = toBool(out.noTunnel);
   return out;
+}
+
+export function setupSecurityDefaults(flags = {}) {
+  return {
+    mode: flags.mode || "safe",
+    policy: flags.policy || "balanced"
+  };
 }
 
 function toBool(value, fallback = false) {
@@ -419,6 +432,25 @@ export function tunnelAssetName(version = DEFAULT_TUNNEL_VERSION, tunnelOs = det
 
 export function tunnelAssetUrl(version = DEFAULT_TUNNEL_VERSION, tunnelOs = detectSetupPlatform().tunnelOs, arch = normalizeTunnelArch()) {
   return `${TUNNEL_RELEASE_BASE}/${version}/${tunnelAssetName(version, tunnelOs, arch)}`;
+}
+
+export function ripgrepInstallCommand(platform = detectSetupPlatform(), availableCommands = []) {
+  const has = (name) => availableCommands.includes(name);
+  if (platform.id === "darwin") {
+    return has("brew") ? { label: "Homebrew", command: "brew", args: ["install", "ripgrep"] } : null;
+  }
+  if (platform.id === "win32") {
+    return has("winget") ? { label: "winget", command: "winget", args: ["install", "--id", "BurntSushi.ripgrep.MSVC", "-e"] } : null;
+  }
+  if (platform.id === "linux" || platform.id === "wsl") {
+    const sudo = typeof process.getuid === "function" && process.getuid() === 0 ? [] : has("sudo") ? ["sudo"] : [];
+    if (has("apt-get")) return { label: "apt-get", command: sudo[0] || "apt-get", args: [...sudo.slice(1), ...(sudo[0] ? ["apt-get"] : []), "install", "-y", "ripgrep"] };
+    if (has("dnf")) return { label: "dnf", command: sudo[0] || "dnf", args: [...sudo.slice(1), ...(sudo[0] ? ["dnf"] : []), "install", "-y", "ripgrep"] };
+    if (has("yum")) return { label: "yum", command: sudo[0] || "yum", args: [...sudo.slice(1), ...(sudo[0] ? ["yum"] : []), "install", "-y", "ripgrep"] };
+    if (has("pacman")) return { label: "pacman", command: sudo[0] || "pacman", args: [...sudo.slice(1), ...(sudo[0] ? ["pacman"] : []), "-S", "--noconfirm", "ripgrep"] };
+    if (has("zypper")) return { label: "zypper", command: sudo[0] || "zypper", args: [...sudo.slice(1), ...(sudo[0] ? ["zypper"] : []), "--non-interactive", "install", "ripgrep"] };
+  }
+  return null;
 }
 
 function sha256(buffer) {
@@ -615,7 +647,60 @@ function npmCommand() {
   return process.platform === "win32" ? "npm.cmd" : "npm";
 }
 
-async function checkPrerequisites() {
+async function commandAvailable(command) {
+  const res = await capture(command, ["--version"]);
+  return res.code === 0;
+}
+
+async function detectAvailableCommands(commands) {
+  const found = [];
+  for (const command of commands) {
+    if (await commandAvailable(command)) found.push(command);
+  }
+  return found;
+}
+
+function ripgrepManualInstallHint(platform = detectSetupPlatform()) {
+  if (platform.id === "darwin") return "Install manually: brew install ripgrep";
+  if (platform.id === "win32") return "Install manually: winget install BurntSushi.ripgrep.MSVC";
+  if (platform.id === "linux" || platform.id === "wsl") return "Install manually with your package manager, e.g. sudo apt-get install -y ripgrep";
+  return "Install ripgrep from https://github.com/BurntSushi/ripgrep";
+}
+
+async function ensureRipgrep(platform = detectSetupPlatform()) {
+  const existing = await capture(process.platform === "win32" ? "rg.exe" : "rg", ["--version"]);
+  if (existing.code === 0) {
+    console.log(`OK ${existing.stdout.split(/\r?\n/)[0]}`);
+    return true;
+  }
+  console.log("WARN ripgrep not found; attempting install because it makes repo search much faster.");
+  const candidates = platform.id === "darwin"
+    ? ["brew"]
+    : platform.id === "win32"
+      ? ["winget"]
+      : ["sudo", "apt-get", "dnf", "yum", "pacman", "zypper"];
+  const install = ripgrepInstallCommand(platform, await detectAvailableCommands(candidates));
+  if (!install) {
+    console.log(`WARN no supported ripgrep installer found. ${ripgrepManualInstallHint(platform)}`);
+    return false;
+  }
+  try {
+    await runChecked("ripgrep", install.command, install.args);
+  } catch (error) {
+    console.log(`WARN ripgrep install via ${install.label} failed: ${error.message}`);
+    console.log(ripgrepManualInstallHint(platform));
+    return false;
+  }
+  const verify = await capture(process.platform === "win32" ? "rg.exe" : "rg", ["--version"]);
+  if (verify.code === 0) {
+    console.log(`OK ${verify.stdout.split(/\r?\n/)[0]}`);
+    return true;
+  }
+  console.log(`WARN ripgrep install finished but rg is not on PATH. ${ripgrepManualInstallHint(platform)}`);
+  return false;
+}
+
+async function checkPrerequisites(platform = detectSetupPlatform()) {
   const nodeMajor = Number(process.versions.node.split(".")[0]);
   if (!Number.isInteger(nodeMajor) || nodeMajor < 18) {
     throw new Error(`Node.js 18+ is required. Current version: ${process.version}`);
@@ -626,6 +711,7 @@ async function checkPrerequisites() {
   console.log(`OK npm ${npm.stdout.trim()}`);
   const git = await capture(process.platform === "win32" ? "git.exe" : "git", ["--version"]);
   console.log(git.code === 0 ? `OK ${git.stdout.trim()}` : "WARN git not found; repo-root detection will use the current folder.");
+  await ensureRipgrep(platform);
 }
 
 function openUrl(url) {
@@ -874,17 +960,20 @@ async function setup(flags) {
   const rl = createPromptInterface({ input, output });
   try {
     const host = detectSetupPlatform();
-    const selected = await promptChoice(rl, "Choose target operating system", setupPlatformChoices(), host.id);
+    const selected = flags.chooseOs
+      ? await promptChoice(rl, "Choose target operating system", setupPlatformChoices(), host.id)
+      : host;
     if (!platformMatchesHost(selected, host)) {
       printInstructionMode(selected, host);
       return;
     }
 
+    console.log(`Detected OS: ${selected.label}`);
     console.log(`Config file: ${CONFIG_PATH}`);
     console.log(`Environment file: ${ENV_LOCAL_PATH}`);
 
     printStep(1, 8, "Check prerequisites");
-    await checkPrerequisites();
+    await checkPrerequisites(selected);
 
     printStep(2, 8, "Choose tunnel mode");
     const useTunnel = await promptYesNo(rl, "Use ChatGPT Web tunnel", !cfg.noTunnel);
@@ -916,12 +1005,13 @@ async function setup(flags) {
     printStep(4, 8, "Configure agent defaults");
     cfg.node = cfg.node || "node";
     cfg.workspace = await promptLine(rl, "Default workspace root", cfg.workspace || process.cwd());
-    cfg.mode = (await promptChoice(rl, "Mode", [{ id: "safe", label: "safe" }, { id: "full", label: "full" }], cfg.mode)).id;
+    const securityDefaults = setupSecurityDefaults(flags);
+    cfg.mode = (await promptChoice(rl, "Mode", [{ id: "safe", label: "safe" }, { id: "full", label: "full" }], securityDefaults.mode)).id;
     cfg.policy = (await promptChoice(rl, "Policy", [
       { id: "balanced", label: "balanced" },
       { id: "strict", label: "strict" },
       { id: "full", label: "full" }
-    ], cfg.policy)).id;
+    ], securityDefaults.policy)).id;
     cfg.port = await promptLine(rl, "MCP port", cfg.port || DEFAULT_PORT);
     cfg.extraRoots = flags.extraRoots ?? cfg.extraRoots ?? "";
     cfg.authToken = flags.authToken ?? cfg.authToken ?? "";
@@ -1014,10 +1104,11 @@ async function capture(command, args, options = {}) {
       shell: false,
       stdio: ["ignore", "pipe", "pipe"]
     });
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
-    child.stdout.on("data", (chunk) => { stdout += chunk; });
-    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.stdout?.setEncoding("utf8");
+    child.stderr?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk) => { stdout += chunk; });
+    child.stderr?.on("data", (chunk) => { stderr += chunk; });
+    child.on("error", (error) => resolveCapture({ code: 127, signal: null, stdout, stderr: error.message }));
     child.on("exit", (code, signal) => resolveCapture({ code, signal, stdout, stderr }));
   });
 }
@@ -1231,6 +1322,8 @@ async function doctor(flags) {
   add("workspace", Boolean(opts.workspace && existsSync(opts.workspace)), opts.workspace || "(not set)");
   add("tunnel-client", opts.noTunnel || existsSync(opts.tunnelBin), opts.noTunnel ? "disabled" : opts.tunnelBin);
   add("runtime key", opts.noTunnel || Boolean(process.env[opts.runtimeKeyEnv] || opts.runtimeKey), opts.noTunnel ? "disabled" : opts.runtimeKeyEnv);
+  const rg = await capture(process.platform === "win32" ? "rg.exe" : "rg", ["--version"]);
+  add("ripgrep", rg.code === 0, rg.code === 0 ? rg.stdout.split(/\r?\n/)[0] : "missing; run lca setup to auto-install or install ripgrep manually");
   const health = await readJson(`http://127.0.0.1:${opts.port}/healthz`);
   add("server health", Boolean(health), health ? `${health.version} pid=${health.pid || "?"}` : "offline");
   for (const check of checks) {

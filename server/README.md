@@ -18,7 +18,8 @@ ChatGPT sessions; it is a normal MCP connector you authorize.
 | Execute | `run_command`, `run_commands` (bounded batch; cmd/powershell/bash/sh/zsh) |
 | Processes | `proc_start`, `proc_list`, `proc_output`, `proc_stop` |
 | Git | `git` |
-| Pro | `workspace_snapshot`, `workspace_doctor`, `quality_gate`, `session_report` |
+| Pro | `workspace_snapshot`, `workspace_doctor`, `repo_map`, `repo_symbols`, `review_diff`, `session_report` |
+| Manual verification | `detect_test_commands`, `quality_gate`, `run_tests`, `run_build`, `run_lint`, `run_changed_tests` |
 | Notes & session | `save_note`, `list_notes`, `checkpoint`, `resume` |
 
 ## Run
@@ -66,6 +67,14 @@ npm start
 | `AGENT_MAX_BATCH_READ_CHARS` | `500000` | Combined text cap for one `read_many` response. |
 | `AGENT_READ_DEFAULT` | `30000` | Default chars `read_file` returns (raise per-call via `max_chars`). Keeps payloads + context small. |
 | `AGENT_CMD_OUTPUT_DEFAULT` | `20000` | Default chars of command output returned (use `tail_lines`/`head_lines`/`max_output_chars`). |
+
+`ripgrep` (`rg`) is auto-installed by `lca setup` when a supported package
+manager is available. It is not required, but `search_text`, `find_files`, and
+repo mapping are much faster with it.
+
+Fast workflow note: test/build/lint tools are kept for explicit manual use, but
+`workspace_snapshot` and default guidance do not recommend running them
+automatically.
 
 ## Test
 
