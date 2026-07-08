@@ -58,7 +58,6 @@ async function startServer(workspace) {
         env: {
           ...process.env,
           PORT: String(EVAL_PORT),
-          DASHBOARD_PORT: "0",
           AGENT_WORKSPACE: workspace,
           AGENT_MODE: "safe",
           AGENT_POLICY: "full"

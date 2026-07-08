@@ -5,43 +5,42 @@
 
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync
+} from "node:fs";
 import { chmod, readFile, writeFile } from "node:fs/promises";
-import { createInterface } from "node:readline/promises";
+import os from "node:os";
+import { emitKeypressEvents } from "node:readline";
+import { createInterface as createPromptInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { basename, dirname, join, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(SCRIPT_DIR, "..");
 const SERVER_DIR = join(REPO_ROOT, "server");
 const SERVER_SCRIPT = "server.mjs";
+const ENV_LOCAL_PATH = join(REPO_ROOT, ".env.local");
+const ENV_EXAMPLE_PATH = join(REPO_ROOT, ".env.example");
 const CONFIG_PATH = process.env.LCA_CONFIG_PATH || defaultConfigPath();
 const PID_PATH = join(dirname(CONFIG_PATH), "processes.json");
 const LOG_PATH = join(dirname(CONFIG_PATH), "launcher.log");
+const DEFAULT_PORT = "8789";
+const DEFAULT_TUNNEL_VERSION = process.env.TUNNEL_CLIENT_VERSION || "v0.0.10";
+const TUNNEL_RELEASE_BASE = "https://github.com/openai/tunnel-client/releases/download";
+const KEY_URLS = [
+  "https://platform.openai.com/settings/organization/tunnels",
+  "https://platform.openai.com/settings/organization/api-keys"
+];
 
-const DEFAULTS = {
-  node: process.env.NODE || "node",
-  workspace: process.env.AGENT_WORKSPACE || "",
-  extraRoots: process.env.AGENT_EXTRA_ROOTS || "",
-  mode: process.env.AGENT_MODE || "safe",
-  policy: process.env.AGENT_POLICY || "balanced",
-  port: process.env.PORT || "8787",
-  dashboardPort: process.env.DASHBOARD_PORT || "8790",
-  authToken: process.env.MCP_AUTH_TOKEN || "",
-  tunnelBin:
-    process.env.TUNNEL_BIN ||
-    join(REPO_ROOT, "tools", process.platform === "win32" ? "tunnel-client.exe" : "tunnel-client"),
-  profile: process.env.TUNNEL_PROFILE || "local-coding-agent",
-  profileDir: process.env.TUNNEL_PROFILE_DIR || join(REPO_ROOT, "tools", "profiles"),
-  tunnelId: process.env.CONTROL_PLANE_TUNNEL_ID || process.env.TUNNEL_ID || "",
-  organizationId: process.env.OPENAI_ORGANIZATION || process.env.OPENAI_ORG_ID || "",
-  runtimeKeyEnv: "CONTROL_PLANE_API_KEY",
-  runtimeKey: "",
-  tunnelHealthPort: process.env.TUNNEL_HEALTH_PORT || "8788",
-  openWebUi: process.env.OPEN_TUNNEL_WEB_UI !== "0",
-  noTunnel: false
-};
+loadRepoEnvIntoProcess();
 
 function defaultConfigPath() {
   const home = process.env.HOME || process.env.USERPROFILE || ".";
@@ -54,19 +53,48 @@ function defaultConfigPath() {
   return join(process.env.XDG_CONFIG_HOME || join(home, ".config"), "LocalCodingAgent", "cli-config.json");
 }
 
+function defaultOptions() {
+  loadRepoEnvIntoProcess();
+  return {
+    node: process.env.NODE || "node",
+    workspace: process.env.AGENT_WORKSPACE || "",
+    extraRoots: process.env.AGENT_EXTRA_ROOTS || "",
+    mode: process.env.AGENT_MODE || "safe",
+    policy: process.env.AGENT_POLICY || "balanced",
+    port: process.env.PORT || DEFAULT_PORT,
+    authToken: process.env.MCP_AUTH_TOKEN || "",
+    tunnelBin:
+      process.env.TUNNEL_BIN ||
+      defaultTunnelBinForPlatform(detectSetupPlatform()),
+    profile: process.env.TUNNEL_PROFILE || "local-coding-agent",
+    profileDir: process.env.TUNNEL_PROFILE_DIR || join(REPO_ROOT, "tools", "profiles"),
+    tunnelId: process.env.CONTROL_PLANE_TUNNEL_ID || process.env.TUNNEL_ID || "",
+    organizationId: process.env.OPENAI_ORGANIZATION || process.env.OPENAI_ORG_ID || "",
+    runtimeKeyEnv: "CONTROL_PLANE_API_KEY",
+    runtimeKey: "",
+    tunnelHealthPort: process.env.TUNNEL_HEALTH_PORT || "8788",
+    openWebUi: process.env.OPEN_TUNNEL_WEB_UI !== "0",
+    noTunnel: false
+  };
+}
+
 function usage() {
   console.log(`Local Coding Agent universal CLI
 
 Usage:
+  lca
+  lca run
   node scripts/local-coding-agent.mjs setup [options]
   node scripts/local-coding-agent.mjs install
   node scripts/local-coding-agent.mjs start [options]
   node scripts/local-coding-agent.mjs stop
   node scripts/local-coding-agent.mjs status
+  node scripts/local-coding-agent.mjs workspace
+  node scripts/local-coding-agent.mjs keys
+  node scripts/local-coding-agent.mjs cli
   node scripts/local-coding-agent.mjs doctor
   node scripts/local-coding-agent.mjs profile [options]
   node scripts/local-coding-agent.mjs url
-  node scripts/local-coding-agent.mjs open
   node scripts/local-coding-agent.mjs logs
   node scripts/local-coding-agent.mjs config show|path|set <key> <value>|unset <key>
   node scripts/local-coding-agent.mjs key set|clear
@@ -79,7 +107,6 @@ Common options:
   --mode <safe|full>          Command guardrail mode
   --policy <strict|balanced|full>
   --port <port>               MCP server port
-  --dashboard-port <port>     Dashboard port
   --auth-token <token>        Optional MCP bearer token
   --node <path>               Node executable
   --background                Keep server/tunnel running after this command exits
@@ -101,6 +128,7 @@ Fast path:
   scripts\\lca.cmd setup       # Windows
   bash scripts/lca setup       # macOS/Linux
   node scripts/local-coding-agent.mjs setup
+  lca                         # From any repo, set workspace to git root and run
 
 One-shot examples:
   node scripts/local-coding-agent.mjs start --workspace "C:\\path\\repo" --no-tunnel
@@ -108,8 +136,26 @@ One-shot examples:
 `);
 }
 
+function setupUsage() {
+  console.log(`Local Coding Agent setup wizard
+
+Usage:
+  bash scripts/lca setup          # macOS/Linux/WSL
+  scripts\\lca.cmd setup          # Windows
+  node scripts/local-coding-agent.mjs setup
+
+The wizard uses only Node.js built-ins. It checks prerequisites, creates or
+updates .env.local, installs server dependencies, downloads tunnel-client when
+possible, writes local CLI config, installs the global lca command, and prints
+health/status checks.
+`);
+}
+
 function parseArgs(argv) {
-  if (argv.length === 0 || argv[0] === "--help" || argv[0] === "-h") {
+  if (argv.length === 0) {
+    return { command: "run", rest: [], flags: {} };
+  }
+  if (argv[0] === "--help" || argv[0] === "-h") {
     return { command: "help", rest: [], flags: { help: true } };
   }
   const [command, ...rest] = argv;
@@ -140,9 +186,6 @@ function parseArgs(argv) {
         break;
       case "--port":
         flags.port = next();
-        break;
-      case "--dashboard-port":
-        flags.dashboardPort = next();
         break;
       case "--auth-token":
         flags.authToken = next();
@@ -213,31 +256,32 @@ function readJsonFile(file, fallback) {
 }
 
 function loadConfig() {
-  return { ...DEFAULTS, ...readJsonFile(CONFIG_PATH, {}) };
+  return { ...defaultOptions(), ...readJsonFile(CONFIG_PATH, {}) };
 }
 
 async function saveConfig(cfg) {
   ensureConfigDir();
-  await writeFile(CONFIG_PATH, `${JSON.stringify(cfg, null, 2)}\n`, "utf8");
+  await writeFile(CONFIG_PATH, `${JSON.stringify(stripRuntimeFields(cfg), null, 2)}\n`, "utf8");
   try { await chmod(CONFIG_PATH, 0o600); } catch { /* Windows may ignore POSIX mode. */ }
 }
 
 function effectiveOptions(flags = {}) {
+  loadRepoEnvIntoProcess();
   const cfg = loadConfig();
-  return normalize({ ...DEFAULTS, ...cfg, ...flags });
+  return normalize({ ...defaultOptions(), ...cfg, ...flags });
 }
 
-function normalize(opts) {
+export function normalize(opts) {
   const out = { ...opts };
-  out.port = String(out.port || "8787");
-  out.dashboardPort = String(out.dashboardPort || "8790");
+  out.port = String(out.port || DEFAULT_PORT);
+  delete out.dashboardPort;
   out.tunnelHealthPort = String(out.tunnelHealthPort || "8788");
   out.mode = out.mode || "safe";
   out.policy = out.policy || "balanced";
   out.runtimeKeyEnv = out.runtimeKeyEnv || "CONTROL_PLANE_API_KEY";
   out.profile = out.profile || "local-coding-agent";
   out.profileDir = out.profileDir || join(REPO_ROOT, "tools", "profiles");
-  out.tunnelBin = out.tunnelBin || DEFAULTS.tunnelBin;
+  out.tunnelBin = out.tunnelBin || defaultOptions().tunnelBin;
   out.node = out.node || "node";
   out.noTunnel = toBool(out.noTunnel);
   out.openWebUi = toBool(out.openWebUi, true);
@@ -253,13 +297,144 @@ function toBool(value, fallback = false) {
   return fallback;
 }
 
+export function parseDotEnv(text) {
+  const values = {};
+  for (const rawLine of String(text || "").split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#")) continue;
+    const match = line.match(/^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/);
+    if (!match) continue;
+    let value = match[2].trim();
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+      value = value.slice(1, -1);
+    }
+    values[match[1]] = value.replace(/\\n/g, "\n");
+  }
+  return values;
+}
+
+function readRepoEnvFile() {
+  if (!existsSync(ENV_LOCAL_PATH)) return {};
+  return parseDotEnv(readFileSync(ENV_LOCAL_PATH, "utf8"));
+}
+
+function loadRepoEnvIntoProcess({ override = false } = {}) {
+  const values = readRepoEnvFile();
+  for (const [key, value] of Object.entries(values)) {
+    if (override || process.env[key] === undefined) process.env[key] = value;
+  }
+  return values;
+}
+
+function envValueNeedsQuotes(value) {
+  return /[\s"'#]/.test(String(value));
+}
+
+function formatEnvValue(value) {
+  const text = String(value ?? "");
+  if (!envValueNeedsQuotes(text)) return text;
+  return `"${text.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n")}"`;
+}
+
+export function mergeDotEnvText(existingText, updates) {
+  const keys = new Set(Object.keys(updates).filter((key) => updates[key] !== undefined));
+  const seen = new Set();
+  const lines = String(existingText || "").trim() ? String(existingText || "").split(/\r?\n/) : [];
+  const hadTrailingBlank = lines.length > 1 && lines[lines.length - 1] === "";
+  const nextLines = [];
+  for (const rawLine of lines) {
+    if (!rawLine && rawLine === lines[lines.length - 1] && hadTrailingBlank) continue;
+    const match = rawLine.match(/^(\s*)(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)(\s*=\s*)(.*)$/);
+    if (!match || !keys.has(match[2])) {
+      nextLines.push(rawLine);
+      continue;
+    }
+    seen.add(match[2]);
+    nextLines.push(`${match[1]}${match[2]}${match[3]}${formatEnvValue(updates[match[2]])}`);
+  }
+  for (const key of keys) {
+    if (!seen.has(key)) nextLines.push(`${key}=${formatEnvValue(updates[key])}`);
+  }
+  return `${nextLines.filter((line, index) => line || index < nextLines.length - 1).join("\n")}\n`;
+}
+
+async function writeRepoEnv(updates) {
+  const existing = existsSync(ENV_LOCAL_PATH)
+    ? readFileSync(ENV_LOCAL_PATH, "utf8")
+    : existsSync(ENV_EXAMPLE_PATH)
+      ? readFileSync(ENV_EXAMPLE_PATH, "utf8")
+      : "";
+  await writeFile(ENV_LOCAL_PATH, mergeDotEnvText(existing, updates), "utf8");
+  try { await chmod(ENV_LOCAL_PATH, 0o600); } catch { /* Windows may ignore POSIX mode. */ }
+  loadRepoEnvIntoProcess({ override: true });
+}
+
+function isPlaceholder(value) {
+  const text = String(value || "").trim();
+  return !text || text.endsWith("...") || text.includes("<") || text.includes("your-");
+}
+
+function isWsl() {
+  if (process.platform !== "linux") return false;
+  if (process.env.WSL_DISTRO_NAME || process.env.WSL_INTEROP) return true;
+  try {
+    return /microsoft|wsl/i.test(readFileSync("/proc/version", "utf8"));
+  } catch {
+    return false;
+  }
+}
+
+export function normalizeTunnelArch(arch = os.arch()) {
+  const value = String(arch).toLowerCase();
+  if (["x64", "amd64"].includes(value)) return "amd64";
+  if (["arm64", "aarch64"].includes(value)) return "arm64";
+  throw new Error(`Unsupported CPU architecture for tunnel-client: ${arch}`);
+}
+
+export function detectSetupPlatform() {
+  const raw = process.platform;
+  if (isWsl()) return { id: "wsl", label: "WSL", tunnelOs: "linux", arch: normalizeTunnelArch(), executable: "tunnel-client" };
+  if (raw === "darwin") return { id: "darwin", label: "macOS", tunnelOs: "darwin", arch: normalizeTunnelArch(), executable: "tunnel-client" };
+  if (raw === "linux") return { id: "linux", label: "Linux", tunnelOs: "linux", arch: normalizeTunnelArch(), executable: "tunnel-client" };
+  if (raw === "win32") return { id: "win32", label: "Windows", tunnelOs: "windows", arch: normalizeTunnelArch(), executable: "tunnel-client.exe" };
+  return { id: raw, label: raw, tunnelOs: raw, arch: normalizeTunnelArch(), executable: raw === "win32" ? "tunnel-client.exe" : "tunnel-client" };
+}
+
+function setupPlatformChoices() {
+  const arch = normalizeTunnelArch();
+  return [
+    { id: "darwin", label: "macOS", tunnelOs: "darwin", arch, executable: "tunnel-client" },
+    { id: "linux", label: "Linux", tunnelOs: "linux", arch, executable: "tunnel-client" },
+    { id: "win32", label: "Windows", tunnelOs: "windows", arch, executable: "tunnel-client.exe" },
+    { id: "wsl", label: "WSL", tunnelOs: "linux", arch, executable: "tunnel-client" }
+  ];
+}
+
+function platformMatchesHost(selected, host = detectSetupPlatform()) {
+  return selected.id === host.id;
+}
+
+function defaultTunnelBinForPlatform(platform = detectSetupPlatform()) {
+  return join(REPO_ROOT, "tools", platform.executable || (platform.tunnelOs === "windows" ? "tunnel-client.exe" : "tunnel-client"));
+}
+
+export function tunnelAssetName(version = DEFAULT_TUNNEL_VERSION, tunnelOs = detectSetupPlatform().tunnelOs, arch = normalizeTunnelArch()) {
+  return `tunnel-client-${version}-${tunnelOs}-${normalizeTunnelArch(arch)}.zip`;
+}
+
+export function tunnelAssetUrl(version = DEFAULT_TUNNEL_VERSION, tunnelOs = detectSetupPlatform().tunnelOs, arch = normalizeTunnelArch()) {
+  return `${TUNNEL_RELEASE_BASE}/${version}/${tunnelAssetName(version, tunnelOs, arch)}`;
+}
+
+function sha256(buffer) {
+  return createHash("sha256").update(buffer).digest("hex");
+}
+
 function validate(opts, { requireWorkspace = false, requireTunnel = false } = {}) {
   if (!["safe", "full"].includes(opts.mode)) throw new Error("--mode must be safe or full.");
   if (!["strict", "balanced", "full"].includes(opts.policy)) throw new Error("--policy must be strict, balanced, or full.");
-  for (const [name, value] of [["port", opts.port], ["dashboard-port", opts.dashboardPort]]) {
-    const n = Number(value);
-    if (!Number.isInteger(n) || n < 1 || n > 65535) throw new Error(`${name} must be a TCP port.`);
-  }
+  const port = Number(opts.port);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("port must be a TCP port.");
   if (requireWorkspace) {
     if (!opts.workspace) throw new Error("Missing workspace. Run `setup` or pass --workspace.");
     if (!existsSync(opts.workspace)) throw new Error(`Workspace does not exist: ${opts.workspace}`);
@@ -281,8 +456,7 @@ function configId(opts) {
     policy: opts.policy,
     extraRoots: opts.extraRoots || "",
     authEnabled: Boolean(opts.authToken),
-    port: String(opts.port),
-    dashboardPort: String(opts.dashboardPort)
+    port: String(opts.port)
   });
   return createHash("sha256").update(material).digest("hex").slice(0, 16);
 }
@@ -418,39 +592,315 @@ async function promptSecretUpdate(rl, label, current = "") {
   return answer.trim() || current;
 }
 
-async function setup(flags) {
-  const cfg = effectiveOptions(flags);
-  const rl = createInterface({ input, output });
+async function promptChoice(rl, label, choices, currentId = "") {
+  const defaultIndex = Math.max(0, choices.findIndex((choice) => choice.id === currentId));
+  console.log(label);
+  choices.forEach((choice, index) => {
+    const marker = index === defaultIndex ? " default" : "";
+    console.log(`  ${index + 1}. ${choice.label}${marker}`);
+  });
+  while (true) {
+    const answer = (await rl.question(`Choose [${defaultIndex + 1}]: `)).trim();
+    if (!answer) return choices[defaultIndex];
+    const index = Number(answer) - 1;
+    if (Number.isInteger(index) && choices[index]) return choices[index];
+    const byId = choices.find((choice) => choice.id.toLowerCase() === answer.toLowerCase());
+    if (byId) return byId;
+    console.log("Please enter one of the listed numbers.");
+  }
+}
+
+function printStep(index, total, title) {
+  console.log(`\n[${index}/${total}] ${title}`);
+}
+
+function npmCommand() {
+  return process.platform === "win32" ? "npm.cmd" : "npm";
+}
+
+async function checkPrerequisites() {
+  const nodeMajor = Number(process.versions.node.split(".")[0]);
+  if (!Number.isInteger(nodeMajor) || nodeMajor < 18) {
+    throw new Error(`Node.js 18+ is required. Current version: ${process.version}`);
+  }
+  console.log(`OK node ${process.version}`);
+  const npm = await capture(npmCommand(), ["--version"]);
+  if (npm.code !== 0) throw new Error("npm was not found. Install Node.js with npm, then rerun setup.");
+  console.log(`OK npm ${npm.stdout.trim()}`);
+  const git = await capture(process.platform === "win32" ? "git.exe" : "git", ["--version"]);
+  console.log(git.code === 0 ? `OK ${git.stdout.trim()}` : "WARN git not found; repo-root detection will use the current folder.");
+}
+
+function openUrl(url) {
+  const command = process.platform === "darwin" ? "open" : process.platform === "win32" ? "cmd" : "xdg-open";
+  const args = process.platform === "win32" ? ["/c", "start", "", url] : [url];
   try {
-    console.log(`Config file: ${CONFIG_PATH}`);
-    cfg.node = await promptLine(rl, "Node executable", cfg.node);
-    cfg.workspace = await promptLine(rl, "Workspace root", cfg.workspace);
-    cfg.extraRoots = await promptLine(rl, "Extra roots (; separated, optional)", cfg.extraRoots);
-    cfg.mode = await promptLine(rl, "Mode (safe/full)", cfg.mode);
-    cfg.policy = await promptLine(rl, "Policy (strict/balanced/full)", cfg.policy);
-    cfg.port = await promptLine(rl, "MCP port", cfg.port);
-    cfg.dashboardPort = await promptLine(rl, "Dashboard port", cfg.dashboardPort);
-    cfg.authToken = await promptSecretUpdate(rl, "MCP auth token", cfg.authToken);
-    cfg.noTunnel = await promptYesNo(rl, "Server only, no tunnel", cfg.noTunnel);
-    if (!cfg.noTunnel) {
-      cfg.tunnelBin = await promptLine(rl, "tunnel-client path", cfg.tunnelBin);
-      cfg.profileDir = await promptLine(rl, "Tunnel profile dir", cfg.profileDir);
-      cfg.profile = await promptLine(rl, "Tunnel profile name", cfg.profile);
-      cfg.tunnelId = await promptLine(rl, "Tunnel ID", cfg.tunnelId);
-      cfg.organizationId = await promptLine(rl, "Organization ID (optional)", cfg.organizationId);
-      cfg.runtimeKeyEnv = await promptLine(rl, "Runtime API key env var", cfg.runtimeKeyEnv);
-      const saveKey = await promptYesNo(rl, "Save runtime key in local CLI config? It is not DPAPI-encrypted", Boolean(cfg.runtimeKey));
-      if (saveKey) {
-        cfg.runtimeKey = await promptSecretUpdate(rl, "Runtime API key", cfg.runtimeKey);
-      } else {
-        cfg.runtimeKey = "";
+    const child = spawn(command, args, { stdio: "ignore", detached: true, windowsHide: true });
+    child.unref();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function openKeyPages(rl) {
+  const shouldOpen = await promptYesNo(rl, "Open OpenAI Tunnel and Runtime API key pages now", true);
+  if (!shouldOpen) {
+    for (const url of KEY_URLS) console.log(url);
+    return;
+  }
+  for (const url of KEY_URLS) {
+    if (!openUrl(url)) console.log(url);
+  }
+}
+
+function printInstructionMode(selected, host) {
+  console.log(`\nThis terminal is ${host.label}, but you selected ${selected.label}.`);
+  console.log("Instruction mode only: no setup commands were run for the other OS.");
+  console.log("\nRun this on the target OS instead:");
+  if (selected.id === "win32") console.log("  scripts\\lca.cmd setup");
+  else console.log("  bash scripts/lca setup");
+  console.log("\nExpected tunnel-client asset:");
+  console.log(`  ${tunnelAssetName(DEFAULT_TUNNEL_VERSION, selected.tunnelOs, selected.arch)}`);
+}
+
+async function fetchBuffer(url) {
+  const res = await fetch(url, { headers: { "User-Agent": "local-coding-agent-setup" } });
+  if (!res.ok) throw new Error(`GET ${url} failed: HTTP ${res.status}`);
+  return Buffer.from(await res.arrayBuffer());
+}
+
+async function fetchSha256ForAsset(version, assetName) {
+  const url = `${TUNNEL_RELEASE_BASE}/${version}/SHA256SUMS.txt`;
+  const res = await fetch(url, { headers: { "User-Agent": "local-coding-agent-setup" } });
+  if (!res.ok) return "";
+  const text = await res.text();
+  for (const line of text.split(/\r?\n/)) {
+    const parts = line.trim().split(/\s+/);
+    if (parts.length < 2) continue;
+    const file = parts.slice(1).join(" ").replace(/^\*/, "");
+    if (file === assetName) return parts[0].toLowerCase();
+  }
+  return "";
+}
+
+async function extractZip(zipPath, destDir) {
+  mkdirSync(destDir, { recursive: true });
+  if (process.platform === "win32") {
+    const ps = await capture("powershell.exe", [
+      "-NoProfile",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-Command",
+      `Expand-Archive -LiteralPath ${JSON.stringify(zipPath)} -DestinationPath ${JSON.stringify(destDir)} -Force`
+    ]);
+    if (ps.code === 0) return;
+    const pwsh = await capture("pwsh", [
+      "-NoProfile",
+      "-Command",
+      `Expand-Archive -LiteralPath ${JSON.stringify(zipPath)} -DestinationPath ${JSON.stringify(destDir)} -Force`
+    ]);
+    if (pwsh.code === 0) return;
+    throw new Error("Could not extract zip with PowerShell.");
+  }
+  const unzip = await capture("unzip", ["-qo", zipPath, "-d", destDir]);
+  if (unzip.code !== 0) throw new Error("Could not extract zip. Install unzip or provide tunnel-client manually.");
+}
+
+function findBinary(root, names) {
+  for (const entry of readdirSync(root, { withFileTypes: true })) {
+    const full = join(root, entry.name);
+    if (entry.isDirectory()) {
+      const found = findBinary(full, names);
+      if (found) return found;
+    } else if (names.includes(entry.name)) {
+      return full;
+    }
+  }
+  return "";
+}
+
+async function downloadTunnelClient(selected, destination = defaultTunnelBinForPlatform(selected)) {
+  const version = process.env.TUNNEL_CLIENT_VERSION || DEFAULT_TUNNEL_VERSION;
+  const assetName = tunnelAssetName(version, selected.tunnelOs, selected.arch);
+  const url = tunnelAssetUrl(version, selected.tunnelOs, selected.arch);
+  const tmp = mkdtempSync(join(os.tmpdir(), "lca-tunnel-"));
+  try {
+    mkdirSync(dirname(destination), { recursive: true });
+    const zipPath = join(tmp, assetName);
+    console.log(`Downloading ${assetName}`);
+    const data = await fetchBuffer(url);
+    const expected = await fetchSha256ForAsset(version, assetName);
+    if (expected) {
+      const actual = sha256(data);
+      if (actual !== expected) throw new Error(`SHA256 mismatch for ${assetName}`);
+      console.log("OK sha256 verified");
+    } else {
+      console.log("WARN SHA256SUMS entry not found; continuing without checksum verification.");
+    }
+    writeFileSync(zipPath, data);
+    const extractDir = join(tmp, "extract");
+    await extractZip(zipPath, extractDir);
+    const binary = findBinary(extractDir, [selected.executable, "tunnel-client", "tunnel-client.exe"]);
+    if (!binary) throw new Error(`Could not find ${selected.executable} inside ${assetName}`);
+    writeFileSync(destination, readFileSync(binary));
+    try { await chmod(destination, 0o755); } catch { /* Windows may ignore POSIX mode. */ }
+    console.log(`Installed tunnel-client: ${destination}`);
+    return destination;
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
+function defaultCliBinDir() {
+  const home = process.env.HOME || process.env.USERPROFILE || ".";
+  if (process.platform === "win32") {
+    return join(process.env.LOCALAPPDATA || join(home, "AppData", "Local"), "LocalCodingAgent", "bin");
+  }
+  return join(home, ".local", "bin");
+}
+
+function pathHasDir(dir) {
+  const target = resolve(dir).toLowerCase();
+  return String(process.env.PATH || "")
+    .split(process.platform === "win32" ? ";" : ":")
+    .some((entry) => entry && resolve(entry).toLowerCase() === target);
+}
+
+async function installCliCommand() {
+  const marker = "local-coding-agent lca wrapper";
+  const binDir = process.env.LCA_BIN_DIR || defaultCliBinDir();
+  mkdirSync(binDir, { recursive: true });
+  if (process.platform === "win32") {
+    const cmdPath = join(binDir, "lca.cmd");
+    const psPath = join(binDir, "lca.ps1");
+    for (const target of [cmdPath, psPath]) {
+      if (existsSync(target) && !readFileSync(target, "utf8").includes(marker)) {
+        throw new Error(`Refusing to overwrite: ${target}`);
       }
     }
+    writeFileSync(cmdPath, `@echo off\r\nrem ${marker}\r\nnode "${join(SCRIPT_DIR, "local-coding-agent.mjs")}" %*\r\n`, "utf8");
+    writeFileSync(psPath, `# ${marker}\n& node "${join(SCRIPT_DIR, "local-coding-agent.mjs")}" @args\nexit $LASTEXITCODE\n`, "utf8");
+    console.log(`Installed: ${cmdPath}`);
+    if (!pathHasDir(binDir)) console.log(`Add to PATH: ${binDir}`);
+    return cmdPath;
+  }
+  const target = join(binDir, "lca");
+  if (existsSync(target) && !readFileSync(target, "utf8").includes(marker)) {
+    throw new Error(`Refusing to overwrite: ${target}`);
+  }
+  writeFileSync(target, `#!/usr/bin/env bash\n# ${marker}\nexec node "${join(SCRIPT_DIR, "local-coding-agent.mjs")}" "$@"\n`, "utf8");
+  await chmod(target, 0o755);
+  console.log(`Installed: ${target}`);
+  if (!pathHasDir(binDir)) console.log(`Add to PATH: export PATH="${binDir}:$PATH"`);
+  return target;
+}
+
+async function setup(flags) {
+  if (flags.help) return setupUsage();
+  if (!input.isTTY || !output.isTTY) {
+    throw new Error("Interactive terminal required. Run `lca setup` from a terminal.");
+  }
+  const cfg = effectiveOptions(flags);
+  const rl = createPromptInterface({ input, output });
+  try {
+    const host = detectSetupPlatform();
+    const selected = await promptChoice(rl, "Choose target operating system", setupPlatformChoices(), host.id);
+    if (!platformMatchesHost(selected, host)) {
+      printInstructionMode(selected, host);
+      return;
+    }
+
+    console.log(`Config file: ${CONFIG_PATH}`);
+    console.log(`Environment file: ${ENV_LOCAL_PATH}`);
+
+    printStep(1, 8, "Check prerequisites");
+    await checkPrerequisites();
+
+    printStep(2, 8, "Choose tunnel mode");
+    const useTunnel = await promptYesNo(rl, "Use ChatGPT Web tunnel", !cfg.noTunnel);
+    cfg.noTunnel = !useTunnel;
+    if (useTunnel) await openKeyPages(rl);
+
+    printStep(3, 8, "Configure local environment");
+    const envValues = readRepoEnvFile();
+    if (useTunnel) {
+      cfg.tunnelId = await promptLine(rl, "Tunnel ID", flags.tunnelId || (!isPlaceholder(envValues.CONTROL_PLANE_TUNNEL_ID) ? envValues.CONTROL_PLANE_TUNNEL_ID : cfg.tunnelId));
+      const currentKey = !isPlaceholder(envValues.CONTROL_PLANE_API_KEY) ? envValues.CONTROL_PLANE_API_KEY : "";
+      const runtimeKey = await promptSecretUpdate(rl, "Runtime API key", flags.runtimeKey || currentKey);
+      if (!cfg.tunnelId) throw new Error("Tunnel ID is required when tunnel mode is enabled.");
+      if (!runtimeKey) throw new Error("Runtime API key is required when tunnel mode is enabled.");
+      await writeRepoEnv({
+        CONTROL_PLANE_TUNNEL_ID: cfg.tunnelId,
+        CONTROL_PLANE_API_KEY: runtimeKey
+      });
+      cfg.runtimeKeyEnv = "CONTROL_PLANE_API_KEY";
+      cfg.runtimeKey = "";
+      console.log("Saved .env.local");
+    } else if (!existsSync(ENV_LOCAL_PATH) && existsSync(ENV_EXAMPLE_PATH)) {
+      await writeFile(ENV_LOCAL_PATH, readFileSync(ENV_EXAMPLE_PATH, "utf8"), "utf8");
+      console.log("Created .env.local from .env.example");
+    } else {
+      console.log("Tunnel disabled; .env.local can be filled later.");
+    }
+
+    printStep(4, 8, "Configure agent defaults");
+    cfg.node = await promptLine(rl, "Node executable", cfg.node);
+    cfg.workspace = await promptLine(rl, "Default workspace root", cfg.workspace || process.cwd());
+    cfg.extraRoots = await promptLine(rl, "Extra roots (; separated, optional)", cfg.extraRoots);
+    cfg.mode = (await promptChoice(rl, "Mode", [{ id: "safe", label: "safe" }, { id: "full", label: "full" }], cfg.mode)).id;
+    cfg.policy = (await promptChoice(rl, "Policy", [
+      { id: "balanced", label: "balanced" },
+      { id: "strict", label: "strict" },
+      { id: "full", label: "full" }
+    ], cfg.policy)).id;
+    cfg.port = await promptLine(rl, "MCP port", cfg.port || DEFAULT_PORT);
+    cfg.authToken = await promptSecretUpdate(rl, "MCP auth token", cfg.authToken);
+
+    printStep(5, 8, "Install server dependencies");
+    if (!existsSync(join(SERVER_DIR, "node_modules")) || await promptYesNo(rl, "Reinstall server dependencies", false)) {
+      await installDeps(cfg);
+    } else {
+      console.log("Server dependencies already installed.");
+    }
+
+    printStep(6, 8, "Install tunnel-client");
+    if (useTunnel) {
+      cfg.tunnelBin = cfg.tunnelBin || defaultTunnelBinForPlatform(selected);
+      cfg.tunnelBin = await promptLine(rl, "tunnel-client path", cfg.tunnelBin);
+      if (!existsSync(cfg.tunnelBin) || await promptYesNo(rl, "Download or replace tunnel-client automatically", false)) {
+        try {
+          cfg.tunnelBin = await downloadTunnelClient(selected, cfg.tunnelBin);
+        } catch (error) {
+          console.log(`Download failed: ${error.message}`);
+          cfg.tunnelBin = await promptLine(rl, "Manual tunnel-client path", cfg.tunnelBin);
+          if (!existsSync(cfg.tunnelBin)) throw new Error(`Tunnel client not found: ${cfg.tunnelBin}`);
+        }
+      } else {
+        console.log(`Using existing tunnel-client: ${cfg.tunnelBin}`);
+      }
+      cfg.profileDir = await promptLine(rl, "Tunnel profile dir", cfg.profileDir);
+      cfg.profile = await promptLine(rl, "Tunnel profile name", cfg.profile);
+      cfg.organizationId = await promptLine(rl, "Organization ID (optional)", cfg.organizationId);
+    } else {
+      console.log("Tunnel disabled.");
+    }
+
+    printStep(7, 8, "Save config and install lca command");
+    cfg.runtimeKey = "";
     validate(cfg);
     await saveConfig(stripRuntimeFields(cfg));
-    console.log("Saved.");
-    console.log(`MCP URL: http://127.0.0.1:${cfg.port}/mcp`);
-    console.log(`Dashboard: http://127.0.0.1:${cfg.dashboardPort}/ui`);
+    if (await promptYesNo(rl, "Install or update global lca command", true)) {
+      await installCliCommand();
+    }
+
+    printStep(8, 8, "Verify");
+    await status({ json: false });
+    console.log("\nSetup complete.");
+    console.log("Daily use:");
+    console.log("  cd /path/to/repo");
+    console.log("  lca");
+    console.log(`Health: http://127.0.0.1:${cfg.port}/healthz`);
   } finally {
     rl.close();
   }
@@ -466,6 +916,7 @@ function stripRuntimeFields(cfg) {
   delete out.background;
   delete out.json;
   delete out.force;
+  delete out.dashboardPort;
   return out;
 }
 
@@ -554,7 +1005,6 @@ async function start(flags) {
     const env = {
       ...process.env,
       PORT: String(opts.port),
-      DASHBOARD_PORT: String(opts.dashboardPort),
       AGENT_HOST: "127.0.0.1",
       AGENT_WORKSPACE: opts.workspace,
       AGENT_MODE: opts.mode,
@@ -579,7 +1029,6 @@ async function start(flags) {
   }
 
   console.log(`[server] MCP OK:    http://127.0.0.1:${opts.port}/mcp`);
-  if (String(opts.dashboardPort) !== "0") console.log(`[server] Dashboard: http://127.0.0.1:${opts.dashboardPort}/ui`);
   console.log(`[server] Version:   ${health.version || "unknown"} ${health.tier ? `(${health.tier})` : ""}`);
 
   let tunnelChild = null;
@@ -616,7 +1065,6 @@ async function start(flags) {
   state.updatedAt = new Date().toISOString();
   state.configId = id;
   state.port = opts.port;
-  state.dashboardPort = opts.dashboardPort;
   await writePidState(state);
 
   if (flags.background) {
@@ -665,15 +1113,12 @@ async function status(flags) {
   const opts = effectiveOptions(flags);
   const state = readPidState();
   const health = await readJson(`http://127.0.0.1:${opts.port}/healthz`);
-  const metrics = await readJson(`http://127.0.0.1:${opts.dashboardPort}/metrics`);
   const data = {
     config_path: CONFIG_PATH,
     pid_path: PID_PATH,
     log_path: LOG_PATH,
     mcp_url: `http://127.0.0.1:${opts.port}/mcp`,
-    dashboard_url: `http://127.0.0.1:${opts.dashboardPort}/ui`,
     server: health || null,
-    dashboard: metrics ? { version: metrics.version, tier: metrics.tier, health_score: metrics.health_score } : null,
     pids: {
       server: state.serverPid || null,
       server_alive: isPidAlive(state.serverPid),
@@ -685,7 +1130,6 @@ async function status(flags) {
   else {
     console.log(`Config:    ${data.config_path}`);
     console.log(`MCP URL:   ${data.mcp_url}`);
-    console.log(`Dashboard: ${data.dashboard_url}`);
     console.log(`Server:    ${health ? `ONLINE ${health.version || ""} (${health.mode || "mode?"}/${health.policy || "policy?"}) pid=${health.pid || "?"}` : "offline"}`);
     console.log(`Tunnel:    ${data.pids.tunnel_alive ? `running pid=${data.pids.tunnel}` : "unknown/offline"}`);
   }
@@ -717,6 +1161,7 @@ async function configCommand(rest) {
     const visible = { ...cfg };
     if (visible.runtimeKey) visible.runtimeKey = "<saved>";
     if (visible.authToken) visible.authToken = "<saved>";
+    delete visible.dashboardPort;
     console.log(JSON.stringify(visible, null, 2));
     return;
   }
@@ -726,6 +1171,12 @@ async function configCommand(rest) {
   }
   if (sub === "set") {
     if (!key || valueParts.length === 0) throw new Error("Usage: config set <key> <value>");
+    if (key === "dashboardPort") {
+      delete cfg.dashboardPort;
+      await saveConfig(cfg);
+      console.log("Ignored removed key dashboardPort.");
+      return;
+    }
     cfg[key] = valueParts.join(" ");
     await saveConfig(cfg);
     console.log(`Set ${key}.`);
@@ -751,7 +1202,7 @@ async function keyCommand(rest) {
     return;
   }
   if (sub === "set") {
-    const rl = createInterface({ input, output });
+    const rl = createPromptInterface({ input, output });
     try {
       console.log("Warning: the universal CLI stores this key in a local config file, not DPAPI.");
       cfg.runtimeKey = await promptSecretUpdate(rl, "Runtime API key", cfg.runtimeKey);
@@ -763,6 +1214,123 @@ async function keyCommand(rest) {
     return;
   }
   throw new Error("Usage: key set|clear");
+}
+
+async function detectWorkspaceRoot(cwd = process.cwd()) {
+  const git = process.platform === "win32" ? "git.exe" : "git";
+  const result = await capture(git, ["-C", cwd, "rev-parse", "--show-toplevel"]);
+  const root = result.code === 0 ? result.stdout.trim() : "";
+  return root && existsSync(root) ? resolve(root) : resolve(cwd);
+}
+
+async function runCurrentWorkspace(flags) {
+  const workspace = resolve(flags.workspace || await detectWorkspaceRoot());
+  const opts = normalize({ ...effectiveOptions(flags), workspace });
+  await saveConfig(stripRuntimeFields(opts));
+  return start({ ...flags, workspace });
+}
+
+function isDirectory(path) {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+function workspaceItems(current) {
+  const items = [
+    { label: "Select this folder", type: "select", path: current },
+    { label: "Back ..", type: "open", path: dirname(current) }
+  ];
+  const children = readdirSync(current, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && entry.name !== ".git" && !entry.name.startsWith("."))
+    .map((entry) => join(current, entry.name))
+    .sort((a, b) => basename(a).localeCompare(basename(b)));
+  for (const child of children) {
+    const repo = existsSync(join(child, ".git"));
+    items.push({ label: `${basename(child)}/${repo ? "  [repo]" : ""}`, type: repo ? "select" : "open", path: child });
+  }
+  return items;
+}
+
+function renderWorkspacePicker(current, items, selected) {
+  output.write("\x1b[H\x1b[2J\x1b[?25l");
+  output.write("Choose workspace\n");
+  output.write(`Path: ${current}\n\n`);
+  output.write("Up/Down: move  Enter: select/open  q: quit\n\n");
+  items.forEach((item, index) => {
+    if (index === selected) output.write(`\x1b[7m> ${item.label}\x1b[0m\n`);
+    else output.write(`  ${item.label}\n`);
+  });
+}
+
+function readKeypress() {
+  return new Promise((resolveKey) => {
+    const onKey = (str, key = {}) => {
+      input.off("keypress", onKey);
+      resolveKey({ str, key });
+    };
+    input.on("keypress", onKey);
+  });
+}
+
+async function pickWorkspace(startDir) {
+  if (!input.isTTY || !output.isTTY || typeof input.setRawMode !== "function") {
+    throw new Error("Interactive terminal required for workspace picker.");
+  }
+  let current = resolve(startDir);
+  if (!isDirectory(current)) current = REPO_ROOT;
+  let selected = 0;
+  const wasRaw = input.isRaw;
+  emitKeypressEvents(input);
+  input.setRawMode(true);
+  input.resume();
+  try {
+    while (true) {
+      const items = workspaceItems(current);
+      if (selected >= items.length) selected = 0;
+      renderWorkspacePicker(current, items, selected);
+      const { str, key } = await readKeypress();
+      if (key.name === "up") selected = selected <= 0 ? items.length - 1 : selected - 1;
+      else if (key.name === "down") selected = selected >= items.length - 1 ? 0 : selected + 1;
+      else if (key.name === "return" || key.name === "enter") {
+        const item = items[selected];
+        if (item.type === "select") return resolve(item.path);
+        current = resolve(item.path);
+        selected = 0;
+      } else if (str === "q" || str === "Q" || (key.ctrl && key.name === "c")) {
+        return "";
+      }
+    }
+  } finally {
+    input.setRawMode(Boolean(wasRaw));
+    output.write("\x1b[?25h\x1b[0m\n");
+  }
+}
+
+async function workspaceCommand(flags) {
+  const opts = effectiveOptions(flags);
+  const startDir = flags.workspace || opts.workspace || process.cwd();
+  const choice = await pickWorkspace(startDir);
+  if (!choice) {
+    console.log("Canceled.");
+    return;
+  }
+  const next = normalize({ ...opts, workspace: choice });
+  await saveConfig(stripRuntimeFields(next));
+  console.log(`Workspace: ${choice}`);
+  console.log("Run: lca");
+}
+
+async function keysCommand() {
+  for (const url of KEY_URLS) {
+    if (!openUrl(url)) console.log(url);
+  }
+}
+
+async function cliCommand() {
+  await installCliCommand();
 }
 
 function parseSkillMeta(text, fallbackName) {
@@ -806,22 +1374,19 @@ async function skillsCommand(rest) {
   throw new Error("Usage: skills list|validate");
 }
 
-function openUrl(url) {
-  const command =
-    process.platform === "win32" ? "cmd" :
-      process.platform === "darwin" ? "open" :
-        "xdg-open";
-  const args =
-    process.platform === "win32" ? ["/c", "start", "", url] :
-      [url];
-  spawn(command, args, { detached: true, stdio: "ignore", windowsHide: true }).unref();
-}
-
 async function main() {
   const { command, rest, flags } = parseArgs(process.argv.slice(2));
-  if (flags.help || command === "help") return usage();
+  if (flags.help) {
+    if (command === "setup" || command === "init") return setupUsage();
+    return usage();
+  }
+  if (command === "help") return usage();
+  if (command === "run" || command === "here") return runCurrentWorkspace(flags);
   if (command === "setup" || command === "init") return setup(flags);
   if (command === "install") return installDeps(effectiveOptions(flags));
+  if (command === "cli") return cliCommand();
+  if (command === "keys") return keysCommand();
+  if (command === "workspace") return workspaceCommand(flags);
   if (command === "start") return start(flags);
   if (command === "stop") return stop(flags);
   if (command === "status") return status(flags);
@@ -837,11 +1402,6 @@ async function main() {
     console.log(`http://127.0.0.1:${opts.port}/mcp`);
     return;
   }
-  if (command === "open") {
-    const opts = effectiveOptions(flags);
-    openUrl(`http://127.0.0.1:${opts.dashboardPort}/ui`);
-    return;
-  }
   if (command === "logs") {
     console.log(LOG_PATH);
     if (existsSync(LOG_PATH)) console.log(await readFile(LOG_PATH, "utf8"));
@@ -854,7 +1414,9 @@ async function main() {
   throw new Error(`Unknown command: ${command}`);
 }
 
-main().catch((error) => {
-  console.error(`ERROR: ${error?.message || error}`);
-  process.exit(1);
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  main().catch((error) => {
+    console.error(`ERROR: ${error?.message || error}`);
+    process.exit(1);
+  });
+}

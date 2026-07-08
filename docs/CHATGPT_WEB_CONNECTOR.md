@@ -1,34 +1,41 @@
 # ChatGPT Web Connector
 
-Hướng dẫn này dùng flow mới:
+Flow chính:
 
 ```bash
 cd /repo/can-lam-viec
 lca
 ```
 
-Không dùng `scripts/lca setup`, `scripts/lca start`, `make run` hoặc OAuth connector.
+Không dùng OAuth connector. Không nhập Runtime API key vào Auth của ChatGPT connector.
 
-## 1. Chuẩn Bị
+## 1. Setup Local Agent
 
-Trong repo `local-coding-agent`:
-
-```bash
-cp .env.example .env.local
-make keys
-```
-
-Điền vào `.env.local`:
-
-```env
-CONTROL_PLANE_TUNNEL_ID=tunnel_...
-CONTROL_PLANE_API_KEY=sk-proj-...
-```
-
-Cài:
+Trong repo `local-coding-agent`, chạy wizard:
 
 ```bash
-make setup
+# macOS / Linux / WSL
+bash scripts/lca setup
+```
+
+```powershell
+# Windows
+scripts\lca.cmd setup
+```
+
+Wizard sẽ:
+
+- cho chọn hệ điều hành
+- tạo/cập nhật `.env.local`
+- cài dependency
+- tải `tunnel-client` nếu có thể
+- ghi config local
+- cài global command `lca`
+
+Nếu cần mở trang key/tunnel sau setup:
+
+```bash
+lca keys
 ```
 
 ## 2. Chạy Cho Repo Cần Làm Việc
@@ -44,7 +51,7 @@ Kiểm tra local:
 
 ```text
 http://127.0.0.1:8789/healthz
-http://127.0.0.1:8790/ui
+lca status
 ```
 
 ## 3. Tạo Connector Trong ChatGPT Web
@@ -93,6 +100,6 @@ lca stop
 ## Ghi Chú
 
 - Runtime API key ở `.env.local` dành cho tunnel-client chạy local.
-- Không nhập Runtime API key vào Auth của ChatGPT connector.
 - Nếu bật Auth/OAuth trong connector sẽ lỗi vì server này đang dùng hướng `No auth`.
 - Chỉ kết nối workspace tin tưởng.
+- `scripts/start-tunnel.sh` và `scripts/start-tunnel.ps1` chỉ còn là legacy/debug launcher.

@@ -1,6 +1,6 @@
 # Customer Update Prompt
 
-Prompt này dùng khi đã có clone `local-coding-agent` và muốn update an toàn theo flow mới.
+Prompt này dùng khi đã có clone `local-coding-agent` và muốn update an toàn theo flow TUI mới.
 
 ```text
 Hãy update Local Coding Agent an toàn.
@@ -12,7 +12,7 @@ Mục tiêu:
 - Pull bản mới nếu không có conflict.
 - Giữ nguyên .env.local, tools/tunnel-client, profiles và local config.
 - Cài lại dependency nếu cần.
-- Cài lại global command lca.
+- Chạy setup wizard để đồng bộ wrapper/config.
 - Không restart nếu tôi chưa đồng ý.
 
 Quy tắc:
@@ -29,7 +29,9 @@ Các bước:
 4. Chạy git fetch origin main --tags.
 5. Chạy git log --oneline --decorate --max-count=10 HEAD..origin/main.
 6. Chạy git pull --ff-only origin main.
-7. Chạy make setup.
+7. Chạy setup wizard:
+   - macOS/Linux/WSL: bash scripts/lca setup
+   - Windows: scripts\lca.cmd setup
 8. Kiểm tra lca có trong PATH.
 9. Nếu tôi đồng ý restart, chạy:
    lca stop
@@ -37,9 +39,8 @@ Các bước:
    lca
 10. Verify:
    - http://127.0.0.1:8789/healthz
-   - http://127.0.0.1:8790/ui
    - lca status
-11. Báo lại commit hiện tại, dashboard URL, workspace hiện tại, mode/policy và tunnel status.
+11. Báo lại commit hiện tại, health URL, workspace hiện tại, mode/policy và tunnel status.
 ```
 
 Guide chính: [../README.md](../README.md).

@@ -47,7 +47,7 @@ test("explains Node CA mismatch without declaring a working tunnel blocked", () 
       error: "UNABLE_TO_GET_ISSUER_CERT_LOCALLY",
       message: "unable to get local issuer certificate"
     }],
-    local: [{ name: "http:GET:http://127.0.0.1:8787/healthz", ok: true }],
+    local: [{ name: "http:GET:http://127.0.0.1:8789/healthz", ok: true }],
     tunnel: { smoke_status: "connected", diagnosis_hints: [] }
   });
 

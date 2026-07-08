@@ -18,7 +18,7 @@ fi
 cat > "$TARGET" <<EOF
 #!/usr/bin/env bash
 # $MARKER
-exec bash "$ROOT/scripts/lca-here.sh" "\$@"
+exec node "$ROOT/scripts/local-coding-agent.mjs" "\$@"
 EOF
 chmod +x "$TARGET"
 

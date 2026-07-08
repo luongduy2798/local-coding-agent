@@ -17,8 +17,8 @@ an office, school, VPN, or internal network.
 ## Steps
 
 1. Verify the local server:
-   - `http://127.0.0.1:8787/healthz`
-   - `http://127.0.0.1:8790/ui`
+   - `http://127.0.0.1:8789/healthz`
+   - `bash scripts/lca status` or `scripts\lca.cmd status`
 2. Run basic network doctor:
    - `node scripts/network-doctor.mjs`
 3. If the customer can provide tunnel details, run a tunnel smoke test:

@@ -1,41 +1,37 @@
 # AGENTS.md — setup guide for AI coding agents
 
-Nếu user yêu cầu cài hoặc hướng dẫn repo này, dùng flow mới dưới đây.
+Nếu user yêu cầu cài hoặc hướng dẫn repo này, dùng flow TUI mới dưới đây.
 
-## What this is
+## What This Is
 
-Local MCP server (`server/server.mjs`) cho ChatGPT Web connector. User chạy global command `lca` trong repo bất kỳ; workspace tự lấy theo repo hiện tại.
+Local MCP server (`server/server.mjs`) cho ChatGPT Web connector. User chạy global command `lca` trong repo bất kỳ; workspace tự lấy theo git root hiện tại.
 
 ## Prerequisites
 
 - Node.js >= 18 (`node -v`)
-- `make`, `bash`, `curl`, `unzip`
-- OpenAI Tunnel ID
-- Runtime API key
+- npm
+- Git nếu muốn tự nhận git root
+- OpenAI Tunnel ID và Runtime API key nếu dùng ChatGPT Web tunnel
 
 Không commit secret, `.env.local`, `tools/`, generated profiles hoặc logs có secret.
 
 ## Setup
 
-```bash
-cp .env.example .env.local
-make keys
-```
-
-Yêu cầu user điền vào `.env.local`:
-
-```env
-CONTROL_PLANE_TUNNEL_ID=tunnel_...
-CONTROL_PLANE_API_KEY=sk-proj-...
-```
-
-Sau đó:
+Chạy setup wizard trong repo `local-coding-agent`:
 
 ```bash
-make setup
+# macOS / Linux / WSL
+bash scripts/lca setup
 ```
 
-`make setup` cài dependency, tải `tools/tunnel-client`, ghi config local và cài global command `lca` vào `~/.local/bin/lca`.
+```powershell
+# Windows
+scripts\lca.cmd setup
+```
+
+Wizard sẽ cho chọn OS, kiểm tra prerequisite, mở trang Tunnel/API key, tạo/cập nhật `.env.local`, cài dependency, auto-download `tunnel-client` khi có thể, ghi config local và cài global command `lca`.
+
+Legacy wrappers như `make setup`, `bash install.sh`, và `.\install.ps1` chỉ forward vào wizard. Không dùng chúng làm tài liệu flow chính.
 
 ## Daily Use
 
@@ -46,24 +42,15 @@ cd /path/to/repo
 lca
 ```
 
-Nếu server đang chạy workspace cũ, `lca` tự stop/start lại với workspace mới.
+Nếu server đang chạy workspace cũ, `lca` tự restart với workspace mới.
 
-Stop:
+Lệnh thường dùng:
 
 ```bash
 lca stop
-```
-
-Status:
-
-```bash
 lca status
-```
-
-TUI chọn workspace:
-
-```bash
 lca workspace
+lca doctor
 ```
 
 ## ChatGPT Web Connector
@@ -81,10 +68,9 @@ Chi tiết: [docs/CHATGPT_WEB_CONNECTOR.md](docs/CHATGPT_WEB_CONNECTOR.md).
 
 - MCP local: `http://127.0.0.1:8789/mcp`
 - Health: `http://127.0.0.1:8789/healthz`
-- Dashboard: `http://127.0.0.1:8790/ui`
 - Tunnel health/admin: `http://127.0.0.1:8788`
 
-Không dùng port `8788` cho dashboard vì tunnel-client dùng port đó.
+Tunnel-client dùng port `8788`; tránh dùng lại port này cho dịch vụ khác.
 
 ## Safety
 
@@ -92,19 +78,22 @@ Không dùng port `8788` cho dashboard vì tunnel-client dùng port đó.
 - Đây không phải OS sandbox.
 - Chỉ connect workspace tin tưởng.
 - Không expose server public nếu chưa hiểu rủi ro.
+- Với `policy=balanced`, đặt `AGENT_APPROVAL_TOKEN` nếu muốn duyệt action rủi ro mà không chuyển sang `policy=full`.
 
-## Old Flow To Avoid
+## Legacy Flow To Avoid As Primary Docs
 
-Không dùng các hướng dẫn cũ làm flow chính:
+Các script dưới đây chỉ để compatibility/debug:
 
-- `scripts/lca setup`
-- `scripts/lca start`
+- `scripts/start-tunnel.sh`
+- `scripts/start-tunnel.ps1`
+- `make setup`
 - `make run`
 - `make stop`
 - OAuth connector
 
-CLI gốc vẫn dùng được để debug qua:
+CLI gốc vẫn dùng được để debug:
 
 ```bash
-lca raw ...
+node scripts/local-coding-agent.mjs status
+node scripts/local-coding-agent.mjs logs
 ```

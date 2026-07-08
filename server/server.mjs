@@ -17,7 +17,7 @@ import {
   copyFile,
   cp
 } from "node:fs/promises";
-import { writeFileSync, readFileSync, existsSync, realpathSync } from "node:fs";
+import { readFileSync, existsSync, realpathSync } from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
@@ -31,18 +31,11 @@ import { z } from "zod";
 // ----------------------------------------------------------------------------
 const VERSION = "4.4.0-pro";
 const PRODUCT_TIER = "pro";
-const PORT = Number(process.env.PORT || 8787);
+const PORT = Number(process.env.PORT || 8789);
 // Bind to loopback by default. The local OpenAI tunnel-client forwards to this,
 // so we never need to listen on 0.0.0.0 (which would expose a shell to the LAN).
 const HOST = process.env.AGENT_HOST || "127.0.0.1";
 
-// Local-only dashboard (metrics + charts). Deliberately a SEPARATE server bound
-// to loopback so it is NOT forwarded through the tunnel to ChatGPT. Set
-// DASHBOARD_PORT=0 to disable.
-// NOTE: avoid 8788 — the OpenAI tunnel-client binds 127.0.0.1:8788 for its own
-// health service, so using it here would stop the tunnel from starting.
-const DASHBOARD_PORT = Number(process.env.DASHBOARD_PORT ?? 8790);
-const DASHBOARD_HOST = process.env.DASHBOARD_HOST || "127.0.0.1";
 const CONFIG_ID = String(process.env.AGENT_CONFIG_ID || "");
 
 const APP_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -83,7 +76,6 @@ const WORKSPACE_DATA_DIR = path.join(DATA_DIR, "workspaces", WORKSPACE_ID);
 const NOTES_PATH = path.resolve(WORKSPACE_DATA_DIR, "notes.json");
 const CHECKPOINT_PATH = path.resolve(WORKSPACE_DATA_DIR, "checkpoint.json");
 const AUDIT_PATH = path.resolve(DATA_DIR, "audit.log");
-const METRICS_PATH = path.resolve(DATA_DIR, "metrics.json");
 
 // v2.1 Repo index cache
 const INDEX_PATH = path.resolve(WORKSPACE_DATA_DIR, "index.json");
@@ -191,7 +183,6 @@ const SAFE_MODE_BLOCKS = [
 // ----------------------------------------------------------------------------
 const processes = new Map(); // id -> { id, name, command, child, status, exitCode, startedAt, stdout, stderr }
 let approvalLock = Promise.resolve();
-const bootStartedAt = Date.now();
 
 // ----------------------------------------------------------------------------
 // Bootstrap
@@ -202,8 +193,6 @@ await mkdir(PRIMARY_ROOT, { recursive: true });
 await mkdir(BACKUPS_DIR, { recursive: true });
 await mkdir(APPROVALS_DIR, { recursive: true });
 await mkdir(AGENT_STATE_DIR, { recursive: true });
-
-let metrics = loadMetrics();
 
 // v2.8 Load workspace profile on startup
 await loadWorkspaceProfile();
@@ -241,7 +230,14 @@ const httpServer = http.createServer(async (req, res) => {
 
     const url = requestUrl;
     if (req.method === "GET" && url.pathname === "/") {
-      return sendHtml(res, homeHtml());
+      return sendJson(res, 200, {
+        status: "ok",
+        version: VERSION,
+        mode: MODE,
+        policy: AGENT_POLICY,
+        roots: ROOTS,
+        mcp_endpoint: `http://${HOST}:${PORT}/mcp`
+      });
     }
     if (req.method === "GET" && url.pathname === "/healthz") {
       return sendJson(res, 200, {
@@ -256,7 +252,6 @@ const httpServer = http.createServer(async (req, res) => {
         config_id: CONFIG_ID || null,
         roots: ROOTS,
         workspace: PRIMARY_ROOT,
-        dashboard_port: DASHBOARD_PORT,
         mcp_endpoint: `http://${HOST}:${PORT}/mcp`
       });
     }
@@ -284,7 +279,6 @@ const httpServer = http.createServer(async (req, res) => {
 httpServer.on("error", (err) => {
   if (err?.code === "EADDRINUSE") {
     console.error(`FATAL: MCP port ${PORT} is already in use — another server instance is likely running. Exiting.`);
-    saveMetricsSync();
     process.exit(1);
   }
   log(`httpServer error: ${err?.message || err}`);
@@ -297,54 +291,14 @@ httpServer.listen(PORT, HOST, () => {
   console.log(`MCP endpoint: http://${HOST}:${PORT}/mcp`);
 });
 
-// Local-only dashboard server (not tunneled).
-let dashServer = null;
-if (DASHBOARD_PORT > 0) {
-  dashServer = http.createServer((req, res) => {
-    try {
-      const url = new URL(req.url || "/", `http://${DASHBOARD_HOST}:${DASHBOARD_PORT}`);
-      if (!dashboardOriginAllowed(req)) return sendJson(res, 403, { error: "dashboard_origin_not_allowed" });
-      if (url.pathname === "/metrics") return sendJson(res, 200, metricsSnapshot());
-      if (url.pathname === "/ui") return sendHtml(res, dashboardHtml());
-      // Mini-IDE JSON APIs (local-only, read-only except clear-metrics).
-      if (url.pathname === "/api/tree") return void dashApiTree(url, res);
-      if (url.pathname === "/api/file") return void dashApiFile(url, res);
-      if (url.pathname === "/api/diff") return void dashApiDiff(url, res);
-      if (url.pathname === "/api/approvals" && req.method === "GET") return void dashApiApprovals(res);
-      if (url.pathname.startsWith("/api/approvals/") && req.method === "POST") return void dashApiApprovalAction(url, res);
-      if (url.pathname === "/api/clear-metrics" && req.method === "POST") return void dashApiClearMetrics(res);
-      if (url.pathname === "/") {
-        res.writeHead(302, { Location: "/ui" });
-        return res.end();
-      }
-      return sendJson(res, 404, { error: "not_found" });
-    } catch (error) {
-      return sendJson(res, 500, { error: error?.message || "error" });
-    }
-  });
-  dashServer.on("error", (err) => {
-    if (err?.code === "EADDRINUSE") {
-      console.error(`WARN: dashboard port ${DASHBOARD_PORT} is in use (the OpenAI tunnel uses 8788). Dashboard disabled. Set DASHBOARD_PORT to a free port. The MCP server keeps running.`);
-    } else {
-      log(`dashboard error: ${err?.message || err}`);
-    }
-    dashServer = null;
-  });
-  dashServer.listen(DASHBOARD_PORT, DASHBOARD_HOST, () => {
-    console.log(`Dashboard (local only): http://${DASHBOARD_HOST}:${DASHBOARD_PORT}/ui`);
-  });
-}
-
 // Never let a single bad request take the whole server down.
 process.on("uncaughtException", (err) => log(`uncaughtException: ${err?.stack || err}`));
 process.on("unhandledRejection", (err) => log(`unhandledRejection: ${err?.stack || err}`));
 for (const sig of ["SIGINT", "SIGTERM"]) {
   process.on(sig, () => {
     log(`${sig} received, shutting down`);
-    saveMetricsSync();
     for (const proc of processes.values()) killProcessTree(proc);
     httpServer.close(() => process.exit(0));
-    dashServer?.close();
     setTimeout(() => process.exit(0), 1500).unref();
   });
 }
@@ -394,9 +348,9 @@ async function handleMcp(req, res) {
 }
 
 const SERVER_INSTRUCTIONS = [
-  "Local Coding Agent Pro MCP: tool calls cross a tunnel, so start with workspace_snapshot or workspace_doctor, then use read_many/search_text/run_commands to batch work; prefer dedicated tools over run_command. Policy may require local dashboard approval for risky delete/install/network/mutating-git actions; exact action batches can use request_approval_batch. File tools are root-confined, but commands are not an OS sandbox.",
-  "WORKFLOW: (1) Start with workspace_snapshot for repo/git/test/policy/health in one call; use workspace_doctor when you need operational readiness. (2) Use preview_patch/validate_patch before apply_patch for large edits. (3) After editing source, run quality_gate, run_tests, or run_changed_tests. (4) Before marking 'done', call review_diff and session_report. (5) For multi-step tasks, use task_plan + decision_log to maintain state across chats.",
-  "POLICY: Check policy_status if you are unsure whether an action is allowed. In balanced policy, risky operations (delete, install, network, mutating git, risky processes) require one-time local approval.",
+  "Local Coding Agent Pro MCP: tool calls cross a tunnel, so start with workspace_snapshot or workspace_doctor, then use read_many/search_text/run_commands to batch work; prefer dedicated tools over run_command. Policy may require token approval via AGENT_APPROVAL_TOKEN for risky delete/install/network/mutating-git actions; exact action batches can use request_approval_batch. File tools are root-confined, but commands are not an OS sandbox.",
+  "WORKFLOW: (1) Start with workspace_snapshot for repo/git/test/policy in one call; use workspace_doctor when you need operational readiness. (2) Use preview_patch/validate_patch before apply_patch for large edits. (3) After editing source, run quality_gate, run_tests, or run_changed_tests. (4) Before marking 'done', call review_diff and session_report. (5) For multi-step tasks, use task_plan + decision_log to maintain state across chats.",
+  "POLICY: Check policy_status if you are unsure whether an action is allowed. In balanced policy, risky operations (delete, install, network, mutating git, risky processes) require one-time approval with request_approval/request_approval_batch followed by approve_request using AGENT_APPROVAL_TOKEN.",
   "Use the DEDICATED tools instead of run_command for these — they are faster and cheaper:",
   "- Find files by name -> find_files (NOT dir/ls/Get-ChildItem/where).",
   "- Search file contents -> search_text with context= (NOT grep/findstr/Select-String).",
@@ -589,7 +543,6 @@ function reg(mcp, name, def, handler) {
     const durationMs = Math.max(0, Math.round((performance.now() - startedMs) * 10) / 10);
     const errText = success ? null : firstText(result).slice(0, 200);
     audit({ ts: startedAt, tool: name, ok: success, durationMs, inChars, outChars, error: errText || undefined, args: summarizeArgs(args) });
-    recordMetric(name, success, inChars, outChars, errText, durationMs);
     return result;
   });
 }
@@ -2244,221 +2197,6 @@ function parseSkillMeta(text, fallbackName) {
   return { name, description };
 }
 
-// ----------------------------------------------------------------------------
-// Metrics
-// ----------------------------------------------------------------------------
-function emptyMetrics() {
-  return {
-    startedAt: isoNow(), // first ever run
-    totalCalls: 0,
-    okCalls: 0,
-    errorCalls: 0,
-    inChars: 0,
-    outChars: 0,
-    totalDurationMs: 0,
-    latencies: [],
-    perTool: {},
-    recent: [], // newest first, capped
-    buckets: [] // per-minute { t, calls, tokens }, capped
-  };
-}
-
-function loadMetrics() {
-  try {
-    if (existsSync(METRICS_PATH)) {
-      const m = JSON.parse(readFileSync(METRICS_PATH, "utf8"));
-      return { ...emptyMetrics(), ...m, perTool: m.perTool || {}, recent: m.recent || [], buckets: m.buckets || [], latencies: m.latencies || [] };
-    }
-  } catch {
-    /* corrupt file -> start fresh */
-  }
-  return emptyMetrics();
-}
-
-let _saveTimer = null;
-function scheduleSave() {
-  if (_saveTimer) return;
-  _saveTimer = setTimeout(() => {
-    _saveTimer = null;
-    writeFile(METRICS_PATH, JSON.stringify(metrics), "utf8").catch(() => {});
-  }, 2000);
-  _saveTimer.unref?.();
-}
-
-function saveMetricsSync() {
-  try {
-    writeFileSync(METRICS_PATH, JSON.stringify(metrics), "utf8");
-  } catch {
-    /* ignore */
-  }
-}
-
-function estTokens(chars) {
-  return Math.ceil(chars / 4);
-}
-
-function recordMetric(tool, ok, inChars, outChars, errText, durationMs = 0) {
-  metrics.totalCalls += 1;
-  if (ok) metrics.okCalls += 1;
-  else metrics.errorCalls += 1;
-  metrics.inChars += inChars;
-  metrics.outChars += outChars;
-  metrics.totalDurationMs = (metrics.totalDurationMs || 0) + durationMs;
-  (metrics.latencies ||= []).push(durationMs);
-  if (metrics.latencies.length > 1000) metrics.latencies.splice(0, metrics.latencies.length - 1000);
-
-  const pt = (metrics.perTool[tool] ||= { calls: 0, ok: 0, err: 0, inChars: 0, outChars: 0, totalDurationMs: 0, latencies: [] });
-  pt.calls += 1;
-  if (ok) pt.ok += 1;
-  else pt.err += 1;
-  pt.inChars += inChars;
-  pt.outChars += outChars;
-  pt.totalDurationMs = (pt.totalDurationMs || 0) + durationMs;
-  (pt.latencies ||= []).push(durationMs);
-  if (pt.latencies.length > 300) pt.latencies.splice(0, pt.latencies.length - 300);
-
-  metrics.recent.unshift({ ts: isoNow(), tool, ok, duration_ms: durationMs, inChars, outChars, tokens: estTokens(inChars + outChars), error: ok ? undefined : errText || undefined });
-  if (metrics.recent.length > 60) metrics.recent.length = 60;
-
-  const minute = Math.floor(Date.now() / 60000) * 60000;
-  let b = metrics.buckets[metrics.buckets.length - 1];
-  if (!b || b.t !== minute) {
-    b = { t: minute, calls: 0, tokens: 0, duration_ms: 0 };
-    metrics.buckets.push(b);
-    if (metrics.buckets.length > 180) metrics.buckets.shift();
-  }
-  b.calls += 1;
-  b.tokens += estTokens(inChars + outChars);
-  b.duration_ms = (b.duration_ms || 0) + durationMs;
-
-  scheduleSave();
-}
-
-function metricsSnapshot() {
-  const health = computeHealthInsights();
-  const topTools = Object.entries(metrics.perTool)
-    .map(([name, v]) => ({
-      name,
-      ...v,
-      latencies: undefined,
-      tokens: estTokens(v.inChars + v.outChars),
-      avg_ms: v.calls ? Math.round((v.totalDurationMs || 0) / v.calls) : 0,
-      p95_ms: percentile(v.latencies || [], 0.95)
-    }))
-    .sort((a, b) => b.calls - a.calls);
-  const uptimeMinutes = Math.max((Date.now() - bootStartedAt) / 60000, 1 / 60);
-  return {
-    version: VERSION,
-    tier: PRODUCT_TIER,
-    mode: MODE,
-    policy: AGENT_POLICY,
-    roots: ROOTS,
-    port: PORT,
-    mcp_endpoint: `http://${HOST}:${PORT}/mcp`,
-    since: metrics.startedAt,
-    uptime_sec: Math.floor((Date.now() - bootStartedAt) / 1000),
-    running_processes: [...processes.values()].filter((p) => p.status === "running").length,
-    total_calls: metrics.totalCalls,
-    ok_calls: metrics.okCalls,
-    error_calls: metrics.errorCalls,
-    in_chars: metrics.inChars,
-    out_chars: metrics.outChars,
-    est_tokens_in: estTokens(metrics.inChars),
-    est_tokens_out: estTokens(metrics.outChars),
-    est_tokens_total: estTokens(metrics.inChars + metrics.outChars),
-    success_rate: metrics.totalCalls ? Math.round((metrics.okCalls / metrics.totalCalls) * 10000) / 100 : 100,
-    calls_per_minute: Math.round((metrics.totalCalls / uptimeMinutes) * 100) / 100,
-    avg_latency_ms: metrics.totalCalls ? Math.round((metrics.totalDurationMs || 0) / metrics.totalCalls) : 0,
-    p50_latency_ms: percentile(metrics.latencies || [], 0.5),
-    p95_latency_ms: percentile(metrics.latencies || [], 0.95),
-    p99_latency_ms: percentile(metrics.latencies || [], 0.99),
-    health_score: health.score,
-    health_label: health.label,
-    pro_tips: health.tips,
-    bottlenecks: health.bottlenecks,
-    top_tools: topTools,
-    recent: metrics.recent,
-    buckets: metrics.buckets
-  };
-}
-
-function computeHealthInsights() {
-  const total = metrics.totalCalls || 0;
-  const success = total ? metrics.okCalls / total : 1;
-  const p95 = percentile(metrics.latencies || [], 0.95);
-  const avg = total ? (metrics.totalDurationMs || 0) / total : 0;
-  const readFileCalls = metrics.perTool?.read_file?.calls || 0;
-  const readManyCalls = metrics.perTool?.read_many?.calls || 0;
-  const runCommandCalls = metrics.perTool?.run_command?.calls || 0;
-  const runCommandsCalls = metrics.perTool?.run_commands?.calls || 0;
-  const searchCalls = metrics.perTool?.search_text?.calls || 0;
-  const recentErrors = (metrics.recent || []).filter((r) => !r.ok).length;
-  const tokensPerCall = total ? estTokens(metrics.inChars + metrics.outChars) / total : 0;
-
-  let score = 100;
-  const tips = [];
-  const bottlenecks = [];
-
-  if (success < 0.95) {
-    const hit = Math.min(30, Math.round((0.95 - success) * 120));
-    score -= hit;
-    bottlenecks.push("error_rate");
-    tips.push("Error rate is elevated; inspect Recent calls and fix repeated failing tools before continuing.");
-  }
-  if (p95 > 2500) {
-    score -= 18;
-    bottlenecks.push("latency_p95");
-    tips.push("P95 latency is high; batch reads with read_many/workspace_snapshot and avoid many tiny calls.");
-  } else if (p95 > 1200) {
-    score -= 10;
-    bottlenecks.push("latency_p95");
-    tips.push("Latency is noticeable; prefer fewer larger tool calls over repeated single-file calls.");
-  }
-  if (readFileCalls > Math.max(8, readManyCalls * 4)) {
-    score -= 8;
-    bottlenecks.push("chatty_reads");
-    tips.push("Many read_file calls detected; use read_many for related files to reduce tunnel round-trips.");
-  }
-  if (runCommandCalls > Math.max(8, searchCalls + readManyCalls)) {
-    score -= 6;
-    bottlenecks.push("command_heavy");
-    tips.push(runCommandsCalls
-      ? "High run_command usage; keep grouping independent checks with run_commands/quality_gate and prefer dedicated repo/git tools."
-      : "High run_command usage; group independent checks with run_commands/quality_gate and prefer repo_map/search_text/git_status/git_diff.");
-  }
-  if (tokensPerCall > 3500) {
-    score -= 8;
-    bottlenecks.push("large_payloads");
-    tips.push("Large payloads per call; use line ranges, globs, and max_output_chars to keep context light.");
-  }
-  if (recentErrors >= 5) {
-    score -= 8;
-    bottlenecks.push("recent_errors");
-    tips.push("Several recent calls failed; clear the failing path/command before more edits.");
-  }
-  if (!tips.length) {
-    tips.push("Healthy session. Keep using workspace_snapshot, read_many, search_text, and targeted tests for best speed.");
-  }
-
-  score = Math.max(0, Math.min(100, Math.round(score)));
-  const label = score >= 90 ? "excellent" : score >= 75 ? "good" : score >= 55 ? "watch" : "attention";
-  return {
-    score,
-    label,
-    tips: tips.slice(0, 4),
-    bottlenecks,
-    avg_latency_ms: Math.round(avg),
-    p95_latency_ms: p95,
-    tokens_per_call: Math.round(tokensPerCall)
-  };
-}
-
-function percentile(values, q) {
-  if (!values.length) return 0;
-  const sorted = [...values].sort((a, b) => a - b);
-  return Math.round(sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(q * sorted.length) - 1))]);
-}
-
 function safeLen(args) {
   try {
     return JSON.stringify(args ?? {}).length;
@@ -2610,16 +2348,6 @@ function originAllowed(req) {
   return ALLOWED_ORIGINS.has(origin);
 }
 
-function dashboardOriginAllowed(req) {
-  const origin = String(req.headers.origin || "");
-  if (!origin) return true;
-  return new Set([
-    `http://127.0.0.1:${DASHBOARD_PORT}`,
-    `http://localhost:${DASHBOARD_PORT}`,
-    `http://[::1]:${DASHBOARD_PORT}`
-  ]).has(origin);
-}
-
 function setCors(req, res) {
   const origin = String(req.headers.origin || "");
   if (origin && ALLOWED_ORIGINS.has(origin)) {
@@ -2666,11 +2394,6 @@ function sendJson(res, status, value) {
   res.end(json);
 }
 
-function sendHtml(res, html) {
-  res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Content-Length": Buffer.byteLength(html) });
-  res.end(html);
-}
-
 function oauthProtectedResourceMetadata() {
   const resource = `http://${HOST}:${PORT}/mcp`;
   return {
@@ -2680,403 +2403,6 @@ function oauthProtectedResourceMetadata() {
     resource_name: "Local Coding Agent MCP",
     resource_documentation: `http://${HOST}:${PORT}/`
   };
-}
-
-function homeHtml() {
-  return `<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Local Coding Agent</title>
-  <style>
-    body { margin: 0; min-height: 100vh; background: #090b10; color: #eef2ff; font-family: Inter, system-ui, sans-serif; }
-    main { max-width: 920px; margin: 0 auto; padding: 36px 18px; }
-    h1 { margin: 0 0 10px; font-size: 28px; }
-    p { color: #a8b3c7; line-height: 1.6; }
-    code { color: #93c5fd; word-break: break-all; }
-    .panel { border: 1px solid #223048; background: #10141d; border-radius: 8px; padding: 18px; margin: 14px 0; }
-    .dot { display: inline-block; width: 10px; height: 10px; border-radius: 999px; background: #2dd4bf; margin-right: 8px; }
-    .tag { display:inline-block; font-size:12px; padding:2px 8px; border-radius:999px; background:#1e293b; color:#93c5fd; margin-left:8px; }
-  </style>
-</head>
-<body>
-  <main>
-    <h1><span class="dot"></span>Local Coding Agent <span class="tag">v${escapeHtml(VERSION)}</span> <span class="tag">${escapeHtml(MODE)} mode</span></h1>
-    <p>Local MCP server that lets ChatGPT Web work with files, run commands, manage background processes, and use git inside your configured roots.</p>
-    <div class="panel"><p><strong>Roots</strong></p>${ROOTS.map((r) => `<p><code>${escapeHtml(r)}</code></p>`).join("")}</div>
-    <div class="panel"><p><strong>MCP endpoint</strong></p><p><code>http://${HOST}:${PORT}/mcp</code></p></div>
-    <div class="panel"><p><strong>Tools</strong></p>
-      <p><strong>Core:</strong> <code>workspace_info, repo_overview, list_files, find_files, read_file, read_many, stat_path, search_text, write_file, replace_in_file, apply_patch, make_dir, move_path, delete_path, run_command, run_commands, proc_start, proc_list, proc_output, proc_stop, git, git_status, git_diff, list_skills, read_skill, create_skill, delete_skill, ping, save_note, list_notes, checkpoint, resume</code></p>
-      <p><strong>Pro repo intel:</strong> <code>workspace_snapshot, workspace_doctor, project_profile, important_files, repo_map, repo_symbols, index_status</code></p>
-      <p><strong>v2.2 patch engine:</strong> <code>preview_patch, validate_patch, undo_last_patch</code></p>
-      <p><strong>v2.3 test runner:</strong> <code>quality_gate, detect_test_commands, run_tests, run_build, run_lint, run_changed_tests</code></p>
-      <p><strong>v2.4 review:</strong> <code>session_report, review_diff, security_scan, todo_scan, change_summary</code></p>
-      <p><strong>v2.5 planner:</strong> <code>task_plan, task_state, decision_log</code></p>
-      <p><strong>Policy:</strong> <code>policy_status, explain_risk, request_approval, request_approval_batch, approve_request, deny_request</code></p>
-      <p><strong>v2.8 profile:</strong> <code>profile_status, reload_profile</code></p>
-    </div>
-    <div class="panel"><p><strong>Local dashboard</strong> (this machine only): <code>http://${DASHBOARD_HOST}:${DASHBOARD_PORT}/ui</code></p></div>
-  </main>
-</body>
-</html>`;
-}
-
-// ----------------------------------------------------------------------------
-// Mini-IDE dashboard APIs (local-only). Read-only file/tree/diff + clear-metrics.
-// Reuse the same root confinement (resolvePath) and SKIP_DIRS as the MCP tools.
-// ----------------------------------------------------------------------------
-async function dashApiTree(url, res) {
-  try {
-    const rel = url.searchParams.get("path") || ".";
-    const start = resolvePath(rel);
-    const depth = Math.min(Math.max(Number(url.searchParams.get("depth") || 4), 1), 8);
-    const maxEntries = Math.min(Math.max(Number(url.searchParams.get("max") || 2000), 10), 6000);
-    const { tree } = await buildTree(start, depth, maxEntries);
-    const entries = tree.map((abs) => {
-      const isDir = abs.endsWith(path.sep);
-      const clean = isDir ? abs.slice(0, -1) : abs;
-      return { path: toRel(clean), type: isDir ? "directory" : "file" };
-    });
-    return sendJson(res, 200, {
-      root: toRel(start),
-      truncated: tree.length >= maxEntries,
-      count: entries.length,
-      entries
-    });
-  } catch (error) {
-    return sendJson(res, 400, { error: error?.message || "error" });
-  }
-}
-
-async function dashApiFile(url, res) {
-  try {
-    const rel = url.searchParams.get("path");
-    if (!rel) return sendJson(res, 400, { error: "path is required" });
-    const filePath = resolvePath(rel);
-    const info = await stat(filePath);
-    if (info.isDirectory()) return sendJson(res, 400, { error: "path is a directory" });
-    const raw = await readFile(filePath, "utf8");
-    const total_lines = raw.split(/\r?\n/).length;
-    const cap = MAX_READ_CHARS;
-    const truncated = raw.length > cap;
-    return sendJson(res, 200, {
-      path: toRel(filePath),
-      total_lines,
-      chars: raw.length,
-      truncated,
-      content: truncated ? raw.slice(0, cap) : raw
-    });
-  } catch (error) {
-    return sendJson(res, 400, { error: error?.message || "error" });
-  }
-}
-
-async function dashApiDiff(url, res) {
-  try {
-    const rel = url.searchParams.get("path");
-    const args = ["diff"];
-    if (rel) {
-      const target = resolvePath(rel);
-      args.push("--", target);
-    }
-    const result = await spawnCapture("git", args, PRIMARY_ROOT, DEFAULT_CMD_TIMEOUT);
-    if (result.exit_code !== 0) {
-      return sendJson(res, 200, {
-        root: toRel(PRIMARY_ROOT),
-        is_git_repo: false,
-        diff: "",
-        empty: true,
-        error: (result.stderr || "not a git repository").split(/\r?\n/)[0]
-      });
-    }
-    return sendJson(res, 200, {
-      root: toRel(PRIMARY_ROOT),
-      is_git_repo: true,
-      diff: result.stdout || "",
-      empty: !(result.stdout || "").trim()
-    });
-  } catch (error) {
-    return sendJson(res, 400, { error: error?.message || "error" });
-  }
-}
-
-function dashApiClearMetrics(res) {
-  try {
-    metrics = emptyMetrics();
-    saveMetricsSync();
-    return sendJson(res, 200, { ok: true, cleared: true });
-  } catch (error) {
-    return sendJson(res, 500, { error: error?.message || "error" });
-  }
-}
-
-function dashboardHtml() {
-  return `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Local Coding Agent — Dashboard</title>
-<style>
-  :root { color-scheme: dark; }
-  body { margin:0; background:#090b10; color:#eef2ff; font-family:Inter,system-ui,Segoe UI,sans-serif; }
-  .wrap { max-width:1180px; margin:0 auto; padding:22px 18px 60px; }
-  h1 { font-size:22px; margin:0 0 4px; }
-  h3 { margin:0 0 10px; font-size:14px; color:#9fb0c9; text-transform:uppercase; letter-spacing:.04em; }
-  .sub { color:#7e8aa0; font-size:13px; margin:0 0 18px; }
-  .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:12px; margin-bottom:18px; }
-  .card { border:1px solid #1f2a3d; background:#10141d; border-radius:10px; padding:14px 16px; }
-  .clab { color:#8896ad; font-size:12px; }
-  .cval { font-size:26px; font-weight:700; margin:4px 0 2px; color:#eaf2ff; }
-  .csub { color:#6b7790; font-size:12px; }
-  .panel { border:1px solid #1f2a3d; background:#10141d; border-radius:10px; padding:16px; margin-bottom:16px; }
-  canvas { width:100%; height:220px; display:block; }
-  .grid { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
-  @media (max-width:820px){ .grid { grid-template-columns:1fr; } }
-  table { width:100%; border-collapse:collapse; font-size:13px; }
-  th,td { text-align:left; padding:6px 8px; border-bottom:1px solid #1a2335; }
-  th { color:#8896ad; font-weight:600; }
-  .row { padding:5px 0; border-bottom:1px solid #161e2d; font-size:13px; }
-  .t { color:#6b7790; font-variant-numeric:tabular-nums; }
-  .dim { color:#6b7790; }
-  .ok { color:#2dd4bf; } .err { color:#f87171; }
-  .errmsg { color:#f9a8a8; font-size:12px; }
-  .pill { display:inline-block; font-size:12px; padding:2px 9px; border-radius:999px; background:#1e293b; color:#93c5fd; margin-left:6px; }
-  #status { float:right; font-size:13px; color:#2dd4bf; }
-  .note { color:#6b7790; font-size:12px; margin-top:6px; }
-  .btn { display:inline-block; cursor:pointer; font-size:12px; padding:4px 11px; border-radius:7px; background:#1e293b; color:#93c5fd; border:1px solid #2a3a55; }
-  .btn:hover { background:#243349; }
-  .btn.active { background:#0f766e; color:#d7fff7; border-color:#0f766e; }
-  .ide { display:grid; grid-template-columns:300px 1fr; gap:0; border:1px solid #1f2a3d; border-radius:10px; overflow:hidden; min-height:360px; }
-  @media (max-width:820px){ .ide { grid-template-columns:1fr; } }
-  .ide-tree { background:#0c1018; border-right:1px solid #1f2a3d; max-height:520px; overflow:auto; padding:8px 0; }
-  .ide-view { background:#10141d; max-height:520px; overflow:auto; }
-  .tnode { font-family:Consolas,monospace; font-size:12.5px; padding:3px 10px 3px 0; cursor:pointer; white-space:nowrap; color:#b9c6dc; }
-  .tnode:hover { background:#172033; }
-  .tnode.sel { background:#1c2942; color:#eaf2ff; }
-  .tnode.dir { color:#9fb6d9; }
-  .ide-head { padding:8px 12px; border-bottom:1px solid #1f2a3d; font-family:Consolas,monospace; font-size:12.5px; color:#9fb0c9; display:flex; justify-content:space-between; align-items:center; gap:8px; }
-  .ide-body { margin:0; padding:12px 14px; font-family:Consolas,monospace; font-size:12.5px; line-height:1.5; white-space:pre; color:#dbe6f7; }
-  .ide-body.diff .add { color:#6ee7a8; } .ide-body.diff .del { color:#f9a8a8; } .ide-body.diff .hdr { color:#93c5fd; }
-</style>
-</head>
-<body>
-<div class="wrap">
-  <div><span id="status">● live</span>
-  <h1>Local Coding Agent <span class="pill" id="ver"></span> <span class="pill" id="modePill"></span></h1></div>
-  <p class="sub">Số liệu cục bộ trên máy này · since <span id="since"></span> · tự cập nhật 2.5s · <span class="btn" id="clearBtn" onclick="clearMetrics()">Clear metrics</span></p>
-
-  <div class="panel" style="margin-bottom:16px">
-    <h3>Đường dẫn ChatGPT đang thao tác (workspace / roots)</h3>
-    <div id="roots" style="font-family:Consolas,monospace;font-size:13px;color:#7fe0d2"></div>
-    <div class="note">MCP endpoint: <span id="mcpep"></span> · Đây là thư mục mà ChatGPT đọc/ghi qua MCP. Để kiểm chứng, bảo ChatGPT chạy tool <b>workspace_info</b> — nó trả về đúng các path này.</div>
-  </div>
-
-  <div class="cards" id="cards"></div>
-
-  <div class="panel">
-    <h3>Pro speed & safety tips</h3>
-    <div id="proTips"><div class="dim">Loading recommendations...</div></div>
-  </div>
-
-  <div class="panel">
-    <h3>Tokens / phút (ước tính)</h3>
-    <canvas id="chart" width="1140" height="220"></canvas>
-    <div class="note">Ước tính = (ký tự input + output của tool) ÷ 4. Đây là token DỮ LIỆU đi qua connector, KHÔNG phải token tính phí của ChatGPT.</div>
-  </div>
-
-  <div class="grid">
-    <div class="panel"><h3>Top tools</h3><table id="tools"></table></div>
-    <div class="panel"><h3>Recent calls</h3><div id="recent"></div></div>
-  </div>
-
-  <div class="panel">
-    <h3>Pending approvals</h3>
-    <div id="approvals"><div class="dim">Không có yêu cầu đang chờ.</div></div>
-    <div class="note">Quyết định tại dashboard cục bộ, tách khỏi MCP client. Approval chỉ dùng một lần và được scope theo workspace.</div>
-  </div>
-
-  <div class="panel">
-    <h3>Files <span class="btn" id="refreshTree" onclick="loadTree()" style="margin-left:8px">Refresh</span> <span class="btn" id="diffBtn" onclick="toggleDiff()" style="margin-left:4px">Diff</span></h3>
-    <div class="ide">
-      <div class="ide-tree" id="tree"><div class="note" style="padding:8px 12px">Loading…</div></div>
-      <div class="ide-view">
-        <div class="ide-head"><span id="viewPath">Chọn một tệp ở bên trái để xem (read-only).</span><span id="viewMeta" class="dim"></span></div>
-        <pre class="ide-body" id="viewBody"></pre>
-      </div>
-    </div>
-    <div class="note">Read-only file browser for the workspace primary root. Diff shows <code>git diff</code> of the primary root. Local only — never tunneled.</div>
-  </div>
-</div>
-
-<script>
-function h(n){ return (n==null?0:n).toLocaleString(); }
-function esc(s){ return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
-function fmtDur(s){ var m=Math.floor(s/60),hh=Math.floor(m/60); if(hh>0) return hh+'h '+(m%60)+'m'; if(m>0) return m+'m '+(s%60)+'s'; return s+'s'; }
-function fmtMs(ms){ if(ms>=1000) return (ms/1000).toFixed(ms>=10000?1:2)+'s'; return Math.round(ms||0)+'ms'; }
-function card(label,val,sub){ return '<div class="card"><div class="clab">'+label+'</div><div class="cval">'+val+'</div><div class="csub">'+(sub||'')+'</div></div>'; }
-function renderCards(d){
-  var html='';
-  html+=card('Health score', h(d.health_score||100)+'/100', (d.health_label||'excellent')+' - policy '+(d.policy||'balanced'));
-  html+=card('Est. tokens (total)', h(d.est_tokens_total), 'in '+h(d.est_tokens_in)+' · out '+h(d.est_tokens_out));
-  html+=card('Tool calls', h(d.total_calls), 'ok '+h(d.ok_calls)+' · err '+h(d.error_calls));
-  html+=card('Success rate', (d.success_rate||0).toFixed(2)+'%', (d.calls_per_minute||0).toFixed(2)+' calls/phút');
-  html+=card('Latency p95', fmtMs(d.p95_latency_ms), 'avg '+fmtMs(d.avg_latency_ms)+' · p99 '+fmtMs(d.p99_latency_ms));
-  html+=card('Data qua connector', Math.round((d.in_chars+d.out_chars)/1024).toLocaleString()+' KB', 'tổng ký tự in/out');
-  html+=card('Uptime', fmtDur(d.uptime_sec||0), 'mode '+d.mode);
-  html+=card('Tiến trình nền', h(d.running_processes), 'đang chạy');
-  document.getElementById('cards').innerHTML=html;
-  document.getElementById('ver').textContent='v'+(d.version||'');
-  document.getElementById('modePill').textContent=(d.mode||'')+' mode - '+(d.policy||'balanced')+' policy';
-  document.getElementById('since').textContent=d.since? new Date(d.since).toLocaleString():'-';
-  document.getElementById('roots').innerHTML=(d.roots||[]).map(function(r){return esc(r);}).join('<br>')||'-';
-  document.getElementById('mcpep').textContent=d.mcp_endpoint||'-';
-}
-function renderChart(buckets){
-  var c=document.getElementById('chart'), x=c.getContext('2d'); var W=c.width,H=c.height; x.clearRect(0,0,W,H);
-  var data=(buckets||[]).slice(-60); var pad=34;
-  if(!data.length){ x.fillStyle='#5b6b86'; x.font='13px sans-serif'; x.fillText('Chưa có dữ liệu',12,24); return; }
-  var max=1; data.forEach(function(b){ if(b.tokens>max) max=b.tokens; });
-  var bw=(W-pad-6)/data.length;
-  x.strokeStyle='#223048'; x.beginPath(); x.moveTo(pad,H-pad); x.lineTo(W-4,H-pad); x.stroke();
-  data.forEach(function(b,i){
-    var bh=(H-pad*2)*(b.tokens/max); var bx=pad+i*bw; var by=H-pad-bh;
-    x.fillStyle='#2dd4bf'; x.fillRect(bx+1,by,Math.max(1,bw-2),Math.max(0,bh));
-  });
-  x.fillStyle='#5b6b86'; x.font='12px sans-serif';
-  x.fillText('max '+max.toLocaleString()+' tok/phút',pad,16);
-}
-function renderTools(t){
-  var html='<tr><th>Tool</th><th>Calls</th><th>Err</th><th>Avg</th><th>P95</th><th>Est tokens</th></tr>';
-  (t||[]).slice(0,15).forEach(function(r){ html+='<tr><td>'+r.name+'</td><td>'+h(r.calls)+'</td><td>'+h(r.err)+'</td><td>'+fmtMs(r.avg_ms)+'</td><td>'+fmtMs(r.p95_ms)+'</td><td>'+h(r.tokens)+'</td></tr>'; });
-  document.getElementById('tools').innerHTML=html;
-}
-function renderRecent(r){
-  var html='';
-  (r||[]).slice(0,22).forEach(function(e){
-    var tt=new Date(e.ts).toLocaleTimeString();
-    var reason = (!e.ok && e.error) ? ' <span class="errmsg">'+esc(e.error)+'</span>' : '';
-    html+='<div class="row"><span class="t">'+tt+'</span> <span class="'+(e.ok?'ok':'err')+'">'+(e.ok?'OK':'ERR')+'</span> <b>'+e.tool+'</b> <span class="dim">'+fmtMs(e.duration_ms)+' · '+h(e.tokens)+' tok</span>'+reason+'</div>';
-  });
-  document.getElementById('recent').innerHTML=html||'<div class="dim">Chưa có lệnh nào</div>';
-}
-function renderProTips(d){
-  var tips=d.pro_tips||[];
-  var bottlenecks=d.bottlenecks||[];
-  var html='';
-  if(bottlenecks.length) html+='<div class="row"><b>Bottlenecks:</b> <span class="dim">'+bottlenecks.map(esc).join(', ')+'</span></div>';
-  tips.forEach(function(t){ html+='<div class="row">'+esc(t)+'</div>'; });
-  document.getElementById('proTips').innerHTML=html||'<div class="dim">No recommendations yet.</div>';
-}
-async function loadApprovals(){
-  try{
-    var r=await fetch('/api/approvals',{cache:'no-store'}), d=await r.json(), html='';
-    (d.pending||[]).forEach(function(a){
-      var actions=Array.isArray(a.actions)?a.actions:[a.action];
-      var label=actions.length>1?'Exact batch ('+actions.length+')':actions[0];
-      var detail=actions.length>1?'<div class="dim">'+actions.map(esc).join('<br>')+'</div>':'';
-      html+='<div class="row"><b>'+esc(label)+'</b>'+detail+'<div class="dim">'+esc(a.reason||'')+' · expires '+new Date(a.expires_at||a.created).toLocaleTimeString()+'</div>'+
-        '<button class="btn" data-id="'+esc(a.id)+'" data-action="approve" onclick="decideApprovalFromButton(this)">Approve once</button> '+
-        '<button class="btn" data-id="'+esc(a.id)+'" data-action="deny" onclick="decideApprovalFromButton(this)">Deny</button></div>';
-    });
-    document.getElementById('approvals').innerHTML=html||'<div class="dim">Không có yêu cầu đang chờ.</div>';
-  }catch(e){}
-}
-function decideApprovalFromButton(btn){
-  decideApproval(btn.getAttribute('data-id'), btn.getAttribute('data-action'));
-}
-async function decideApproval(id,action){
-  await fetch('/api/approvals/'+encodeURIComponent(id)+'/'+action,{method:'POST'});
-  loadApprovals();
-}
-async function tick(){
-  try{
-    var r=await fetch('/metrics',{cache:'no-store'}); var d=await r.json();
-    renderCards(d); renderChart(d.buckets); renderTools(d.top_tools); renderRecent(d.recent); renderProTips(d); loadApprovals();
-    document.getElementById('status').textContent='● live'; document.getElementById('status').className='';
-    document.getElementById('status').style.color='#2dd4bf';
-  }catch(e){
-    document.getElementById('status').textContent='○ offline'; document.getElementById('status').style.color='#f87171';
-  }
-}
-async function clearMetrics(){
-  if(!confirm('Xóa toàn bộ số liệu (metrics)?')) return;
-  try{ await fetch('/api/clear-metrics',{method:'POST'}); tick(); }
-  catch(e){ alert('Clear failed: '+e); }
-}
-
-// ---- Mini-IDE (Files) ----
-var diffMode=false, selPath=null;
-function loadTree(){
-  diffMode=false; var db=document.getElementById('diffBtn'); if(db) db.classList.remove('active');
-  fetch('/api/tree',{cache:'no-store'}).then(function(r){return r.json();}).then(function(d){
-    var el=document.getElementById('tree');
-    if(d.error){ el.innerHTML='<div class="note" style="padding:8px 12px">'+esc(d.error)+'</div>'; return; }
-    var html='';
-    (d.entries||[]).forEach(function(e){
-      var depth=(e.path.match(/\\//g)||[]).length;
-      var name=e.path.split('/').pop();
-      var pad=6+depth*14;
-      if(e.type==='directory'){
-        html+='<div class="tnode dir" style="padding-left:'+pad+'px">'+esc(name)+'/</div>';
-      }else{
-        html+='<div class="tnode" data-path="'+esc(e.path)+'" style="padding-left:'+pad+'px" onclick="openFile(this)">'+esc(name)+'</div>';
-      }
-    });
-    if(d.truncated) html+='<div class="note" style="padding:6px 12px">… (truncated)</div>';
-    el.innerHTML=html||'<div class="note" style="padding:8px 12px">(empty)</div>';
-  }).catch(function(e){ document.getElementById('tree').innerHTML='<div class="note" style="padding:8px 12px">offline</div>'; });
-}
-function openFile(node){
-  var p=node.getAttribute('data-path'); selPath=p; diffMode=false;
-  var db=document.getElementById('diffBtn'); if(db) db.classList.remove('active');
-  document.querySelectorAll('.tnode.sel').forEach(function(n){n.classList.remove('sel');});
-  node.classList.add('sel');
-  document.getElementById('viewPath').textContent=p;
-  document.getElementById('viewMeta').textContent='';
-  var body=document.getElementById('viewBody'); body.className='ide-body'; body.textContent='Loading…';
-  fetch('/api/file?path='+encodeURIComponent(p),{cache:'no-store'}).then(function(r){return r.json();}).then(function(d){
-    if(d.error){ body.textContent='Error: '+d.error; return; }
-    body.textContent=d.content||'';
-    document.getElementById('viewMeta').textContent=h(d.total_lines)+' lines'+(d.truncated?' · truncated':'');
-  }).catch(function(e){ body.textContent='offline'; });
-}
-function renderDiff(text){
-  var body=document.getElementById('viewBody'); body.className='ide-body diff';
-  if(!text){ body.textContent='(no changes)'; return; }
-  var html=text.split('\\n').map(function(l){
-    var c=esc(l);
-    if(l.indexOf('+++')===0||l.indexOf('---')===0) return '<span class="hdr">'+c+'</span>';
-    if(l[0]==='+') return '<span class="add">'+c+'</span>';
-    if(l[0]==='-') return '<span class="del">'+c+'</span>';
-    if(l.indexOf('@@')===0||l.indexOf('diff --git')===0) return '<span class="hdr">'+c+'</span>';
-    return c;
-  }).join('\\n');
-  body.innerHTML=html;
-}
-function toggleDiff(){
-  diffMode=!diffMode;
-  var db=document.getElementById('diffBtn');
-  if(!diffMode){ db.classList.remove('active'); document.getElementById('viewPath').textContent=selPath||'Chọn một tệp.'; var b=document.getElementById('viewBody'); b.className='ide-body'; b.textContent=''; return; }
-  db.classList.add('active');
-  document.getElementById('viewPath').textContent='git diff (primary root)';
-  document.getElementById('viewMeta').textContent='';
-  var body=document.getElementById('viewBody'); body.className='ide-body'; body.textContent='Loading…';
-  fetch('/api/diff',{cache:'no-store'}).then(function(r){return r.json();}).then(function(d){
-    if(d.error){ body.textContent='Error: '+d.error; return; }
-    renderDiff(d.diff||'');
-  }).catch(function(e){ body.textContent='offline'; });
-}
-loadTree();
-tick(); setInterval(tick,2500);
-</script>
-</body>
-</html>`;
-}
-
-function escapeHtml(value) {
-  return String(value).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
 }
 
 // ============================================================================
@@ -3377,11 +2703,8 @@ async function compactGitStatus(rootDir) {
   };
 }
 
-function recommendNextActions({ profile, git, commands, health, truncated }) {
+function recommendNextActions({ profile, git, commands, truncated }) {
   const actions = [];
-  if (health?.bottlenecks?.length) {
-    actions.push("Stabilize the session first: inspect health.tips and avoid repeating failing/high-latency call patterns.");
-  }
   if (git?.is_git_repo && git.count > 0) {
     actions.push("Review current changes with git_diff/change_summary before large edits.");
   }
@@ -3474,7 +2797,6 @@ async function runQualityGate({ cwd = ".", include, timeout_ms = 120_000, stop_o
     const result = await runGatedCommand(gate.command, rootDir, timeout_ms);
     const entry = { name: gate.name, status: result.ok ? "pass" : "fail", ...result };
     gates.push(entry);
-    if (gate.name === "test") recordTestRun(gate.command, result.ok, result.summary);
     if (!result.ok && stop_on_failure) break;
   }
   const failed = gates.filter((g) => g.status === "fail");
@@ -3496,7 +2818,6 @@ async function buildSessionReport(rootDir) {
     collectWorkspaceDoctor(rootDir),
     compactGitStatus(rootDir)
   ]);
-  const snapshot = metricsSnapshot();
   return {
     kind: "session_report",
     version: VERSION,
@@ -3505,31 +2826,13 @@ async function buildSessionReport(rootDir) {
     root: toRel(rootDir),
     mode: MODE,
     policy: AGENT_POLICY,
-    health: {
-      score: snapshot.health_score,
-      label: snapshot.health_label,
-      bottlenecks: snapshot.bottlenecks,
-      tips: snapshot.pro_tips
-    },
-    metrics: {
-      total_calls: snapshot.total_calls,
-      ok_calls: snapshot.ok_calls,
-      error_calls: snapshot.error_calls,
-      success_rate: snapshot.success_rate,
-      calls_per_minute: snapshot.calls_per_minute,
-      avg_latency_ms: snapshot.avg_latency_ms,
-      p95_latency_ms: snapshot.p95_latency_ms,
-      est_tokens_total: snapshot.est_tokens_total,
-      top_tools: snapshot.top_tools.slice(0, 12).map((t) => ({ name: t.name, calls: t.calls, err: t.err, tokens: t.tokens, avg_ms: t.avg_ms, p95_ms: t.p95_ms }))
-    },
     git,
     doctor: {
       status: doctor.status,
       score: doctor.score,
       summary: doctor.summary,
       recommendations: doctor.recommendations
-    },
-    recent_errors: (metrics.recent || []).filter((r) => !r.ok).slice(0, 10)
+    }
   };
 }
 
@@ -3555,7 +2858,7 @@ function registerRepoIntelTools(mcp) {
     "workspace_snapshot",
     {
       title: "Workspace snapshot Pro",
-      description: "PRO one-call briefing: roots, mode/policy, project profile, important files, compact tree, git status, test/build/lint commands, metrics health, and recommended next actions. Use this FIRST to reduce MCP round-trips.",
+      description: "PRO one-call briefing: roots, mode/policy, project profile, important files, compact tree, git status, test/build/lint commands, and recommended next actions. Use this FIRST to reduce MCP round-trips.",
       inputSchema: {
         path: z.string().optional().describe("Root dir to inspect (default: primary root)."),
         depth: z.number().int().min(1).max(5).optional().describe("Tree depth (default 3)."),
@@ -3584,9 +2887,7 @@ function registerRepoIntelTools(mcp) {
         compactGitStatus(rootDir),
         include_symbols ? scanSymbols(rootDir, { maxFiles: 120, maxMatches: 80 }).catch(() => []) : Promise.resolve([])
       ]);
-      const health = computeHealthInsights();
-      const metricSummary = metricsSnapshot();
-      const next = recommendNextActions({ profile, git, commands, health, treeCount: tree.length, truncated: tree.length >= max_entries });
+      const next = recommendNextActions({ profile, git, commands, treeCount: tree.length, truncated: tree.length >= max_entries });
 
       return jsonResult({
         kind: "workspace_snapshot",
@@ -3623,15 +2924,6 @@ function registerRepoIntelTools(mcp) {
         },
         important_files: importantFiles.slice(0, 80),
         symbols: include_symbols ? symbols.slice(0, 80) : undefined,
-        metrics: {
-          total_calls: metricSummary.total_calls,
-          success_rate: metricSummary.success_rate,
-          calls_per_minute: metricSummary.calls_per_minute,
-          avg_latency_ms: metricSummary.avg_latency_ms,
-          p95_latency_ms: metricSummary.p95_latency_ms,
-          top_tools: metricSummary.top_tools.slice(0, 8).map((t) => ({ name: t.name, calls: t.calls, err: t.err, avg_ms: t.avg_ms, p95_ms: t.p95_ms }))
-        },
-        health,
         next_best_actions: next
       });
     }
@@ -4222,7 +3514,6 @@ function registerTestRunnerTools(mcp) {
       }
       assertCommandAllowed(cmd);
       const res = await runGatedCommand(cmd, rootDir, timeout_ms);
-      recordTestRun(cmd, res.ok, res.summary);
       return jsonResult(res);
     }
   );
@@ -4323,7 +3614,6 @@ function registerTestRunnerTools(mcp) {
         if (!cmds.test) throw new Error("No changed test files found and no test command detected.");
         assertCommandAllowed(cmds.test);
         const res = await runGatedCommand(cmds.test, rootDir, timeout_ms);
-        recordTestRun(cmds.test, res.ok, res.summary);
         return jsonResult({ ...res, strategy: "full_fallback", changed_files: changedFiles.length });
       }
 
@@ -4341,18 +3631,9 @@ function registerTestRunnerTools(mcp) {
 
       assertCommandAllowed(cmd);
       const res = await runGatedCommand(cmd, rootDir, timeout_ms);
-      recordTestRun(cmd, res.ok, res.summary);
       return jsonResult({ ...res, strategy: "targeted", test_files: [...testFiles], changed_files: changedFiles });
     }
   );
-}
-
-// Record test run into metrics
-function recordTestRun(command, ok, summary) {
-  if (!metrics.testRuns) metrics.testRuns = [];
-  metrics.testRuns.unshift({ ts: isoNow(), command: command.slice(0, 200), ok, summary: summary.slice(0, 500) });
-  if (metrics.testRuns.length > 20) metrics.testRuns.length = 20;
-  scheduleSave();
 }
 
 // ============================================================================
@@ -4365,7 +3646,7 @@ function registerReviewTools(mcp) {
     "session_report",
     {
       title: "Session report Pro",
-      description: "PRO end-of-session report: health score, bottlenecks, metrics, top tools, git state, doctor summary, recommendations, and recent errors.",
+      description: "PRO end-of-session report: git state, doctor summary, mode, policy, root, and version.",
       inputSchema: {
         cwd: z.string().optional().describe("Repository directory inside a root (default primary root).")
       }
@@ -4763,56 +4044,6 @@ function approvalActionForTool(tool, args) {
   return null;
 }
 
-async function dashApiApprovals(res) {
-  try {
-    const records = [];
-    for (const file of await readdir(APPROVALS_DIR).catch(() => [])) {
-      if (!file.endsWith(".json")) continue;
-      try {
-        const record = JSON.parse(await readFile(path.join(APPROVALS_DIR, file), "utf8"));
-        if (record.status === "pending" && approvalIsExpired(record)) {
-          record.status = "expired";
-          record.expired_at = isoNow();
-          await writeFile(path.join(APPROVALS_DIR, file), JSON.stringify(record, null, 2), "utf8");
-        } else if (record.status === "pending") records.push(record);
-      } catch {}
-    }
-    records.sort((a, b) => String(b.created).localeCompare(String(a.created)));
-    return sendJson(res, 200, { pending: records });
-  } catch (error) {
-    return sendJson(res, 500, { error: error?.message || "error" });
-  }
-}
-
-async function dashApiApprovalAction(url, res) {
-  try {
-    const parts = url.pathname.split("/").filter(Boolean);
-    const id = parts[2] || "";
-    const action = parts[3] || "";
-    if (!APPROVAL_ID_RE.test(id) || !["approve", "deny"].includes(action)) {
-      return sendJson(res, 400, { error: "invalid approval action" });
-    }
-    const fp = path.join(APPROVALS_DIR, `${id}.json`);
-    if (!existsSync(fp)) return sendJson(res, 404, { error: "approval not found" });
-    const record = JSON.parse(await readFile(fp, "utf8"));
-    if (record.status !== "pending") return sendJson(res, 409, { error: `approval is ${record.status}` });
-    if (approvalIsExpired(record)) {
-      record.status = "expired";
-      record.expired_at = isoNow();
-      await writeFile(fp, JSON.stringify(record, null, 2), "utf8");
-      return sendJson(res, 409, { error: "approval is expired" });
-    }
-    record.status = action === "approve" ? "approved" : "denied";
-    record[`${record.status}_at`] = isoNow();
-    record.approved_via = "local_dashboard";
-    await writeFile(fp, JSON.stringify(record, null, 2), "utf8");
-    audit({ ts: isoNow(), event: "approval_decision", id, action: record.action, status: record.status, via: "local_dashboard" });
-    return sendJson(res, 200, { ok: true, id, status: record.status });
-  } catch (error) {
-    return sendJson(res, 500, { error: error?.message || "error" });
-  }
-}
-
 async function enforceToolPolicy(tool, args) {
   if (["policy_status", "explain_risk", "request_approval", "request_approval_batch", "approve_request", "deny_request"].includes(tool)) return;
   if (AGENT_POLICY === "full") return;
@@ -4829,7 +4060,7 @@ async function enforceToolPolicy(tool, args) {
   try {
     const approval = await checkApprovalExists(action);
     if (!approval) {
-      throw new Error(`Approval required. Call request_approval with action=${JSON.stringify(action)}, then have the local operator approve it.`);
+      throw new Error(`Approval required. Call request_approval with action=${JSON.stringify(action)}, then call approve_request with AGENT_APPROVAL_TOKEN.`);
     }
     const consumed = new Set(Array.isArray(approval.consumed_actions) ? approval.consumed_actions : []);
     consumed.add(action);
@@ -4937,6 +4168,7 @@ function registerPolicyTools(mcp) {
         allowed: AGENT_POLICY === "full" ? ["*"] : AGENT_POLICY === "balanced" ? ["read", "write", "edit", "test", "build"] : ["read", "search", "analyze"],
         needs_approval: AGENT_POLICY === "balanced" ? ["delete_path", "npm/pip install", "curl/wget", "git push/fetch/pull", "risky run_commands batch"] : [],
         approval_options: AGENT_POLICY === "balanced" ? ["one exact action", "2-20 exact actions in one expiring batch"] : [],
+        approval_method: AGENT_POLICY === "balanced" ? "Use request_approval/request_approval_batch, then approve_request or deny_request with AGENT_APPROVAL_TOKEN." : null,
         approval_ttl_minutes: APPROVAL_TTL_MINUTES,
         blocked: AGENT_POLICY === "strict" ? ["all writes", "installs", "network", "delete", "git mutations"] : []
       });
@@ -4983,7 +4215,7 @@ function registerPolicyTools(mcp) {
     "request_approval",
     {
       title: "Request approval",
-      description: "Create an expiring pending request for one exact action. The local operator should approve it in the dashboard; MCP token approval is an optional fallback.",
+      description: "Create an expiring pending request for one exact action. Approve or deny it with approve_request/deny_request using AGENT_APPROVAL_TOKEN.",
       inputSchema: {
         action: z.string().min(1),
         reason: z.string().min(1).describe("Why this action is needed.")
@@ -5008,7 +4240,7 @@ function registerPolicyTools(mcp) {
         id,
         status: "pending",
         expires_at: record.expires_at,
-        message: "Approval request created. Ask the local operator to approve it in the dashboard.",
+        message: "Approval request created. Call approve_request or deny_request with AGENT_APPROVAL_TOKEN.",
         action,
         reason
       });
@@ -5048,7 +4280,7 @@ function registerPolicyTools(mcp) {
         status: "pending",
         actions: exactActions,
         expires_at: record.expires_at,
-        message: "Exact batch approval created. Ask the local operator to review and approve it in the dashboard."
+        message: "Exact batch approval created. Call approve_request or deny_request with AGENT_APPROVAL_TOKEN."
       });
     }
   );

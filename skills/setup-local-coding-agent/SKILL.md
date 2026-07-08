@@ -11,7 +11,8 @@ start Local Coding Agent.
 ## Rules
 
 - Do not install system dependencies without asking first.
-- Do not download or commit `tunnel-client`; the customer must provide it.
+- Let the setup wizard download `tunnel-client` when possible; fall back to a
+  customer-provided path if download/extraction fails.
 - Do not print, commit, or upload API keys, tunnel IDs, auth tokens, or local config.
 - Default to `mode=safe` and `policy=balanced`.
 - Prefer the universal CLI over the Windows tray app unless the customer asks for GUI.
@@ -23,24 +24,20 @@ start Local Coding Agent.
    - `git --version` should work.
 2. Clone the repo if needed:
    - `git clone https://github.com/LongNgn204/local-coding-agent.git`
-3. Enter the repo and install:
-   - Windows: `scripts\lca.cmd install`
-   - macOS/Linux: `bash scripts/lca install`
-4. Run setup:
+3. Enter the repo and run setup wizard:
    - Windows: `scripts\lca.cmd setup`
-   - macOS/Linux: `bash scripts/lca setup`
-5. Ask the customer for:
+   - macOS/Linux/WSL: `bash scripts/lca setup`
+4. Let the wizard ask the customer for:
    - workspace path
-   - tunnel-client path, only if using ChatGPT Web tunnel
    - Tunnel ID
    - Organization ID if required
-   - Runtime API key, preferably via `CONTROL_PLANE_API_KEY`
-6. Start:
-   - Windows: `scripts\lca.cmd start`
-   - macOS/Linux: `bash scripts/lca start`
-7. Verify:
-   - `http://127.0.0.1:8787/healthz`
-   - `http://127.0.0.1:8790/ui`
+   - Runtime API key for `.env.local`
+   - tunnel-client path only if auto-download fails
+5. Start from the target repo:
+   - `cd /path/to/workspace`
+   - `lca`
+6. Verify:
+   - `http://127.0.0.1:8789/healthz`
    - `scripts\lca.cmd status` or `bash scripts/lca status`
 
 ## Report Back
@@ -50,7 +47,7 @@ Return:
 - repo path
 - workspace path
 - MCP URL
-- dashboard URL
+- health URL
 - mode and policy
 - tunnel status
 - any missing requirement and the exact next fix

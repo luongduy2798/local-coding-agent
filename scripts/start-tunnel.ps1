@@ -29,8 +29,7 @@ $AgentMode      = "safe"     # "safe" (recommended) or "full"
 $AgentPolicy    = "balanced" # "strict", "balanced", or "full"
 $ExtraRoots     = ""          # extra folders, semicolon-separated
 $AuthToken      = ""          # optional bearer token (defense in depth)
-$DashboardPort  = "8790"      # local-only dashboard; do NOT use 8788 (tunnel uses it)
-$Port           = "8787"
+$Port           = "8789"
 # --------------------------------------------------------------------------
 
 $McpHealthUrl = "http://127.0.0.1:$Port/healthz"
@@ -87,7 +86,6 @@ $configMaterial = [ordered]@{
     extraRoots = $ExtraRoots
     authEnabled = [bool]$AuthToken
     port = $Port
-    dashboardPort = $DashboardPort
 } | ConvertTo-Json -Compress
 $AgentConfigId = $configMaterial | node -e "const c=require('crypto');let s='';process.stdin.on('data',d=>s+=d);process.stdin.on('end',()=>process.stdout.write(c.createHash('sha256').update(s).digest('hex').slice(0,16)))"
 
@@ -114,7 +112,6 @@ if (-not $health) {
     $env:AGENT_CONFIG_ID = $AgentConfigId
     $env:AGENT_EXTRA_ROOTS = $ExtraRoots
     $env:MCP_AUTH_TOKEN = $AuthToken
-    $env:DASHBOARD_PORT = $DashboardPort
     Start-Process -FilePath "node.exe" -ArgumentList "server.mjs" `
         -WorkingDirectory $ServerDir -WindowStyle Hidden `
         -RedirectStandardOutput (Join-Path $ServerDir "mcp.log") `
@@ -127,7 +124,6 @@ if (-not (Get-McpHealth)) {
 }
 
 Write-Host "MCP server OK:  http://127.0.0.1:$Port/mcp"
-if ($DashboardPort -ne "0") { Write-Host "Dashboard:      http://127.0.0.1:$DashboardPort/ui" }
 Write-Host ""
 Write-Host "Paste the Runtime API key for the OpenAI Secure MCP Tunnel."
 Write-Host "It connects the tunnel; it is not used for model responses."

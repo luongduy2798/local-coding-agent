@@ -28,9 +28,9 @@ version.
    - `git log --oneline --decorate --max-count=10 HEAD..origin/main`
 6. Update safely:
    - `git pull --ff-only origin main`
-7. Reinstall dependencies:
-   - Windows: `scripts\lca.cmd install`
-   - macOS/Linux: `bash scripts/lca install`
+7. Run the setup wizard to refresh dependencies, config defaults, and wrappers:
+   - Windows: `scripts\lca.cmd setup`
+   - macOS/Linux/WSL: `bash scripts/lca setup`
 8. Validate:
    - `node --check scripts/local-coding-agent.mjs`
    - `node --check scripts/network-doctor.mjs`
@@ -48,7 +48,7 @@ Return:
 - current commit
 - current version from `/healthz` if running
 - MCP URL
-- dashboard URL
+- health URL
 - workspace path
 - mode and policy
 - tunnel status

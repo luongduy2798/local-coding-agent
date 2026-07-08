@@ -10,7 +10,7 @@ import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
-const ENDPOINT = process.env.TEST_ENDPOINT || "http://127.0.0.1:8787/mcp";
+const ENDPOINT = process.env.TEST_ENDPOINT || "http://127.0.0.1:8789/mcp";
 const client = new Client({ name: "agent-security-test-client", version: "1.0.0" });
 const transport = new StreamableHTTPClientTransport(new URL(ENDPOINT));
 await client.connect(transport);

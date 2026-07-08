@@ -14,8 +14,8 @@ on that machine. Read this before using it.
   provided out of the box). For isolation, run it inside a VM, container, or WSL2.
 - **Prompt injection is real.** If the model reads a malicious file/repo, it can
   be tricked into running harmful commands. Only connect workspaces you trust,
-  prefer `safe` mode, and review what the agent does (the dashboard + `data/audit.log`
-  show every tool call).
+  prefer `safe` mode, and review what the agent does (`data/audit.log` records
+  tool calls).
 - **Never expose it publicly without auth.** The server binds to `127.0.0.1` by
   design. Do **not** put it behind a public/quick tunnel (e.g. a random public
   URL) without setting `MCP_AUTH_TOKEN`. Doing so is equivalent to publishing a
@@ -28,7 +28,8 @@ on that machine. Read this before using it.
 - `AGENT_POLICY=balanced` by default. Normal edits/tests can proceed, while
   deletes, installs/network calls, mutating git, risky commands, risky
   background processes, and destructive patch operations require one-time local
-  approval in the dashboard.
+  approval through `request_approval`/`request_approval_batch` plus
+  `approve_request` with `AGENT_APPROVAL_TOKEN`.
 - Exact batch approvals may group 2-20 explicitly listed actions into one local
   decision. They expire within 1-30 minutes, each action is consumable once,
   and wildcard or implicit grants are not supported.
@@ -65,8 +66,7 @@ trước khi dùng.
   ở tầng hệ điều hành). Muốn an toàn thật, chạy trong VM, container hoặc WSL2.
 - **Prompt injection là rủi ro thật.** Nếu mô hình đọc một file/repo độc hại, nó
   có thể bị "dụ" chạy lệnh nguy hiểm. Chỉ kết nối workspace bạn tin tưởng, ưu tiên
-  `safe` mode, và theo dõi hành vi agent (dashboard + `data/audit.log` ghi lại mọi
-  lệnh).
+  `safe` mode, và theo dõi hành vi agent (`data/audit.log` ghi lại tool call).
 - **Tuyệt đối không expose công khai mà không có auth.** Server mặc định chỉ bind
   `127.0.0.1`. **Đừng** đưa nó ra một tunnel public ngẫu nhiên mà không đặt
   `MCP_AUTH_TOKEN` — làm vậy chẳng khác gì công bố một remote shell ra internet.
@@ -77,8 +77,9 @@ trước khi dùng.
 
 - Mặc định `AGENT_MODE=safe`.
 - `AGENT_POLICY=balanced` cho phép sửa/test thông thường; hành động rủi ro vẫn
-  cần duyệt cục bộ. Batch approval chỉ chứa các hành động chính xác, có hạn dùng
-  và mỗi hành động chỉ được dùng một lần; đây không phải quyền wildcard.
+  cần duyệt cục bộ bằng `AGENT_APPROVAL_TOKEN` qua `approve_request` hoặc
+  `deny_request`. Batch approval chỉ chứa các hành động chính xác, có hạn dùng và
+  mỗi hành động chỉ được dùng một lần; đây không phải quyền wildcard.
 - Lệnh hệ thống thảm hoạ luôn bị chặn kể cả ở `full` mode (trừ khi
   `AGENT_ALLOW_DANGEROUS=1`).
 - Server chỉ nghe loopback.

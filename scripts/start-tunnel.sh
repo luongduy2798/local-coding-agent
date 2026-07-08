@@ -23,8 +23,7 @@ AGENT_MODE="${AGENT_MODE:-safe}"      # "safe" (recommended) or "full"
 AGENT_POLICY="${AGENT_POLICY:-balanced}" # strict, balanced, or full
 EXTRA_ROOTS="${AGENT_EXTRA_ROOTS:-}"  # extra folders, semicolon-separated
 AUTH_TOKEN="${MCP_AUTH_TOKEN:-}"      # optional bearer token
-DASHBOARD_PORT="${DASHBOARD_PORT:-8790}"  # do NOT use 8788 (tunnel uses it)
-PORT="${PORT:-8787}"
+PORT="${PORT:-8789}"
 # ---------------------------------------------------------------------------
 
 HEALTH_URL="http://127.0.0.1:$PORT/healthz"
@@ -73,10 +72,9 @@ AUTH_ENABLED=0
 [ -n "$AUTH_TOKEN" ] && AUTH_ENABLED=1
 CONFIG_ID="$(
   LCA_WORKSPACE="$AGENT_WORKSPACE" LCA_MODE="$AGENT_MODE" LCA_POLICY="$AGENT_POLICY" \
-  LCA_EXTRA_ROOTS="$EXTRA_ROOTS" LCA_AUTH_ENABLED="$AUTH_ENABLED" LCA_PORT="$PORT" \
-  LCA_DASHBOARD_PORT="$DASHBOARD_PORT" node -e '
+  LCA_EXTRA_ROOTS="$EXTRA_ROOTS" LCA_AUTH_ENABLED="$AUTH_ENABLED" LCA_PORT="$PORT" node -e '
     const c=require("node:crypto");
-    const keys=["LCA_WORKSPACE","LCA_MODE","LCA_POLICY","LCA_EXTRA_ROOTS","LCA_AUTH_ENABLED","LCA_PORT","LCA_DASHBOARD_PORT"];
+    const keys=["LCA_WORKSPACE","LCA_MODE","LCA_POLICY","LCA_EXTRA_ROOTS","LCA_AUTH_ENABLED","LCA_PORT"];
     const value=JSON.stringify(Object.fromEntries(keys.map(k=>[k,process.env[k]||""])));
     process.stdout.write(c.createHash("sha256").update(value).digest("hex").slice(0,16));'
 )"
@@ -99,7 +97,7 @@ if ! curl -fsS "$HEALTH_URL" >/dev/null 2>&1; then
   PORT="$PORT" AGENT_HOST=127.0.0.1 AGENT_WORKSPACE="$AGENT_WORKSPACE" AGENT_MODE="$AGENT_MODE" \
   AGENT_POLICY="$AGENT_POLICY" \
   AGENT_CONFIG_ID="$CONFIG_ID" \
-  AGENT_EXTRA_ROOTS="$EXTRA_ROOTS" MCP_AUTH_TOKEN="$AUTH_TOKEN" DASHBOARD_PORT="$DASHBOARD_PORT" \
+  AGENT_EXTRA_ROOTS="$EXTRA_ROOTS" MCP_AUTH_TOKEN="$AUTH_TOKEN" \
     nohup node "$SERVER_DIR/server.mjs" >"$SERVER_DIR/mcp.log" 2>"$SERVER_DIR/mcp.err.log" &
   sleep 2
 fi
@@ -107,7 +105,6 @@ fi
 curl -fsS "$HEALTH_URL" >/dev/null 2>&1 || { echo "MCP server did not respond. Check server/mcp.err.log" >&2; exit 1; }
 
 echo "MCP server OK:  http://127.0.0.1:$PORT/mcp"
-[ "$DASHBOARD_PORT" != "0" ] && echo "Dashboard:      http://127.0.0.1:$DASHBOARD_PORT/ui"
 echo
 echo "Paste the Runtime API key for the OpenAI Secure MCP Tunnel (input hidden)."
 read -r -s -p "CONTROL_PLANE_API_KEY: " CP_KEY

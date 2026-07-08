@@ -5,7 +5,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
-const ENDPOINT = process.env.TEST_ENDPOINT || "http://127.0.0.1:8787/mcp";
+const ENDPOINT = process.env.TEST_ENDPOINT || "http://127.0.0.1:8789/mcp";
 const client = new Client({ name: "agent-pro-test-client", version: "1.0.0" });
 const transport = new StreamableHTTPClientTransport(new URL(ENDPOINT));
 await client.connect(transport);
@@ -52,7 +52,7 @@ try {
   check("snapshot includes important files", snap.important_files?.some((f) => f.path === "README.md"));
   check("snapshot includes tree entries", snap.tree?.entries?.includes("src/index.js"));
   check("snapshot includes symbols when requested", snap.symbols?.some((s) => s.name === "hello"));
-  check("snapshot includes health score", Number.isInteger(snap.health?.score) && snap.health.score >= 0 && snap.health.score <= 100);
+  check("snapshot omits metrics", snap.metrics === undefined && snap.health === undefined);
   check("snapshot includes next actions", Array.isArray(snap.next_best_actions) && snap.next_best_actions.length > 0);
 
   const doctor = await callJson("workspace_doctor", {});
@@ -71,16 +71,7 @@ try {
   const report = await callJson("session_report", {});
   check("session_report kind", report.kind === "session_report");
   check("session_report exposes doctor summary", report.doctor?.summary && Number.isInteger(report.doctor.score));
-  check("session_report exposes metrics", Number.isInteger(report.metrics?.total_calls));
-
-  if (process.env.DASHBOARD_PORT && process.env.DASHBOARD_PORT !== "0") {
-    const metricsRes = await fetch(`http://127.0.0.1:${process.env.DASHBOARD_PORT}/metrics`);
-    const metrics = await metricsRes.json();
-    check("metrics exposes pro tier", metrics.tier === "pro");
-    check("metrics exposes health score", Number.isInteger(metrics.health_score));
-  } else {
-    check("metrics skipped when dashboard disabled", true);
-  }
+  check("session_report omits metrics", report.metrics === undefined && report.health === undefined && report.recent_errors === undefined);
 } finally {
   await client.close();
 }

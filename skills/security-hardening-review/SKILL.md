@@ -14,7 +14,6 @@ Use this before merging changes to security-sensitive surfaces.
 - approval request/approve/deny/consume flow
 - audit logging and redaction
 - tunnel headers, API keys, auth tokens, profile generation
-- dashboard approval endpoints
 - support/network diagnostic reports
 
 ## Review Steps

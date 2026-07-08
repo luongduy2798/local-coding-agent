@@ -34,14 +34,13 @@ async function waitFor(url) {
   throw new Error(`Server did not become ready: ${url}`);
 }
 
-async function startServer(workspace, { port, dashboardPort = 0, policy = "strict", auth = "", approvalToken = "", maxBody = "1048576" }) {
+async function startServer(workspace, { port, policy = "strict", auth = "", approvalToken = "", maxBody = "1048576" }) {
   await mkdir(workspace, { recursive: true });
   const child = spawn(process.execPath, [SERVER], {
     cwd: path.dirname(SERVER),
     env: {
       ...process.env,
       PORT: String(port),
-      DASHBOARD_PORT: String(dashboardPort),
       AGENT_WORKSPACE: workspace,
       AGENT_MODE: "safe",
       AGENT_POLICY: policy,
@@ -103,9 +102,9 @@ function chunkedPost(port, body) {
 const base = await mkdtemp(path.join(os.tmpdir(), "lca-hardening-"));
 let server;
 try {
-  // Strict policy + browser-origin + body limit + latency telemetry.
-  console.log("\n[phase] strict policy, origin, body limit, telemetry");
-  server = await startServer(path.join(base, "strict"), { port: 19001, dashboardPort: 19002, policy: "strict", maxBody: "8192" });
+  // Strict policy + browser-origin + body limit + removed dashboard routes.
+  console.log("\n[phase] strict policy, origin, body limit, no dashboard routes");
+  server = await startServer(path.join(base, "strict"), { port: 19001, policy: "strict", maxBody: "8192" });
   const evil = await fetch("http://127.0.0.1:19001/mcp", {
     method: "OPTIONS",
     headers: { Origin: "https://evil.example", "Access-Control-Request-Method": "POST" }
@@ -119,15 +118,18 @@ try {
   await call(client, "workspace_info");
   await client.close();
 
-  const metrics = await (await fetch("http://127.0.0.1:19002/metrics")).json();
-  check("latency telemetry exposes avg/p50/p95/p99", ["avg_latency_ms", "p50_latency_ms", "p95_latency_ms", "p99_latency_ms"].every((k) => Number.isFinite(metrics[k])));
+  const metricsRoute = await fetch("http://127.0.0.1:19001/metrics");
+  const uiRoute = await fetch("http://127.0.0.1:19001/ui");
+  check("dashboard metrics route is gone", metricsRoute.status === 404, `status=${metricsRoute.status}`);
+  check("dashboard ui route is gone", uiRoute.status === 404, `status=${uiRoute.status}`);
   check("chunked payload is size-limited", (await chunkedPost(19001, JSON.stringify({ data: "x".repeat(12000) }))) === 413);
   await stopServer(server);
   server = null;
 
-  // Balanced policy approvals are decided out of band in the local dashboard.
-  console.log("\n[phase] out-of-band one-time approvals");
-  server = await startServer(path.join(base, "balanced"), { port: 19006, dashboardPort: 19007, policy: "balanced" });
+  // Balanced policy approvals are decided through the local operator token.
+  console.log("\n[phase] token-only one-time approvals");
+  const balancedSecret = `LCA_BALANCED_APPROVAL_${Date.now()}`;
+  server = await startServer(path.join(base, "balanced"), { port: 19006, policy: "balanced", approvalToken: balancedSecret });
   const balanced = await connect(19006);
   await call(balanced, "write_file", { path: "victim.txt", content: "x" });
   const blockedDelete = await call(balanced, "delete_path", { path: "victim.txt" });
@@ -137,8 +139,7 @@ try {
   });
   check("balanced policy does not let run_commands bypass risky-command approval", blockedRiskyBatch.isError && blockedRiskyBatch.text.includes("Approval required"));
   const request = JSON.parse((await call(balanced, "request_approval", { action: "delete_path:victim.txt", reason: "hardening regression" })).text);
-  const dashboardDecision = await fetch(`http://127.0.0.1:19007/api/approvals/${request.id}/approve`, { method: "POST" });
-  check("local dashboard approves pending action", dashboardDecision.ok);
+  check("operator token approves pending action", !(await call(balanced, "approve_request", { id: request.id, approval_token: balancedSecret })).isError);
   check("approved action executes once", !(await call(balanced, "delete_path", { path: "victim.txt" })).isError);
   await call(balanced, "write_file", { path: "victim.txt", content: "x" });
   check("consumed approval cannot be replayed", (await call(balanced, "delete_path", { path: "victim.txt" })).isError);
@@ -150,8 +151,7 @@ try {
     reason: "hardening exact batch regression",
     expires_in_minutes: 5
   })).text);
-  const batchDecision = await fetch(`http://127.0.0.1:19007/api/approvals/${batchRequest.id}/approve`, { method: "POST" });
-  check("dashboard approves exact action batch", batchDecision.ok);
+  check("operator token approves exact action batch", !(await call(balanced, "approve_request", { id: batchRequest.id, approval_token: balancedSecret })).isError);
   check("batch approval consumes first exact action", !(await call(balanced, "delete_path", { path: "batch-a.txt" })).isError);
   check("batch approval consumes second exact action", !(await call(balanced, "delete_path", { path: "batch-b.txt" })).isError);
   check("consumed batch action cannot be replayed", (await call(balanced, "delete_path", { path: "batch-a.txt" })).isError);
@@ -161,14 +161,12 @@ try {
     action: concurrentAction,
     reason: "concurrent consume regression"
   })).text);
-  await fetch(`http://127.0.0.1:19007/api/approvals/${concurrentRequest.id}/approve`, { method: "POST" });
+  await call(balanced, "approve_request", { id: concurrentRequest.id, approval_token: balancedSecret });
   const concurrentResults = await Promise.all([
     call(balanced, "run_command", { command: "git fetch --dry-run" }),
     call(balanced, "run_command", { command: "git fetch --dry-run" })
   ]);
   check("one-time approval remains one-time under concurrent calls", concurrentResults.filter((result) => result.isError).length === 1);
-  const evilDashboard = await fetch(`http://127.0.0.1:19007/api/approvals/${request.id}/deny`, { method: "POST", headers: { Origin: "https://evil.example" } });
-  check("dashboard rejects cross-origin decisions", evilDashboard.status === 403);
   await balanced.close();
   await stopServer(server);
   server = null;
@@ -182,6 +180,9 @@ try {
   check("MCP operator token approves a pending request", !(await call(tokenClient, "approve_request", { id: tokenRequest.id, approval_token: approvalSecret })).isError);
   check("MCP operator token cannot approve the same request twice", (await call(tokenClient, "approve_request", { id: tokenRequest.id, approval_token: approvalSecret })).isError);
   check("MCP approval rejects path-like ids", (await call(tokenClient, "approve_request", { id: "../outside", approval_token: approvalSecret })).isError);
+  const denyRequest = JSON.parse((await call(tokenClient, "request_approval", { action: "delete_path:deny.txt", reason: "token deny regression" })).text);
+  check("MCP operator token denies a pending request", !(await call(tokenClient, "deny_request", { id: denyRequest.id, approval_token: approvalSecret })).isError);
+  check("denied request cannot be approved later", (await call(tokenClient, "approve_request", { id: denyRequest.id, approval_token: approvalSecret })).isError);
   await tokenClient.close();
   await stopServer(server);
   server = null;

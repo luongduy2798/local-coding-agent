@@ -34,9 +34,8 @@ Usage:
 Options:
   --out <file>                Report path (default: network-doctor-report.txt)
   --host <hostname>           Extra hostname to test; can be repeated
-  --mcp-url <url>             Local MCP URL to test (default: http://127.0.0.1:8787/mcp)
-  --health-url <url>          Local health URL (default: http://127.0.0.1:8787/healthz)
-  --dashboard-url <url>       Local dashboard URL (default: http://127.0.0.1:8790/ui)
+  --mcp-url <url>             Local MCP URL to test (default: http://127.0.0.1:8789/mcp)
+  --health-url <url>          Local health URL (default: http://127.0.0.1:8789/healthz)
   --tunnel-bin <path>         Optional tunnel-client(.exe) path
   --tunnel-id <id>            Optional tunnel ID for a short tunnel smoke test
   --organization-id <id>      Optional OpenAI organization ID/header
@@ -57,9 +56,8 @@ function parseArgs(argv) {
   const opts = {
     out: DEFAULT_OUT,
     hosts: [...DEFAULT_HOSTS],
-    healthUrl: "http://127.0.0.1:8787/healthz",
-    dashboardUrl: "http://127.0.0.1:8790/ui",
-    mcpUrl: "http://127.0.0.1:8787/mcp",
+    healthUrl: "http://127.0.0.1:8789/healthz",
+    mcpUrl: "http://127.0.0.1:8789/mcp",
     tunnelBin: "",
     tunnelId: "",
     organizationId: "",
@@ -90,9 +88,6 @@ function parseArgs(argv) {
         break;
       case "--health-url":
         opts.healthUrl = next();
-        break;
-      case "--dashboard-url":
-        opts.dashboardUrl = next();
         break;
       case "--tunnel-bin":
         opts.tunnelBin = next();
@@ -503,7 +498,6 @@ async function main() {
       out: opts.out,
       hosts: opts.hosts,
       healthUrl: opts.healthUrl,
-      dashboardUrl: opts.dashboardUrl,
       mcpUrl: opts.mcpUrl,
       tunnelBin: opts.tunnelBin || "",
       tunnelBinExists: opts.tunnelBin ? existsSync(opts.tunnelBin) : false,
@@ -530,7 +524,6 @@ async function main() {
   report.http.push(await requestTest("https://api.openai.com/v1/models", { headers }));
   report.http.push(await requestTest("https://chatgpt.com/", { method: "HEAD" }));
   report.local.push(await requestTest(opts.healthUrl));
-  report.local.push(await requestTest(opts.dashboardUrl, { method: "HEAD" }));
   report.tunnel = await tunnelSmoke(opts);
   report.quickDiagnosis = quickDiagnosis(report);
 
