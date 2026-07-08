@@ -44,3 +44,8 @@ test("parses and merges dotenv without dropping unrelated values", () => {
     CONTROL_PLANE_API_KEY: "sk-proj-new"
   });
 });
+
+test("empty dotenv merge starts with the requested key", () => {
+  const merged = mergeDotEnvText("", { CONTROL_PLANE_TUNNEL_ID: "tunnel_new" });
+  assert.equal(merged, "CONTROL_PLANE_TUNNEL_ID=tunnel_new\n");
+});

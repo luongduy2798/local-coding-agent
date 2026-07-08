@@ -139,7 +139,7 @@ try {
     }
     Write-Host ""
     Write-Host "Running tunnel. Keep this window open while using the ChatGPT app."
-    & $TunnelExe run --profile $ProfileName --profile-dir $ProfileDir --open-web-ui
+    & $TunnelExe run --profile $ProfileName --profile-dir $ProfileDir
 } finally {
     Remove-Item Env:\CONTROL_PLANE_API_KEY -ErrorAction SilentlyContinue
     Remove-Item Env:\MCP_AUTH_HEADER -ErrorAction SilentlyContinue

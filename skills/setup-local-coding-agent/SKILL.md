@@ -30,7 +30,6 @@ start Local Coding Agent.
 4. Let the wizard ask the customer for:
    - workspace path
    - Tunnel ID
-   - Organization ID if required
    - Runtime API key for `.env.local`
    - tunnel-client path only if auto-download fails
 5. Start from the target repo:

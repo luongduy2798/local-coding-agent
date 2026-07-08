@@ -81,24 +81,6 @@ Tóm tắt:
 
 Runtime API key nằm ở `.env.local` và chỉ dùng cho local tunnel-client. Không nhập Runtime API key vào phần auth của ChatGPT connector.
 
-## Legacy Wrappers
-
-Các lệnh này vẫn tồn tại để tiện dùng, nhưng chỉ forward vào setup/CLI mới:
-
-```bash
-make setup     # legacy wrapper cho lca setup
-make keys      # mở trang tạo Tunnel ID và Runtime API key
-make workspace # mở Node TUI chọn workspace
-make cli       # cài lại global command lca
-bash install.sh
-```
-
-Windows:
-
-```powershell
-.\install.ps1
-```
-
 `scripts/start-tunnel.sh` và `scripts/start-tunnel.ps1` là low-level legacy/debug launcher. Flow bình thường nên dùng `lca setup`, sau đó `lca`.
 
 ## Config
@@ -143,7 +125,6 @@ workspace sẽ là git root của repo đó. Nếu không nằm trong git repo, 
 - `mode=safe` là mặc định khuyên dùng.
 - `full` mode mạnh hơn nhưng rủi ro hơn.
 - Với `policy=balanced`, đặt `AGENT_APPROVAL_TOKEN` nếu muốn duyệt action rủi ro mà không chuyển sang `policy=full`.
-- Tunnel client dùng port `8788`; tránh dùng lại port này cho dịch vụ khác.
 
 ## Troubleshooting
 

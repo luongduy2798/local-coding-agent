@@ -72,8 +72,7 @@ function defaultOptions() {
     organizationId: process.env.OPENAI_ORGANIZATION || process.env.OPENAI_ORG_ID || "",
     runtimeKeyEnv: "CONTROL_PLANE_API_KEY",
     runtimeKey: "",
-    tunnelHealthPort: process.env.TUNNEL_HEALTH_PORT || "8788",
-    openWebUi: process.env.OPEN_TUNNEL_WEB_UI !== "0",
+    tunnelHealthPort: process.env.TUNNEL_HEALTH_PORT || "",
     noTunnel: false
   };
 }
@@ -122,7 +121,6 @@ Tunnel options:
   --runtime-key <key>         Runtime API key for this process
   --save                      With setup, save provided options to config
   --force                     With update, continue even when local changes exist
-  --no-open-web-ui            Do not pass --open-web-ui to tunnel-client
 
 Fast path:
   scripts\\lca.cmd setup       # Windows
@@ -227,9 +225,6 @@ function parseArgs(argv) {
       case "--force":
         flags.force = true;
         break;
-      case "--no-open-web-ui":
-        flags.openWebUi = false;
-        break;
       case "--json":
         flags.json = true;
         break;
@@ -275,7 +270,8 @@ export function normalize(opts) {
   const out = { ...opts };
   out.port = String(out.port || DEFAULT_PORT);
   delete out.dashboardPort;
-  out.tunnelHealthPort = String(out.tunnelHealthPort || "8788");
+  delete out.openWebUi;
+  out.tunnelHealthPort = String(out.tunnelHealthPort || "");
   out.mode = out.mode || "safe";
   out.policy = out.policy || "balanced";
   out.runtimeKeyEnv = out.runtimeKeyEnv || "CONTROL_PLANE_API_KEY";
@@ -284,7 +280,6 @@ export function normalize(opts) {
   out.tunnelBin = out.tunnelBin || defaultOptions().tunnelBin;
   out.node = out.node || "node";
   out.noTunnel = toBool(out.noTunnel);
-  out.openWebUi = toBool(out.openWebUi, true);
   return out;
 }
 
@@ -557,10 +552,6 @@ function writeTunnelProfile(opts) {
     lines.push(`    - "OpenAI-Organization: ${yamlEscape(opts.organizationId.trim())}"`);
   }
   lines.push(
-    "health:",
-    `  listen_addr: "127.0.0.1:${opts.tunnelHealthPort}"`,
-    "admin_ui:",
-    `  open_browser: ${opts.openWebUi ? "true" : "false"}`,
     "log:",
     "  level: info",
     "  format: json",
@@ -588,6 +579,12 @@ async function promptYesNo(rl, label, current = false) {
 
 async function promptSecretUpdate(rl, label, current = "") {
   const suffix = current ? " [saved, leave blank to keep]" : " [optional]";
+  const answer = await rl.question(`${label}${suffix}: `);
+  return answer.trim() || current;
+}
+
+async function promptSecretRequired(rl, label, current = "") {
+  const suffix = current ? " [saved, leave blank to keep]" : "";
   const answer = await rl.question(`${label}${suffix}: `);
   return answer.trim() || current;
 }
@@ -760,6 +757,36 @@ function defaultCliBinDir() {
   return join(home, ".local", "bin");
 }
 
+function canWriteDir(dir) {
+  try {
+    mkdirSync(dir, { recursive: true });
+    const probe = join(dir, `.lca-write-test-${process.pid}`);
+    writeFileSync(probe, "");
+    rmSync(probe, { force: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function cliBinCandidates() {
+  if (process.env.LCA_BIN_DIR) return [process.env.LCA_BIN_DIR];
+  const home = process.env.HOME || process.env.USERPROFILE || ".";
+  if (process.platform === "win32") return [defaultCliBinDir()];
+  return [
+    defaultCliBinDir(),
+    join(home, "bin"),
+    join(dirname(CONFIG_PATH), "bin")
+  ];
+}
+
+function chooseCliBinDir() {
+  for (const dir of cliBinCandidates()) {
+    if (canWriteDir(dir)) return dir;
+  }
+  return defaultCliBinDir();
+}
+
 function pathHasDir(dir) {
   const target = resolve(dir).toLowerCase();
   return String(process.env.PATH || "")
@@ -767,9 +794,49 @@ function pathHasDir(dir) {
     .some((entry) => entry && resolve(entry).toLowerCase() === target);
 }
 
+function shellProfileCandidates() {
+  const home = process.env.HOME || process.env.USERPROFILE || ".";
+  const shell = basename(process.env.SHELL || "");
+  if (shell === "zsh") return [join(home, ".zshrc")];
+  if (shell === "fish") return [join(home, ".config", "fish", "config.fish")];
+  if (shell === "bash") {
+    if (process.platform === "darwin") return [join(home, ".bash_profile"), join(home, ".bashrc")];
+    return [join(home, ".bashrc"), join(home, ".profile")];
+  }
+  return [join(home, ".zshrc"), join(home, ".bashrc"), join(home, ".profile")];
+}
+
+function pathExportLine(dir, profilePath) {
+  if (profilePath.endsWith("config.fish")) return `fish_add_path "${dir}"`;
+  return `export PATH="${dir}:$PATH"`;
+}
+
+function configureShellPath(binDir) {
+  if (pathHasDir(binDir)) return { changed: false, active: true, profile: "" };
+  if (process.platform === "win32") {
+    process.env.PATH = `${binDir};${process.env.PATH || ""}`;
+    return { changed: false, active: false, profile: "", message: `Add to PATH: ${binDir}` };
+  }
+
+  const profile = shellProfileCandidates()[0];
+  mkdirSync(dirname(profile), { recursive: true });
+  const existing = existsSync(profile) ? readFileSync(profile, "utf8") : "";
+  const line = pathExportLine(binDir, profile);
+  if (!existing.includes(binDir) && !existing.includes(line)) {
+    const block = `\n# Local Coding Agent CLI\n${line}\n`;
+    writeFileSync(profile, `${existing.replace(/\s*$/, "")}${block}`, "utf8");
+  }
+  process.env.PATH = `${binDir}:${process.env.PATH || ""}`;
+  return { changed: true, active: false, profile, message: `Added ${binDir} to ${profile}. Restart your terminal or run: source ${profile}` };
+}
+
 async function installCliCommand() {
   const marker = "local-coding-agent lca wrapper";
-  const binDir = process.env.LCA_BIN_DIR || defaultCliBinDir();
+  const preferredBinDir = process.env.LCA_BIN_DIR || defaultCliBinDir();
+  const binDir = chooseCliBinDir();
+  if (binDir !== preferredBinDir) {
+    console.log(`WARN ${preferredBinDir} is not writable; installing lca into ${binDir} instead.`);
+  }
   mkdirSync(binDir, { recursive: true });
   if (process.platform === "win32") {
     const cmdPath = join(binDir, "lca.cmd");
@@ -782,7 +849,8 @@ async function installCliCommand() {
     writeFileSync(cmdPath, `@echo off\r\nrem ${marker}\r\nnode "${join(SCRIPT_DIR, "local-coding-agent.mjs")}" %*\r\n`, "utf8");
     writeFileSync(psPath, `# ${marker}\n& node "${join(SCRIPT_DIR, "local-coding-agent.mjs")}" @args\nexit $LASTEXITCODE\n`, "utf8");
     console.log(`Installed: ${cmdPath}`);
-    if (!pathHasDir(binDir)) console.log(`Add to PATH: ${binDir}`);
+    const pathResult = configureShellPath(binDir);
+    if (pathResult.message) console.log(pathResult.message);
     return cmdPath;
   }
   const target = join(binDir, "lca");
@@ -792,7 +860,8 @@ async function installCliCommand() {
   writeFileSync(target, `#!/usr/bin/env bash\n# ${marker}\nexec node "${join(SCRIPT_DIR, "local-coding-agent.mjs")}" "$@"\n`, "utf8");
   await chmod(target, 0o755);
   console.log(`Installed: ${target}`);
-  if (!pathHasDir(binDir)) console.log(`Add to PATH: export PATH="${binDir}:$PATH"`);
+  const pathResult = configureShellPath(binDir);
+  if (pathResult.message) console.log(pathResult.message);
   return target;
 }
 
@@ -827,7 +896,7 @@ async function setup(flags) {
     if (useTunnel) {
       cfg.tunnelId = await promptLine(rl, "Tunnel ID", flags.tunnelId || (!isPlaceholder(envValues.CONTROL_PLANE_TUNNEL_ID) ? envValues.CONTROL_PLANE_TUNNEL_ID : cfg.tunnelId));
       const currentKey = !isPlaceholder(envValues.CONTROL_PLANE_API_KEY) ? envValues.CONTROL_PLANE_API_KEY : "";
-      const runtimeKey = await promptSecretUpdate(rl, "Runtime API key", flags.runtimeKey || currentKey);
+      const runtimeKey = await promptSecretRequired(rl, "Runtime API key", flags.runtimeKey || currentKey);
       if (!cfg.tunnelId) throw new Error("Tunnel ID is required when tunnel mode is enabled.");
       if (!runtimeKey) throw new Error("Runtime API key is required when tunnel mode is enabled.");
       await writeRepoEnv({
@@ -845,9 +914,8 @@ async function setup(flags) {
     }
 
     printStep(4, 8, "Configure agent defaults");
-    cfg.node = await promptLine(rl, "Node executable", cfg.node);
+    cfg.node = cfg.node || "node";
     cfg.workspace = await promptLine(rl, "Default workspace root", cfg.workspace || process.cwd());
-    cfg.extraRoots = await promptLine(rl, "Extra roots (; separated, optional)", cfg.extraRoots);
     cfg.mode = (await promptChoice(rl, "Mode", [{ id: "safe", label: "safe" }, { id: "full", label: "full" }], cfg.mode)).id;
     cfg.policy = (await promptChoice(rl, "Policy", [
       { id: "balanced", label: "balanced" },
@@ -855,10 +923,11 @@ async function setup(flags) {
       { id: "full", label: "full" }
     ], cfg.policy)).id;
     cfg.port = await promptLine(rl, "MCP port", cfg.port || DEFAULT_PORT);
-    cfg.authToken = await promptSecretUpdate(rl, "MCP auth token", cfg.authToken);
+    cfg.extraRoots = flags.extraRoots ?? cfg.extraRoots ?? "";
+    cfg.authToken = flags.authToken ?? cfg.authToken ?? "";
 
     printStep(5, 8, "Install server dependencies");
-    if (!existsSync(join(SERVER_DIR, "node_modules")) || await promptYesNo(rl, "Reinstall server dependencies", false)) {
+    if (!existsSync(join(SERVER_DIR, "node_modules"))) {
       await installDeps(cfg);
     } else {
       console.log("Server dependencies already installed.");
@@ -867,8 +936,7 @@ async function setup(flags) {
     printStep(6, 8, "Install tunnel-client");
     if (useTunnel) {
       cfg.tunnelBin = cfg.tunnelBin || defaultTunnelBinForPlatform(selected);
-      cfg.tunnelBin = await promptLine(rl, "tunnel-client path", cfg.tunnelBin);
-      if (!existsSync(cfg.tunnelBin) || await promptYesNo(rl, "Download or replace tunnel-client automatically", false)) {
+      if (!existsSync(cfg.tunnelBin)) {
         try {
           cfg.tunnelBin = await downloadTunnelClient(selected, cfg.tunnelBin);
         } catch (error) {
@@ -879,9 +947,9 @@ async function setup(flags) {
       } else {
         console.log(`Using existing tunnel-client: ${cfg.tunnelBin}`);
       }
-      cfg.profileDir = await promptLine(rl, "Tunnel profile dir", cfg.profileDir);
-      cfg.profile = await promptLine(rl, "Tunnel profile name", cfg.profile);
-      cfg.organizationId = await promptLine(rl, "Organization ID (optional)", cfg.organizationId);
+      cfg.profileDir = cfg.profileDir || join(REPO_ROOT, "tools", "profiles");
+      cfg.profile = cfg.profile || "local-coding-agent";
+      cfg.organizationId = flags.organizationId || cfg.organizationId || "";
     } else {
       console.log("Tunnel disabled.");
     }
@@ -890,9 +958,7 @@ async function setup(flags) {
     cfg.runtimeKey = "";
     validate(cfg);
     await saveConfig(stripRuntimeFields(cfg));
-    if (await promptYesNo(rl, "Install or update global lca command", true)) {
-      await installCliCommand();
-    }
+    await installCliCommand();
 
     printStep(8, 8, "Verify");
     await status({ json: false });
@@ -917,6 +983,7 @@ function stripRuntimeFields(cfg) {
   delete out.json;
   delete out.force;
   delete out.dashboardPort;
+  delete out.openWebUi;
   return out;
 }
 
@@ -1049,7 +1116,6 @@ async function start(flags) {
       env.MCP_EXTRA_HEADERS = "Authorization: env:MCP_AUTH_HEADER";
     }
     const args = ["run", "--profile", opts.profile, "--profile-dir", opts.profileDir, "--control-plane.tunnel-id", opts.tunnelId];
-    if (opts.openWebUi) args.push("--open-web-ui");
     const stdio = flags.background ? ["ignore", "ignore", "ignore"] : "inherit";
     tunnelChild = spawnLogged("tunnel", opts.tunnelBin, args, {
       cwd: dirname(opts.tunnelBin),
