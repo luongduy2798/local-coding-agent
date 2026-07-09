@@ -105,8 +105,8 @@ lca_input  # mở Apps SDK widget để nhập task, chọn @ context và / work
 `lca_input` mở widget ngay trong ChatGPT. Widget này dùng:
 
 - `@...` để chọn file, folder, symbol hoặc skill trong workspace.
-- `/...` để gọi workflow hoặc skill, ví dụ `/plan`, `/debug`, `/review`, `/implement`, `/refactor`, `/skill:<name>`.
-- Nút nhanh **Plan** và **Review** chỉ là quick action; không chèn chữ vào input.
+- `/...` để gọi workflow hoặc skill, ví dụ `/debug`, `/review`, `/implement`, `/refactor`, `/skill:<name>`.
+- Nút nhanh **Plan** là quick action; không chèn chữ vào input.
 - Nút send sẽ tự compose prompt rồi gửi vào ChatGPT, không cần hiện Prompt output.
 
 Các tool nền phía sau:

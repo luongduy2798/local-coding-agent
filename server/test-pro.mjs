@@ -157,8 +157,10 @@ try {
   check("workspace_search finds @ file context", atSearch.results?.some((r) => r.type === "file" && r.path.endsWith("feature.js")), JSON.stringify(atSearch.results));
   check("workspace_search finds @ symbol context", atSearch.results?.some((r) => r.type === "symbol" && r.symbol === "deepFeature"), JSON.stringify(atSearch.results));
 
-  const slash = await callJson(client, "slash_commands", { query: "/pla", limit: 10 });
-  check("slash_commands suggests /plan", slash.commands?.some((c) => c.command === "/plan" && c.type === "mode"), JSON.stringify(slash.commands));
+  const slash = await callJson(client, "slash_commands", { query: "/", limit: 20 });
+  check("slash_commands omits /plan autocomplete", !slash.commands?.some((c) => c.command === "/plan"), JSON.stringify(slash.commands));
+  check("slash_commands shows workflows on empty slash", slash.commands?.some((c) => c.command === "/debug" || c.command === "/implement"), JSON.stringify(slash.commands));
+  check("slash_commands shows skills on empty slash", slash.commands?.some((c) => c.type === "skill" && c.command.startsWith("/skill:")), JSON.stringify(slash.commands));
 
   const skillSlash = await callJson(client, "slash_commands", { query: "/skill", limit: 20 });
   check("slash_commands suggests /skill:name format", skillSlash.commands?.some((c) => c.type === "skill" && c.command.startsWith("/skill:")), JSON.stringify(skillSlash.commands));
@@ -188,9 +190,9 @@ try {
   const resources = await client.listResources();
   check("Apps SDK companion widget resource is listed", resources.resources?.some((r) => r.uri === "ui://widget/lca-companion.html"), JSON.stringify(resources.resources));
   const widgetResource = await client.readResource({ uri: "ui://widget/lca-companion.html" });
-  check("Apps SDK companion widget resource is html", widgetResource.contents?.[0]?.mimeType === "text/html;profile=mcp-app" && widgetResource.contents?.[0]?.text?.includes("sendFollowUpMessage") && widgetResource.contents?.[0]?.text?.includes("slash_commands") && !widgetResource.contents?.[0]?.text?.includes("Prompt output"), JSON.stringify(widgetResource.contents?.[0]));
+  check("Apps SDK companion widget resource is html", widgetResource.contents?.[0]?.mimeType === "text/html;profile=mcp-app" && widgetResource.contents?.[0]?.text?.includes("sendFollowUpMessage") && widgetResource.contents?.[0]?.text?.includes("slash_commands") && widgetResource.contents?.[0]?.text?.includes("suggestions.scrollTop = 0") && !widgetResource.contents?.[0]?.text?.includes("Prompt output"), JSON.stringify(widgetResource.contents?.[0]));
   const lcaInput = await client.callTool({ name: "lca_input", arguments: { initial_input: "fix @deepFeature" } });
-  check("lca_input returns structured widget payload", lcaInput.structuredContent?.initial_input === "fix @deepFeature" && lcaInput.structuredContent?.shortcuts?.length === 2 && lcaInput.structuredContent.shortcuts.every((s) => ["plan", "review"].includes(s.name)) && /LCA input is ready/.test(lcaInput.content?.[0]?.text || ""), JSON.stringify(lcaInput));
+  check("lca_input returns structured widget payload", lcaInput.structuredContent?.initial_input === "fix @deepFeature" && lcaInput.structuredContent?.shortcuts?.length === 1 && lcaInput.structuredContent.shortcuts[0]?.name === "plan" && /LCA input is ready/.test(lcaInput.content?.[0]?.text || ""), JSON.stringify(lcaInput));
 
   const doctor = await callJson(client, "workspace_doctor", {});
   check("doctor returns score", Number.isInteger(doctor.score) && doctor.score >= 0 && doctor.score <= 100);

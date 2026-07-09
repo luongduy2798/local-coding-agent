@@ -539,7 +539,7 @@ function isWithinSkillsDir(p) {
 // ----------------------------------------------------------------------------
 // Companion UI tools: @ context picker and / workflow command palette
 // ----------------------------------------------------------------------------
-const COMPANION_QUICK_ACTIONS = new Set(["plan", "review"]);
+const COMPANION_QUICK_ACTIONS = new Set(["plan"]);
 
 const WORKFLOW_COMMANDS = [
   {
@@ -724,7 +724,7 @@ function registerLcaInputTool(mcp, name, title, description) {
       };
       return {
         structuredContent: payload,
-        content: [{ type: "text", text: "LCA input is ready. Use @ for context, / for workflows or skills, or the Plan/Review quick actions." }]
+        content: [{ type: "text", text: "LCA input is ready. Use @ for context, / for workflows or skills, or the Plan quick action." }]
       };
     }
   );
@@ -888,6 +888,7 @@ async function slashCommandData(query, { include, limit = 30 } = {}) {
   const wanted = normalizeInclude(include, ["workflow", "mode", "skill"]);
   const items = [];
   for (const cmd of WORKFLOW_COMMANDS) {
+    if (cmd.name === "plan") continue;
     const group = cmd.type === "mode" ? "mode" : "workflow";
     if (!wanted.has(group)) continue;
     const score = scoreSearchCandidate(q, [cmd.command, cmd.name, cmd.label, cmd.description], { base: group === "mode" ? 6 : 4, emptyScore: 20 });
@@ -898,7 +899,7 @@ async function slashCommandData(query, { include, limit = 30 } = {}) {
     const skills = await discoverSkills();
     for (const skill of skills) {
       const score = scoreSearchCandidate(q, [skill.name, skill.description, `/skill ${skill.name}`], { base: 3, emptyScore: 0 });
-      if (!q || score <= 3) continue;
+      if (q && score <= 3) continue;
       items.push({ type: "skill", command: `/skill:${skill.name}`, name: skill.name, label: `Use skill: ${skill.name}`, description: skill.description, score });
     }
   }

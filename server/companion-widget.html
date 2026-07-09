@@ -67,19 +67,18 @@
       <div class="header">
         <div>
           <h1>LCA Companion</h1>
-          <div class="sub"><code>@</code> context · <code>/</code> workflow</div>
+          <div class="sub"><code>@</code> context · <code>/</code> workflow + skills</div>
         </div>
         <div class="status" id="status">ready</div>
       </div>
       <div class="body">
         <div class="composer-wrap">
-          <textarea id="input" spellcheck="false" placeholder="do anything"></textarea>
+          <textarea id="input" spellcheck="false" placeholder="Nhập task LCA tại đây..."></textarea>
           <div id="suggestions" class="suggestions hidden"></div>
         </div>
         <div class="chips" id="chips"></div>
         <div class="toolbar">
           <button class="toggle" data-mode="plan" type="button">Plan</button>
-          <button class="toggle" data-mode="review" type="button">Review</button>
           <button class="send" id="send" type="button" aria-label="Send to ChatGPT" title="Send to ChatGPT">
             <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
               <path d="M4 12L20 4L16 20L12.5 13.5L4 12Z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
@@ -97,6 +96,7 @@
     const chips = document.getElementById('chips');
     const statusEl = document.getElementById('status');
     const sendButton = document.getElementById('send');
+    const PLACEHOLDER_TEXT = 'Nhập task LCA tại đây...';
     const selected = [];
     let selectedMode = null;
     let active = -1;
@@ -162,6 +162,7 @@
         fragment.append(row);
       });
       suggestions.append(fragment);
+      suggestions.scrollTop = 0;
       suggestions.classList.remove('hidden');
     }
 
@@ -311,11 +312,11 @@
 
     window.addEventListener('openai:set_globals', () => {
       const initial = window.openai?.toolOutput?.initial_input || window.openai?.toolInput?.initial_input || '';
-      if (initial && !input.value) input.value = initial;
+      if (initial && initial.trim() !== PLACEHOLDER_TEXT && !input.value) input.value = initial;
     }, { passive: true });
 
     const initial = window.openai?.toolOutput?.initial_input || window.openai?.toolInput?.initial_input || '';
-    if (initial) input.value = initial;
+    if (initial && initial.trim() !== PLACEHOLDER_TEXT) input.value = initial;
   </script>
 </body>
 </html>
