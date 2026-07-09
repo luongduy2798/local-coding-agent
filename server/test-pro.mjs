@@ -153,6 +153,45 @@ try {
   const deepSymbols = await callJson(client, "repo_symbols", { max_files: 800, max_matches: 2000 });
   check("repo_symbols expands cached symbol coverage", deepSymbols.symbols?.some((s) => s.name === "deepFeature"), JSON.stringify(deepSymbols.symbols?.slice(-20)));
 
+  const atSearch = await callJson(client, "workspace_search", { query: "@deep", include: ["file", "folder", "symbol"], limit: 10 });
+  check("workspace_search finds @ file context", atSearch.results?.some((r) => r.type === "file" && r.path.endsWith("feature.js")), JSON.stringify(atSearch.results));
+  check("workspace_search finds @ symbol context", atSearch.results?.some((r) => r.type === "symbol" && r.symbol === "deepFeature"), JSON.stringify(atSearch.results));
+
+  const slash = await callJson(client, "slash_commands", { query: "/pla", limit: 10 });
+  check("slash_commands suggests /plan", slash.commands?.some((c) => c.command === "/plan" && c.type === "mode"), JSON.stringify(slash.commands));
+
+  const skillSlash = await callJson(client, "slash_commands", { query: "/skill", limit: 20 });
+  check("slash_commands suggests /skill:name format", skillSlash.commands?.some((c) => c.type === "skill" && c.command.startsWith("/skill:")), JSON.stringify(skillSlash.commands));
+
+  const composed = await callJson(client, "compose_prompt", { input: "fix setup flow @deepFeature /plan", selected_context: ["src/index.js"] });
+  check("compose_prompt detects plan mode", composed.mode === "plan", JSON.stringify(composed));
+  check("compose_prompt includes selected context", composed.selected_context?.some((c) => c.path === "src/index.js"), JSON.stringify(composed.selected_context));
+  check("compose_prompt emits ready prompt", /Use LCA Plan mode/.test(composed.prompt) && /Selected context/.test(composed.prompt), composed.prompt);
+  const composedSkill = await callJson(client, "compose_prompt", { input: "check setup /skill:setup-local-coding-agent", mode: "plan" });
+  check("typed slash workflow/skill is preserved in compose", composedSkill.mode === "plan" && composedSkill.skills?.includes("setup-local-coding-agent") && /read_skill/.test(composedSkill.prompt), JSON.stringify(composedSkill));
+  const slashOverridesButtonMode = await callJson(client, "compose_prompt", { input: "review it /debug", mode: "plan" });
+  check("typed slash workflow overrides quick action mode", slashOverridesButtonMode.mode === "debug", JSON.stringify(slashOverridesButtonMode));
+
+  const companionPage = await fetch(`http://127.0.0.1:${server.port}/companion`);
+  check("companion standalone HTTP page is not exposed", companionPage.status === 404, `status=${companionPage.status}`);
+
+  const tools = await client.listTools();
+  const lcaTool = tools.tools?.find((t) => t.name === "lca");
+  const lcaInfo = await callJson(client, "lca", {});
+  check("lca alias tool is listed", Boolean(lcaTool), JSON.stringify(tools.tools?.map((t) => t.name)));
+  check("lca alias returns workspace info", lcaInfo.primary_root === info.primary_root && lcaInfo.version === info.version, JSON.stringify(lcaInfo));
+  const openCompanionTool = tools.tools?.find((t) => t.name === "open_companion");
+  const lcaInputTool = tools.tools?.find((t) => t.name === "lca_input");
+  check("Apps SDK lca_input tool is listed", Boolean(lcaInputTool), JSON.stringify(tools.tools?.map((t) => t.name)));
+  check("open_companion tool is removed", !openCompanionTool, JSON.stringify(tools.tools?.map((t) => t.name)));
+  check("Apps SDK render tool has output template", lcaInputTool?._meta?.["openai/outputTemplate"] === "ui://widget/lca-companion.html", JSON.stringify({ lcaInput: lcaInputTool?._meta }));
+  const resources = await client.listResources();
+  check("Apps SDK companion widget resource is listed", resources.resources?.some((r) => r.uri === "ui://widget/lca-companion.html"), JSON.stringify(resources.resources));
+  const widgetResource = await client.readResource({ uri: "ui://widget/lca-companion.html" });
+  check("Apps SDK companion widget resource is html", widgetResource.contents?.[0]?.mimeType === "text/html;profile=mcp-app" && widgetResource.contents?.[0]?.text?.includes("sendFollowUpMessage") && widgetResource.contents?.[0]?.text?.includes("slash_commands") && !widgetResource.contents?.[0]?.text?.includes("Prompt output"), JSON.stringify(widgetResource.contents?.[0]));
+  const lcaInput = await client.callTool({ name: "lca_input", arguments: { initial_input: "fix @deepFeature" } });
+  check("lca_input returns structured widget payload", lcaInput.structuredContent?.initial_input === "fix @deepFeature" && lcaInput.structuredContent?.shortcuts?.length === 2 && lcaInput.structuredContent.shortcuts.every((s) => ["plan", "review"].includes(s.name)) && /LCA input is ready/.test(lcaInput.content?.[0]?.text || ""), JSON.stringify(lcaInput));
+
   const doctor = await callJson(client, "workspace_doctor", {});
   check("doctor returns score", Number.isInteger(doctor.score) && doctor.score >= 0 && doctor.score <= 100);
   check("doctor checks policy", doctor.checks?.some((c) => c.id === "policy"));

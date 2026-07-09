@@ -120,8 +120,16 @@ try {
 
   const metricsRoute = await fetch("http://127.0.0.1:19001/metrics");
   const uiRoute = await fetch("http://127.0.0.1:19001/ui");
+  const companionRoute = await fetch("http://127.0.0.1:19001/companion");
+  const evilCompanion = await fetch("http://127.0.0.1:19001/companion/api/workspace_search", {
+    method: "POST",
+    headers: { Origin: "https://evil.example", "content-type": "application/json" },
+    body: JSON.stringify({ query: "@" })
+  });
   check("legacy UI metrics route is gone", metricsRoute.status === 404, `status=${metricsRoute.status}`);
   check("legacy UI ui route is gone", uiRoute.status === 404, `status=${uiRoute.status}`);
+  check("companion standalone HTTP route is gone", companionRoute.status === 404, `status=${companionRoute.status}`);
+  check("hostile browser Origin is rejected", evilCompanion.status === 403, `status=${evilCompanion.status}`);
   check("chunked payload is size-limited", (await chunkedPost(19001, JSON.stringify({ data: "x".repeat(12000) }))) === 413);
   await stopServer(server);
   server = null;

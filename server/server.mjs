@@ -40,6 +40,8 @@ const HOST = process.env.AGENT_HOST || "127.0.0.1";
 const CONFIG_ID = String(process.env.AGENT_CONFIG_ID || "");
 
 const APP_DIR = path.dirname(fileURLToPath(import.meta.url));
+const COMPANION_WIDGET_PATH = path.join(APP_DIR, "companion-widget.html");
+const COMPANION_WIDGET_URI = "ui://widget/lca-companion.html";
 const DEFAULT_WORKSPACE = path.resolve(APP_DIR, "..", "agent-workspace");
 const PRIMARY_ROOT = path.resolve(process.env.AGENT_WORKSPACE || DEFAULT_WORKSPACE);
 const STARTUP_PROFILE = (() => {
@@ -375,11 +377,13 @@ const SERVER_INSTRUCTIONS = [
   "Keep the conversation light: do NOT re-read a file you already read; read only the line range you need; never dump a whole large file or large command output unless asked.",
   "When the conversation grows long or feels slow, call checkpoint() with a compact summary + next steps, then tell the user to open a NEW chat; in that fresh chat call resume() first. This resets the heavy context (faster) while keeping your progress.",
   "If a task matches an available skill, call list_skills first, then read_skill(name) to load its instructions before doing the work.",
+  "For ChatGPT UI companion flows, call lca_input to render the Apps SDK widget in ChatGPT; the widget uses workspace_search for @ file/folder/symbol search, slash_commands for / workflow/mode/skill suggestions, and compose_prompt to turn sidebar input into a ready prompt. If the user only says 'lca' in a fresh chat, call the lca tool for workspace_info-style status.",
   "Prefer a few large, well-targeted calls over many tiny ones."
 ].join("\n");
 
 function createMcpServer() {
   const mcp = new McpServer({ name: "Local Coding Agent", version: VERSION }, { instructions: SERVER_INSTRUCTIONS });
+  registerCompanionAppResources(mcp);
   registerBasicTools(mcp);
   registerFsReadTools(mcp);
   registerFsWriteTools(mcp);
@@ -388,6 +392,7 @@ function createMcpServer() {
   registerGitTool(mcp);
   registerSkillTools(mcp);
   registerRepoIntelTools(mcp);    // v2.1
+  registerCompanionTools(mcp);    // v2.9 — @ context + / workflow UI helpers
   registerPatchEngineTools(mcp);  // v2.2
   registerTestRunnerTools(mcp);   // v2.3
   registerReviewTools(mcp);       // v2.4
@@ -530,6 +535,494 @@ function isWithinSkillsDir(p) {
   return candidates.has(path.resolve(parent));
 }
 
+
+// ----------------------------------------------------------------------------
+// Companion UI tools: @ context picker and / workflow command palette
+// ----------------------------------------------------------------------------
+const COMPANION_QUICK_ACTIONS = new Set(["plan", "review"]);
+
+const WORKFLOW_COMMANDS = [
+  {
+    name: "plan",
+    type: "mode",
+    command: "/plan",
+    label: "Plan mode",
+    description: "Inspect context and propose a plan first. Do not edit files until the user approves.",
+    prompt: "Use plan mode. Do not edit files yet. Inspect the selected context, identify risks, then return a concrete plan and verification steps."
+  },
+  {
+    name: "implement",
+    type: "workflow",
+    command: "/implement",
+    label: "Implement",
+    description: "Apply the requested change with focused edits, then summarize what changed.",
+    prompt: "Implement the requested change using LCA tools. Keep edits focused, preserve existing behavior, and summarize the modified files."
+  },
+  {
+    name: "debug",
+    type: "workflow",
+    command: "/debug",
+    label: "Debug",
+    description: "Reproduce/inspect a problem, find the likely cause, then propose or apply a fix.",
+    prompt: "Use debug workflow. Gather evidence first, isolate the likely cause, then propose a fix. Avoid guessing when a targeted read/search can verify it."
+  },
+  {
+    name: "review",
+    type: "workflow",
+    command: "/review",
+    label: "Review",
+    description: "Review code or a diff for bugs, risks, and missing verification.",
+    prompt: "Use review workflow. Focus on correctness, security, edge cases, and test coverage. Return prioritized findings and concrete fixes."
+  },
+  {
+    name: "refactor",
+    type: "workflow",
+    command: "/refactor",
+    label: "Refactor",
+    description: "Improve structure without changing intended behavior.",
+    prompt: "Use refactor workflow. Preserve behavior, keep changes incremental, and call out any risk before editing."
+  },
+  {
+    name: "release",
+    type: "workflow",
+    command: "/release",
+    label: "Release",
+    description: "Prepare/check a release: changelog, tests, versioning, packaging, and rollout notes.",
+    prompt: "Use release workflow. Check repo state, versioning, release notes, and verification steps before suggesting a release."
+  },
+  {
+    name: "setup",
+    type: "workflow",
+    command: "/setup",
+    label: "Setup",
+    description: "Diagnose or improve local setup/onboarding flows.",
+    prompt: "Use setup workflow. Review install/setup docs, scripts, platform-specific paths, and first-run failure modes."
+  },
+  {
+    name: "context",
+    type: "workflow",
+    command: "/context",
+    label: "Context pack",
+    description: "Gather a compact workspace context pack before deciding what to do.",
+    prompt: "Gather workspace context first using workspace_snapshot/workspace_search, then ask only for genuinely missing information."
+  }
+];
+
+function registerCompanionAppResources(mcp) {
+  mcp.registerResource("lca-companion-widget", COMPANION_WIDGET_URI, {}, async () => ({
+    contents: [
+      {
+        uri: COMPANION_WIDGET_URI,
+        mimeType: "text/html;profile=mcp-app",
+        text: await readFile(COMPANION_WIDGET_PATH, "utf8"),
+        _meta: {
+          ui: {
+            prefersBorder: true,
+            csp: { connectDomains: [], resourceDomains: [] }
+          },
+          "openai/widgetDescription": "LCA companion UI for @ workspace context search and Plan/Review quick actions.",
+          "openai/widgetPrefersBorder": true,
+          "openai/widgetCSP": { connect_domains: [], resource_domains: [] }
+        }
+      }
+    ]
+  }));
+}
+
+function registerCompanionTools(mcp) {
+  reg(
+    mcp,
+    "workspace_search",
+    {
+      title: "Workspace @ search",
+      description: "Autocomplete backend for @ file/folder/symbol/skill search in a ChatGPT companion UI. Use this when the user mentions @... or wants to pick workspace context without copying paths.",
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
+      inputSchema: {
+        query: z.string().optional().describe("Search text, usually what the user typed after @. @/ or empty returns top-level context."),
+        path: z.string().optional().describe("Root dir to search. Defaults to the active workspace root."),
+        include: z.array(z.enum(["file", "folder", "symbol", "skill"])).optional().describe("Context kinds to include."),
+        limit: z.number().int().min(1).max(100).optional()
+      }
+    },
+    async ({ query = "", path: rel = ".", include, limit = 30 }) => {
+      const rootDir = resolvePath(rel);
+      const result = await workspaceSearchData(rootDir, query, { include, limit });
+      return structuredJsonResult(result);
+    }
+  );
+
+  reg(
+    mcp,
+    "slash_commands",
+    {
+      title: "Slash commands",
+      description: "Autocomplete backend for / workflow commands, mode tags, and skill shortcuts. Use this for /plan, /debug, /review, /skill:<name>, etc.",
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
+      inputSchema: {
+        query: z.string().optional().describe("Search text, usually what the user typed after /."),
+        include: z.array(z.enum(["workflow", "mode", "skill"])).optional(),
+        limit: z.number().int().min(1).max(100).optional()
+      }
+    },
+    async ({ query = "", include, limit = 30 }) => {
+      const result = await slashCommandData(query, { include, limit });
+      return structuredJsonResult(result);
+    }
+  );
+
+  reg(
+    mcp,
+    "compose_prompt",
+    {
+      title: "Compose LCA prompt",
+      description: "Parse sidebar-style input containing @ context and / workflow commands, resolve selected paths, and return a ready-to-send prompt for ChatGPT.",
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
+      inputSchema: {
+        input: z.string().min(1).describe("User task text, may include @mentions and /commands."),
+        path: z.string().optional().describe("Workspace root to resolve @mentions against."),
+        mode: z.enum(WORKFLOW_COMMANDS.map((c) => c.name)).optional().describe("Workflow/mode override."),
+        selected_context: z.array(z.string().min(1)).optional().describe("Already-selected file/folder paths from the UI."),
+        include_context_pack: z.boolean().optional().describe("Ask ChatGPT to call workspace_snapshot/context tools first.")
+      }
+    },
+    async ({ input, path: rel = ".", mode, selected_context = [], include_context_pack = true }) => {
+      const rootDir = resolvePath(rel);
+      const result = await composeLcaPrompt(input, rootDir, { mode, selectedContext: selected_context, includeContextPack: include_context_pack });
+      return structuredJsonResult(result);
+    }
+  );
+
+  registerLcaInputTool(mcp, "lca_input", "LCA input", "Render the LCA Apps SDK input widget inside ChatGPT. Use this to open the in-chat LCA composer.");
+}
+
+function registerLcaInputTool(mcp, name, title, description) {
+  reg(
+    mcp,
+    name,
+    {
+      title,
+      description,
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
+      inputSchema: {
+        initial_input: z.string().optional().describe("Optional text to prefill in the companion composer.")
+      },
+      _meta: {
+        ui: { resourceUri: COMPANION_WIDGET_URI, visibility: ["model", "app"] },
+        "openai/outputTemplate": COMPANION_WIDGET_URI,
+        "openai/widgetAccessible": true,
+        "openai/toolInvocation/invoking": "Opening LCA input…",
+        "openai/toolInvocation/invoked": "LCA input ready."
+      }
+    },
+    async ({ initial_input = "" }) => {
+      const payload = {
+        initial_input,
+        workspace: PRIMARY_ROOT,
+        shortcuts: WORKFLOW_COMMANDS
+          .filter(({ name }) => COMPANION_QUICK_ACTIONS.has(name))
+          .map(({ command, label, description, type, name }) => ({ command, label, description, type, name }))
+      };
+      return {
+        structuredContent: payload,
+        content: [{ type: "text", text: "LCA input is ready. Use @ for context, / for workflows or skills, or the Plan/Review quick actions." }]
+      };
+    }
+  );
+}
+
+function normalizePickerQuery(value, prefix = "@") {
+  let text = String(value || "").trim();
+  if (prefix && text.startsWith(prefix)) text = text.slice(prefix.length);
+  if (text === "/" || text === "./") return "";
+  if (text.startsWith("/") && prefix === "@") text = text.slice(1);
+  return text.trim();
+}
+
+function tokenizeSearch(value) {
+  return String(value || "")
+    .toLowerCase()
+    .split(/[\s\\/_.:-]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+function scoreSearchCandidate(rawQuery, fields, { base = 0, emptyScore = 1 } = {}) {
+  const query = String(rawQuery || "").trim().toLowerCase();
+  if (!query) return emptyScore + base;
+  const tokens = tokenizeSearch(query);
+  if (!tokens.length) return emptyScore + base;
+  const haystack = fields.filter(Boolean).join(" ").toLowerCase();
+  const words = haystack.split(/[\s\\/_.:-]+/).filter(Boolean);
+  const compactHaystack = haystack.replace(/[\s\\/_.:-]+/g, "");
+  const compactQuery = query.replace(/[\s\\/_.:-]+/g, "");
+  let score = base;
+
+  if (haystack === query) score += 120;
+  if (words.some((word) => word === query)) score += 90;
+  if (haystack.includes(query)) score += 65;
+  if (compactQuery && compactHaystack.includes(compactQuery)) score += 45;
+
+  for (const token of tokens) {
+    if (words.some((word) => word === token)) score += 36;
+    if (words.some((word) => word.startsWith(token))) score += 26;
+    if (haystack.includes(token)) score += 18;
+    const fuzzy = bestFuzzyWordScore(token, words);
+    score += fuzzy;
+  }
+  return score;
+}
+
+function bestFuzzyWordScore(token, words) {
+  if (!token || token.length < 3) return 0;
+  let best = 0;
+  for (const word of words) {
+    if (!word || Math.abs(word.length - token.length) > 2) continue;
+    const distance = boundedEditDistance(token, word, token.length <= 5 ? 1 : 2);
+    if (distance === 0) best = Math.max(best, 28);
+    else if (distance === 1) best = Math.max(best, 16);
+    else if (distance === 2 && token.length >= 6) best = Math.max(best, 9);
+  }
+  return best;
+}
+
+function boundedEditDistance(a, b, maxDistance) {
+  if (Math.abs(a.length - b.length) > maxDistance) return maxDistance + 1;
+  const prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  const curr = new Array(b.length + 1);
+  for (let i = 1; i <= a.length; i++) {
+    curr[0] = i;
+    let rowMin = curr[0];
+    for (let j = 1; j <= b.length; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      curr[j] = Math.min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + cost);
+      rowMin = Math.min(rowMin, curr[j]);
+    }
+    if (rowMin > maxDistance) return maxDistance + 1;
+    for (let j = 0; j <= b.length; j++) prev[j] = curr[j];
+  }
+  return prev[b.length];
+}
+
+function pathDepth(rel) {
+  if (!rel || rel === ".") return 0;
+  return rel.split(/[\\/]+/).filter(Boolean).length;
+}
+
+function normalizeInclude(include, fallback) {
+  return new Set(Array.isArray(include) && include.length ? include : fallback);
+}
+
+async function workspaceSearchData(rootDir, query, { include, limit = 30 } = {}) {
+  const q = normalizePickerQuery(query, "@");
+  const wanted = normalizeInclude(include, ["file", "folder", "symbol", "skill"]);
+  const candidates = [];
+  const maxList = Math.max(4000, limit * 120);
+  const listed = await listRepoFilesFast(rootDir, maxList);
+
+  if (wanted.has("file")) {
+    for (const abs of listed.files) {
+      const rel = toRel(abs);
+      const base = path.basename(rel);
+      const score = scoreSearchCandidate(q, [rel, base], { emptyScore: 20 - pathDepth(rel) });
+      if (q && score <= 0) continue;
+      candidates.push({ type: "file", path: rel, label: rel, detail: `file · ${path.dirname(rel) === "." ? "root" : path.dirname(rel)}`, score });
+    }
+  }
+
+  if (wanted.has("folder")) {
+    const dirs = new Set();
+    for (const abs of listed.files) {
+      const rel = path.relative(rootDir, abs).split(path.sep).join("/");
+      const parts = rel.split("/").filter(Boolean);
+      for (let i = 1; i < parts.length; i++) dirs.add(parts.slice(0, i).join("/"));
+    }
+    for (const rel of dirs) {
+      const label = `${rel}/`;
+      const score = scoreSearchCandidate(q, [rel, label, path.basename(rel)], { base: 4, emptyScore: 24 - pathDepth(rel) });
+      if (q && score <= 0) continue;
+      candidates.push({ type: "folder", path: rel, label, detail: "folder", score });
+    }
+  }
+
+  if (wanted.has("symbol")) {
+    const symbols = await scanSymbols(rootDir, { maxFiles: 600, maxMatches: 2000 });
+    for (const sym of symbols) {
+      const score = scoreSearchCandidate(q, [sym.name, sym.kind, sym.path], { base: 8, emptyScore: 0 });
+      if (!q || score <= 8) continue;
+      candidates.push({
+        type: "symbol",
+        path: sym.path,
+        line: sym.line,
+        symbol: sym.name,
+        kind: sym.kind,
+        label: `${sym.name} — ${sym.path}:${sym.line}`,
+        detail: `${sym.kind} symbol`,
+        score
+      });
+    }
+  }
+
+  if (wanted.has("skill")) {
+    const skills = await discoverSkills();
+    for (const skill of skills) {
+      const score = scoreSearchCandidate(q, [skill.name, skill.description], { base: 6, emptyScore: 0 });
+      if (!q || score <= 6) continue;
+      candidates.push({
+        type: "skill",
+        skill: skill.name,
+        path: toRel(skill.skillFile),
+        label: `skill:${skill.name}`,
+        detail: skill.description || "skill",
+        score
+      });
+    }
+  }
+
+  candidates.sort((a, b) => b.score - a.score || a.label.localeCompare(b.label));
+  const results = candidates.slice(0, limit).map((item) => ({ ...item, score: Math.round(item.score * 100) / 100 }));
+  return { query, normalized_query: q, root: toRel(rootDir), engine: listed.engine, count: results.length, results };
+}
+
+async function slashCommandData(query, { include, limit = 30 } = {}) {
+  const q = normalizePickerQuery(query, "/").replace(/^#/, "");
+  const wanted = normalizeInclude(include, ["workflow", "mode", "skill"]);
+  const items = [];
+  for (const cmd of WORKFLOW_COMMANDS) {
+    const group = cmd.type === "mode" ? "mode" : "workflow";
+    if (!wanted.has(group)) continue;
+    const score = scoreSearchCandidate(q, [cmd.command, cmd.name, cmd.label, cmd.description], { base: group === "mode" ? 6 : 4, emptyScore: 20 });
+    if (q && score <= 0) continue;
+    items.push({ type: group, command: cmd.command, name: cmd.name, label: cmd.label, description: cmd.description, score });
+  }
+  if (wanted.has("skill")) {
+    const skills = await discoverSkills();
+    for (const skill of skills) {
+      const score = scoreSearchCandidate(q, [skill.name, skill.description, `/skill ${skill.name}`], { base: 3, emptyScore: 0 });
+      if (!q || score <= 3) continue;
+      items.push({ type: "skill", command: `/skill:${skill.name}`, name: skill.name, label: `Use skill: ${skill.name}`, description: skill.description, score });
+    }
+  }
+  items.sort((a, b) => b.score - a.score || a.command.localeCompare(b.command));
+  const commands = items.slice(0, limit).map((item) => ({ ...item, score: Math.round(item.score * 100) / 100 }));
+  return { query, normalized_query: q, count: commands.length, commands };
+}
+
+function extractSlashTokens(input) {
+  const tokens = [];
+  const re = /(^|\s)\/([a-z][a-z0-9_-]*(?::[a-z0-9_.-]+)?)/gi;
+  let match;
+  while ((match = re.exec(input))) tokens.push(match[2]);
+  return tokens;
+}
+
+function extractMentionTokens(input) {
+  const tokens = [];
+  const re = /(^|\s)@([^\s]+)/g;
+  let match;
+  while ((match = re.exec(input))) {
+    const raw = match[2].replace(/[,.!?;:]+$/g, "");
+    if (raw) tokens.push(raw);
+  }
+  return tokens;
+}
+
+function stripPromptControlTokens(input) {
+  return String(input || "")
+    .replace(/(^|\s)\/[a-z][a-z0-9_-]*(?::[a-z0-9_.-]+)?/gi, " ")
+    .replace(/(^|\s)@[^\s]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function workflowByName(name) {
+  const key = String(name || "").replace(/^\//, "").toLowerCase();
+  return WORKFLOW_COMMANDS.find((cmd) => cmd.name === key || cmd.command.slice(1) === key) || null;
+}
+
+async function composeLcaPrompt(input, rootDir, { mode, selectedContext = [], includeContextPack = true } = {}) {
+  const slashTokens = extractSlashTokens(input);
+  const mentionTokens = extractMentionTokens(input);
+  const explicitMode = slashTokens.map((token) => token.split(":")[0]).find((token) => workflowByName(token)) || mode;
+  const workflow = workflowByName(explicitMode) || null;
+  const skillTokens = slashTokens
+    .map((token) => token.match(/^skill:(.+)$/i)?.[1])
+    .filter(Boolean);
+  const resolved = [];
+  const unresolved = [];
+
+  for (const item of selectedContext) {
+    try {
+      const abs = resolvePath(item);
+      const info = await stat(abs).catch(() => null);
+      resolved.push({ type: info?.isDirectory() ? "folder" : "file", path: toRel(abs), label: toRel(abs) });
+    } catch {
+      unresolved.push(item);
+    }
+  }
+
+  for (const token of mentionTokens) {
+    const search = await workspaceSearchData(rootDir, token, { include: ["file", "folder", "symbol", "skill"], limit: 1 });
+    if (search.results.length) resolved.push(search.results[0]);
+    else unresolved.push(`@${token}`);
+  }
+
+  const deduped = [];
+  const seen = new Set();
+  for (const item of resolved) {
+    const key = `${item.type}:${item.path || item.skill || item.label}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(item);
+  }
+
+  const task = stripPromptControlTokens(input) || input.trim();
+  const lines = [];
+  if (workflow) {
+    lines.push(`Use LCA ${workflow.label}.`);
+    lines.push(workflow.prompt);
+  } else {
+    lines.push("Use LCA workspace tools when useful.");
+  }
+  if (includeContextPack) {
+    lines.push("Start by calling workspace_snapshot or workspace_search if more context is needed; do not ask me to copy file paths unless the @ context is ambiguous.");
+  }
+  if (skillTokens.length) {
+    lines.push("", "Requested skills:");
+    for (const skill of skillTokens) lines.push(`- ${skill}`);
+    lines.push("Call read_skill for each requested skill before editing or reviewing.");
+  }
+  if (deduped.length) {
+    lines.push("", "Selected context:");
+    for (const item of deduped) {
+      const loc = item.line ? `${item.path}:${item.line}` : item.path || item.skill || item.label;
+      lines.push(`- ${item.type}: ${loc}`);
+    }
+  }
+  if (unresolved.length) {
+    lines.push("", "Unresolved @ mentions:");
+    for (const item of unresolved) lines.push(`- ${item}`);
+  }
+  lines.push("", "Task:", task);
+
+  const suggested = workflow?.name === "plan"
+    ? ["workspace_snapshot", "workspace_search", "read_many", "task_plan"]
+    : workflow?.name === "review"
+      ? ["workspace_snapshot", "review_diff", "read_many"]
+      : ["workspace_snapshot", "workspace_search", "read_many", "apply_patch"];
+
+  return {
+    mode: workflow?.name || null,
+    slash_commands: slashTokens.map((token) => `/${token}`),
+    skills: skillTokens,
+    mentions: mentionTokens.map((token) => `@${token}`),
+    selected_context: deduped,
+    unresolved_mentions: unresolved,
+    task,
+    suggested_tools: suggested,
+    prompt: lines.join("\n")
+  };
+}
+
 // ----------------------------------------------------------------------------
 // Tool registration helper: audit + uniform error handling
 // ----------------------------------------------------------------------------
@@ -560,6 +1053,32 @@ function reg(mcp, name, def, handler) {
 // ----------------------------------------------------------------------------
 // Basic tools
 // ----------------------------------------------------------------------------
+function workspaceInfoPayload() {
+  return {
+    status: "ok",
+    version: VERSION,
+    tier: PRODUCT_TIER,
+    mode: MODE,
+    policy: AGENT_POLICY,
+    allow_dangerous: ALLOW_DANGEROUS,
+    auth: AUTH_TOKEN ? "bearer" : "none",
+    roots: ROOTS,
+    primary_root: PRIMARY_ROOT,
+    host: { platform: os.platform(), release: os.release(), hostname: os.hostname(), cwd: process.cwd(), node: process.version },
+    limits: {
+      max_read_chars: MAX_READ_CHARS,
+      max_batch_read_chars: MAX_BATCH_READ_CHARS,
+      max_command_output: MAX_COMMAND_OUTPUT,
+      max_procs: MAX_PROCS
+    },
+    running_processes: [...processes.values()].filter((p) => p.status === "running").length,
+    safety:
+      MODE === "full"
+        ? ["File tools are root-confined; command cwd is root-confined but command execution is not an OS sandbox.", "Catastrophic system commands stay blocked unless AGENT_ALLOW_DANGEROUS=1.", "Paths outside the roots are rejected by file tools."]
+        : ["File tools are root-confined; command cwd is root-confined but command execution is not an OS sandbox.", "Destructive commands and absolute Windows paths in commands are blocked.", "Switch to AGENT_MODE=full only for trusted automation."]
+  };
+}
+
 function registerBasicTools(mcp) {
   reg(
     mcp,
@@ -580,30 +1099,18 @@ function registerBasicTools(mcp) {
       description: "Return roots, mode, limits, host info, and safety rules.",
       inputSchema: {}
     },
-    async () =>
-      jsonResult({
-        status: "ok",
-        version: VERSION,
-        tier: PRODUCT_TIER,
-        mode: MODE,
-        policy: AGENT_POLICY,
-        allow_dangerous: ALLOW_DANGEROUS,
-        auth: AUTH_TOKEN ? "bearer" : "none",
-        roots: ROOTS,
-        primary_root: PRIMARY_ROOT,
-        host: { platform: os.platform(), release: os.release(), hostname: os.hostname(), cwd: process.cwd(), node: process.version },
-        limits: {
-          max_read_chars: MAX_READ_CHARS,
-          max_batch_read_chars: MAX_BATCH_READ_CHARS,
-          max_command_output: MAX_COMMAND_OUTPUT,
-          max_procs: MAX_PROCS
-        },
-        running_processes: [...processes.values()].filter((p) => p.status === "running").length,
-        safety:
-          MODE === "full"
-            ? ["File tools are root-confined; command cwd is root-confined but command execution is not an OS sandbox.", "Catastrophic system commands stay blocked unless AGENT_ALLOW_DANGEROUS=1.", "Paths outside the roots are rejected by file tools."]
-            : ["File tools are root-confined; command cwd is root-confined but command execution is not an OS sandbox.", "Destructive commands and absolute Windows paths in commands are blocked.", "Switch to AGENT_MODE=full only for trusted automation."]
-      })
+    async () => jsonResult(workspaceInfoPayload())
+  );
+
+  reg(
+    mcp,
+    "lca",
+    {
+      title: "LCA status",
+      description: "Short alias for workspace_info. Use this when the user says only 'lca' in a fresh chat to check the active LCA workspace.",
+      inputSchema: {}
+    },
+    async () => jsonResult(workspaceInfoPayload())
   );
 
   reg(
@@ -2361,15 +2868,28 @@ function jsonResult(value) {
   return textResult(JSON.stringify(value));
 }
 
+function structuredJsonResult(value) {
+  return { structuredContent: value, content: [{ type: "text", text: JSON.stringify(value) }] };
+}
+
+function localBrowserOrigins() {
+  return new Set([
+    `http://${HOST}:${PORT}`,
+    `http://127.0.0.1:${PORT}`,
+    `http://localhost:${PORT}`,
+    `http://[::1]:${PORT}`
+  ]);
+}
+
 function originAllowed(req) {
   const origin = String(req.headers.origin || "");
   if (!origin) return true;
-  return ALLOWED_ORIGINS.has(origin);
+  return ALLOWED_ORIGINS.has(origin) || localBrowserOrigins().has(origin);
 }
 
 function setCors(req, res) {
   const origin = String(req.headers.origin || "");
-  if (origin && ALLOWED_ORIGINS.has(origin)) {
+  if (origin && (ALLOWED_ORIGINS.has(origin) || localBrowserOrigins().has(origin))) {
     res.setHeader("Access-Control-Allow-Origin", origin);
     res.setHeader("Vary", "Origin");
   }

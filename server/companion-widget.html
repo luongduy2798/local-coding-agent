@@ -1,0 +1,321 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>LCA Companion</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0f0f10;
+      --panel: #18181b;
+      --panel-soft: #202024;
+      --text: #f4f4f5;
+      --muted: #a1a1aa;
+      --line: #303036;
+      --accent: #10a37f;
+      --danger: #fb7185;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text); }
+    .shell { padding: 12px; }
+    .card { background: var(--panel); border: 1px solid var(--line); border-radius: 16px; overflow: hidden; }
+    .header { padding: 12px 14px; border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; gap: 12px; align-items: center; }
+    h1 { margin: 0; font-size: 14px; }
+    .sub { color: var(--muted); font-size: 12px; margin-top: 3px; }
+    .body { padding: 14px; }
+    .composer-wrap { position: relative; }
+    textarea {
+      width: 100%;
+      min-height: 188px;
+      resize: vertical;
+      border: 1px solid var(--line);
+      outline: none;
+      border-radius: 14px;
+      padding: 13px;
+      background: #101013;
+      color: var(--text);
+      font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    textarea:focus { border-color: rgba(16, 163, 127, .75); box-shadow: 0 0 0 3px rgba(16, 163, 127, .13); }
+    .suggestions { position: absolute; left: 8px; right: 8px; top: 42px; max-height: 280px; overflow: auto; background: var(--panel-soft); border: 1px solid #3a3a40; border-radius: 14px; z-index: 20; }
+    .suggestions.hidden { display: none; }
+    .row { display: grid; grid-template-columns: 68px 1fr; gap: 10px; padding: 9px 11px; border-bottom: 1px solid rgba(255,255,255,.06); cursor: pointer; }
+    .row:last-child { border-bottom: 0; }
+    .row.active { background: rgba(16, 163, 127, .13); }
+    .badge { align-self: start; display: inline-flex; justify-content: center; border-radius: 999px; padding: 3px 7px; color: #d4d4d8; background: #303036; font-size: 10px; text-transform: uppercase; letter-spacing: .04em; }
+    .row-title { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .row-detail { color: var(--muted); font-size: 12px; margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .chips { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0 0; min-height: 28px; }
+    .chip { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; border: 1px solid var(--line); border-radius: 999px; padding: 6px 9px; background: var(--panel-soft); color: #e4e4e7; font-size: 12px; }
+    .chip span { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .chip button { padding: 0; width: 18px; height: 18px; border: 0; background: transparent; color: var(--muted); cursor: pointer; }
+    .toolbar { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
+    button { border: 1px solid var(--line); background: #28282d; color: var(--text); border-radius: 999px; padding: 8px 11px; cursor: pointer; font-weight: 600; font-size: 12px; }
+    button.toggle.selected { background: var(--accent); border-color: var(--accent); color: #04110d; }
+    button.send { width: 38px; height: 38px; padding: 0; margin-left: auto; display: inline-flex; align-items: center; justify-content: center; background: var(--accent); border-color: var(--accent); color: #04110d; }
+    button.send svg { width: 17px; height: 17px; }
+    .status { color: var(--muted); font-size: 12px; }
+    .error { color: var(--danger); }
+    code { color: #adf0dc; background: rgba(16, 163, 127, .13); padding: 2px 5px; border-radius: 6px; }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <section class="card">
+      <div class="header">
+        <div>
+          <h1>LCA Companion</h1>
+          <div class="sub"><code>@</code> context · <code>/</code> workflow</div>
+        </div>
+        <div class="status" id="status">ready</div>
+      </div>
+      <div class="body">
+        <div class="composer-wrap">
+          <textarea id="input" spellcheck="false" placeholder="do anything"></textarea>
+          <div id="suggestions" class="suggestions hidden"></div>
+        </div>
+        <div class="chips" id="chips"></div>
+        <div class="toolbar">
+          <button class="toggle" data-mode="plan" type="button">Plan</button>
+          <button class="toggle" data-mode="review" type="button">Review</button>
+          <button class="send" id="send" type="button" aria-label="Send to ChatGPT" title="Send to ChatGPT">
+            <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <path d="M4 12L20 4L16 20L12.5 13.5L4 12Z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
+              <path d="M12.5 13.5L20 4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const input = document.getElementById('input');
+    const suggestions = document.getElementById('suggestions');
+    const chips = document.getElementById('chips');
+    const statusEl = document.getElementById('status');
+    const sendButton = document.getElementById('send');
+    const selected = [];
+    let selectedMode = null;
+    let active = -1;
+    let current = null;
+    let pendingTimer = null;
+    let shownItems = [];
+
+    function unwrapToolResult(result) {
+      if (result && result.structuredContent) return result.structuredContent;
+      const text = result?.content?.[0]?.text;
+      if (typeof text === 'string') {
+        try { return JSON.parse(text); } catch {}
+      }
+      return result || {};
+    }
+
+    async function callTool(name, args) {
+      if (!window.openai?.callTool) throw new Error('callTool unavailable');
+      return unwrapToolResult(await window.openai.callTool(name, args || {}));
+    }
+
+    function setStatus(text, isError = false) {
+      statusEl.textContent = text;
+      statusEl.className = isError ? 'status error' : 'status';
+    }
+
+    function triggerAtCaret() {
+      const pos = input.selectionStart || 0;
+      const before = input.value.slice(0, pos);
+      const hit = before.match(/(^|\s)([@/])([^\s]*)$/);
+      if (!hit) return null;
+      return { prefix: hit[2], query: hit[3] || '', start: pos - hit[3].length - 1, end: pos };
+    }
+
+    function renderSuggestions(items) {
+      shownItems = items;
+      suggestions.replaceChildren();
+      if (!items.length) {
+        suggestions.classList.add('hidden');
+        return;
+      }
+      active = 0;
+      const fragment = document.createDocumentFragment();
+      items.forEach((item, index) => {
+        const row = document.createElement('div');
+        row.className = `row ${index === active ? 'active' : ''}`;
+        row.dataset.index = String(index);
+
+        const badge = document.createElement('div');
+        badge.className = 'badge';
+        badge.textContent = item.type || 'item';
+
+        const content = document.createElement('div');
+        const title = document.createElement('div');
+        title.className = 'row-title';
+        title.textContent = item.label || item.path || item.name || '';
+        const detail = document.createElement('div');
+        detail.className = 'row-detail';
+        detail.textContent = item.detail || item.description || item.path || '';
+
+        content.append(title, detail);
+        row.append(badge, content);
+        fragment.append(row);
+      });
+      suggestions.append(fragment);
+      suggestions.classList.remove('hidden');
+    }
+
+    function refreshActive() {
+      [...suggestions.querySelectorAll('.row')].forEach((row, index) => row.classList.toggle('active', index === active));
+    }
+
+    function replaceRange(start, end, text) {
+      const value = input.value;
+      input.value = value.slice(0, start) + text + value.slice(end);
+      const pos = start + text.length;
+      input.focus();
+      input.setSelectionRange(pos, pos);
+    }
+
+    function selectItem(item) {
+      if (!current) return;
+      if (current.prefix === '@') {
+        const token = item.type === 'skill' ? `@skill:${item.skill}` : `@${item.path || item.label}`;
+        replaceRange(current.start, current.end, `${token} `);
+        if (item.path && !selected.includes(item.path)) selected.push(item.path);
+        renderChips();
+      } else {
+        replaceRange(current.start, current.end, `${item.command || '/' + item.name} `);
+      }
+      suggestions.classList.add('hidden');
+      shownItems = [];
+      current = null;
+    }
+
+    async function updateSuggestions() {
+      current = triggerAtCaret();
+      if (!current) {
+        suggestions.classList.add('hidden');
+        return;
+      }
+      setStatus('searching...');
+      try {
+        if (current.prefix === '@') {
+          const data = await callTool('workspace_search', { query: '@' + current.query, limit: 24 });
+          renderSuggestions(data.results || []);
+        } else {
+          const data = await callTool('slash_commands', { query: '/' + current.query, limit: 24 });
+          renderSuggestions(data.commands || []);
+        }
+        setStatus('ready');
+      } catch (error) {
+        setStatus(error.message, true);
+      }
+    }
+
+    function renderChips() {
+      chips.replaceChildren();
+      const fragment = document.createDocumentFragment();
+      selected.forEach((path, index) => {
+        const chip = document.createElement('div');
+        chip.className = 'chip';
+        const label = document.createElement('span');
+        label.textContent = path;
+        const remove = document.createElement('button');
+        remove.dataset.remove = String(index);
+        remove.title = 'remove';
+        remove.textContent = '×';
+        chip.append(label, remove);
+        fragment.append(chip);
+      });
+      chips.append(fragment);
+    }
+
+    async function composePrompt() {
+      const task = input.value.trim();
+      if (!task) {
+        setStatus('type a task', true);
+        return '';
+      }
+      setStatus('composing...');
+      const data = await callTool('compose_prompt', {
+        input: task,
+        mode: selectedMode || undefined,
+        selected_context: selected,
+        include_context_pack: true
+      });
+      return data.prompt || '';
+    }
+
+    input.addEventListener('input', () => {
+      clearTimeout(pendingTimer);
+      pendingTimer = setTimeout(updateSuggestions, 140);
+    });
+
+    input.addEventListener('keydown', (event) => {
+      const rows = [...suggestions.querySelectorAll('.row')];
+      if (!rows.length || suggestions.classList.contains('hidden')) return;
+      if (event.key === 'ArrowDown') {
+        event.preventDefault();
+        active = Math.min(rows.length - 1, active + 1);
+        refreshActive();
+      } else if (event.key === 'ArrowUp') {
+        event.preventDefault();
+        active = Math.max(0, active - 1);
+        refreshActive();
+      } else if (event.key === 'Enter' || event.key === 'Tab') {
+        event.preventDefault();
+        const item = shownItems[active];
+        if (item) selectItem(item);
+      } else if (event.key === 'Escape') {
+        suggestions.classList.add('hidden');
+      }
+    });
+
+    suggestions.addEventListener('click', (event) => {
+      const row = event.target.closest('.row');
+      if (!row) return;
+      const item = shownItems[Number(row.dataset.index)];
+      if (item) selectItem(item);
+    });
+
+    document.querySelectorAll('[data-mode]').forEach((button) => {
+      button.addEventListener('click', () => {
+        const mode = button.dataset.mode;
+        selectedMode = selectedMode === mode ? null : mode;
+        document.querySelectorAll('[data-mode]').forEach((item) => item.classList.toggle('selected', item.dataset.mode === selectedMode));
+      });
+    });
+
+    chips.addEventListener('click', (event) => {
+      const idx = event.target.dataset.remove;
+      if (idx === undefined) return;
+      selected.splice(Number(idx), 1);
+      renderChips();
+    });
+
+    sendButton.addEventListener('click', async () => {
+      try {
+        const prompt = await composePrompt();
+        if (!prompt) return;
+        if (!window.openai?.sendFollowUpMessage) {
+          setStatus('send unavailable', true);
+          return;
+        }
+        await window.openai.sendFollowUpMessage({ prompt, scrollToBottom: true });
+        setStatus('sent');
+      } catch (error) {
+        setStatus(error.message, true);
+      }
+    });
+
+    window.addEventListener('openai:set_globals', () => {
+      const initial = window.openai?.toolOutput?.initial_input || window.openai?.toolInput?.initial_input || '';
+      if (initial && !input.value) input.value = initial;
+    }, { passive: true });
+
+    const initial = window.openai?.toolOutput?.initial_input || window.openai?.toolInput?.initial_input || '';
+    if (initial) input.value = initial;
+  </script>
+</body>
+</html>

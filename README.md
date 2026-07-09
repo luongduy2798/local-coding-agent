@@ -85,9 +85,35 @@ Tóm tắt:
 5. Chọn tunnel đã tạo.
 6. Auth: chọn `No auth`.
 7. Lưu connector.
-8. Trong ChatGPT, gọi tool `workspace_info` để kiểm tra workspace thật.
+8. Trong ChatGPT, gọi tool `lca` hoặc `workspace_info` để kiểm tra workspace thật.
 
 Runtime API key nằm ở `.env.local` và chỉ dùng cho local tunnel-client. Không nhập Runtime API key vào phần auth của ChatGPT connector.
+
+## ChatGPT Tools
+
+Sau khi connector hoạt động, các tool thường dùng trong ChatGPT:
+
+```text
+lca        # alias ngắn của workspace_info, kiểm tra workspace thật
+lca_input  # mở Apps SDK widget để nhập task, chọn @ context và / workflow
+```
+
+`workspace_info` vẫn tồn tại cho tên rõ nghĩa hơn, còn `lca` tiện dùng khi mở chat mới.
+
+## LCA Input: `@` Context và `/` Workflow
+
+`lca_input` mở widget ngay trong ChatGPT. Widget này dùng:
+
+- `@...` để chọn file, folder, symbol hoặc skill trong workspace.
+- `/...` để gọi workflow hoặc skill, ví dụ `/plan`, `/debug`, `/review`, `/implement`, `/refactor`, `/skill:<name>`.
+- Nút nhanh **Plan** và **Review** chỉ là quick action; không chèn chữ vào input.
+- Nút send sẽ tự compose prompt rồi gửi vào ChatGPT, không cần hiện Prompt output.
+
+Các tool nền phía sau:
+
+- `workspace_search`: autocomplete cho `@...`.
+- `slash_commands`: autocomplete cho `/...`.
+- `compose_prompt`: parse input, resolve context đã chọn, và tạo prompt sẵn để gửi vào ChatGPT.
 
 ## Config
 
@@ -159,14 +185,14 @@ Chọn `Mode` hoặc `Policy`, lưu lại, và nếu agent đang chạy thì `lc
 
 ## Troubleshooting
 
-| Lỗi | Cách xử lý |
-|---|---|
+| Lỗi                                                  | Cách xử lý                                                                                                                                                           |
+| ---------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `lca: command not found` / `'lca' is not recognized` | Trên Windows: đóng terminal cũ, mở terminal mới rồi chạy lại `lca`. Nếu vẫn lỗi, chạy `scripts\lca.cmd cli` để cài lại wrapper hoặc gọi trực tiếp path wizard in ra. |
-| Server chạy nhầm repo | `cd` vào repo đúng rồi chạy lại `lca`. |
-| Port `8789` bận | Chạy `lca setup` và đổi MCP port, hoặc set `PORT` trước khi chạy. |
-| Server không health | Kiểm tra `lca status` và `http://127.0.0.1:8789/healthz`. |
-| Connector không thấy tool | Đảm bảo `lca` đang chạy, tunnel connected, connector dùng `No auth`. |
-| Sửa nhầm repo | Trong ChatGPT gọi `workspace_info` để xem root thật. |
+| Server chạy nhầm repo                                | `cd` vào repo đúng rồi chạy lại `lca`.                                                                                                                               |
+| Port `8789` bận                                      | Chạy `lca setup` và đổi MCP port, hoặc set `PORT` trước khi chạy.                                                                                                    |
+| Server không health                                  | Kiểm tra `lca status` và `http://127.0.0.1:8789/healthz`.                                                                                                            |
+| Connector không thấy tool                            | Đảm bảo `lca` đang chạy, tunnel connected, connector dùng `No auth`.                                                                                                 |
+| Sửa nhầm repo                                        | Trong ChatGPT gọi `lca` hoặc `workspace_info` để xem root thật.                                                                                                      |
 
 ## Low-Level CLI
 
