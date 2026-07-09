@@ -102,8 +102,8 @@ function chunkedPost(port, body) {
 const base = await mkdtemp(path.join(os.tmpdir(), "lca-hardening-"));
 let server;
 try {
-  // Strict policy + browser-origin + body limit + removed dashboard routes.
-  console.log("\n[phase] strict policy, origin, body limit, no dashboard routes");
+  // Strict policy + browser-origin + body limit + removed legacy UI routes.
+  console.log("\n[phase] strict policy, origin, body limit, no legacy UI routes");
   server = await startServer(path.join(base, "strict"), { port: 19001, policy: "strict", maxBody: "8192" });
   const evil = await fetch("http://127.0.0.1:19001/mcp", {
     method: "OPTIONS",
@@ -120,8 +120,8 @@ try {
 
   const metricsRoute = await fetch("http://127.0.0.1:19001/metrics");
   const uiRoute = await fetch("http://127.0.0.1:19001/ui");
-  check("dashboard metrics route is gone", metricsRoute.status === 404, `status=${metricsRoute.status}`);
-  check("dashboard ui route is gone", uiRoute.status === 404, `status=${uiRoute.status}`);
+  check("legacy UI metrics route is gone", metricsRoute.status === 404, `status=${metricsRoute.status}`);
+  check("legacy UI ui route is gone", uiRoute.status === 404, `status=${uiRoute.status}`);
   check("chunked payload is size-limited", (await chunkedPost(19001, JSON.stringify({ data: "x".repeat(12000) }))) === 413);
   await stopServer(server);
   server = null;

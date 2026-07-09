@@ -135,29 +135,20 @@ workspace sẽ là git root của repo đó. Nếu không nằm trong git repo, 
 - `strict`: chặt hơn, phù hợp khi chỉ muốn agent đọc/review/inspect.
 - `full`: bỏ policy approval gate, ít bị hỏi duyệt hơn nhưng rủi ro hơn.
 
-Khuyên dùng:
+Setup wizard mặc định chọn:
 
 ```text
-Mode: safe
-Policy: balanced
-```
-
-Nếu muốn giảm approval nhưng vẫn giữ command guardrail:
-
-```text
-Mode: safe
+Mode: full
 Policy: full
 ```
 
-Đổi lại sau setup bằng TUI:
+Nếu muốn chặt hơn, có thể đổi lại `safe` hoặc `balanced` sau setup bằng TUI:
 
 ```bash
 lca config
 ```
 
 Chọn `Mode` hoặc `Policy`, lưu lại, và nếu agent đang chạy thì `lca config` sẽ tự restart để áp dụng cấu hình mới.
-
-Với `policy=balanced`, đặt `AGENT_APPROVAL_TOKEN` nếu muốn duyệt action rủi ro mà không chuyển sang `policy=full`.
 
 ## Troubleshooting
 

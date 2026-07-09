@@ -19,7 +19,7 @@ Quy tắc:
 - Không commit secret, API key, Tunnel ID, .env.local, tools/ hoặc generated profiles.
 - Không in giá trị secret ra màn hình.
 - Không chạy lệnh destructive.
-- Default mode=safe và policy=balanced.
+- Default mode=full và policy=full trong setup wizard.
 
 Các bước:
 1. Kiểm tra Node.js >= 18.

@@ -260,8 +260,6 @@ function writeTunnelProfile(opts, dir) {
   lines.push(
     "health:",
     `  listen_addr: "127.0.0.1:${randomPort()}"`,
-    "admin_ui:",
-    "  open_browser: false",
     "log:",
     "  level: debug",
     "  format: json",

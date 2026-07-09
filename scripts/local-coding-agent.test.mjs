@@ -52,9 +52,9 @@ test("empty dotenv merge starts with the requested key", () => {
   assert.equal(merged, "CONTROL_PLANE_TUNNEL_ID=tunnel_new\n");
 });
 
-test("setup defaults to safe and balanced unless flags override", () => {
-  assert.deepEqual(setupSecurityDefaults({}), { mode: "safe", policy: "balanced" });
-  assert.deepEqual(setupSecurityDefaults({ mode: "full", policy: "full" }), { mode: "full", policy: "full" });
+test("setup defaults to full mode and full policy unless flags override", () => {
+  assert.deepEqual(setupSecurityDefaults({}), { mode: "full", policy: "full" });
+  assert.deepEqual(setupSecurityDefaults({ mode: "safe", policy: "balanced" }), { mode: "safe", policy: "balanced" });
 });
 
 test("selects ripgrep install command by platform", () => {

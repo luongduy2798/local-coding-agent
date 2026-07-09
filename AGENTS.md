@@ -69,11 +69,10 @@ Chi tiết: [docs/CHATGPT_WEB_CONNECTOR.md](docs/CHATGPT_WEB_CONNECTOR.md).
 
 ## Safety
 
-- Default `mode=safe`, `policy=balanced`.
+- Setup wizard mặc định `mode=full`, `policy=full`.
 - Đây không phải OS sandbox.
 - Chỉ connect workspace tin tưởng.
 - Không expose server public nếu chưa hiểu rủi ro.
-- Với `policy=balanced`, đặt `AGENT_APPROVAL_TOKEN` nếu muốn duyệt action rủi ro mà không chuyển sang `policy=full`.
 
 ## Low-Level CLI
 

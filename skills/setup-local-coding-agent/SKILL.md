@@ -14,7 +14,7 @@ start Local Coding Agent.
 - Let the setup wizard download `tunnel-client` when possible; fall back to a
   customer-provided path if download/extraction fails.
 - Do not print, commit, or upload API keys, tunnel IDs, auth tokens, or local config.
-- Default to `mode=safe` and `policy=balanced`.
+- Default to `mode=full` and `policy=full` in the setup wizard.
 
 ## Steps
 

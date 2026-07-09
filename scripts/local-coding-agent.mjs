@@ -275,9 +275,6 @@ function effectiveOptions(flags = {}) {
 export function normalize(opts) {
   const out = { ...opts };
   out.port = String(out.port || DEFAULT_PORT);
-  delete out.dashboardPort;
-  delete out.openWebUi;
-  delete out.tunnelHealthPort;
   out.mode = out.mode || "safe";
   out.policy = out.policy || "balanced";
   out.runtimeKeyEnv = out.runtimeKeyEnv || "CONTROL_PLANE_API_KEY";
@@ -291,8 +288,8 @@ export function normalize(opts) {
 
 export function setupSecurityDefaults(flags = {}) {
   return {
-    mode: flags.mode || "safe",
-    policy: flags.policy || "balanced"
+    mode: flags.mode || "full",
+    policy: flags.policy || "full"
   };
 }
 
@@ -486,6 +483,15 @@ function configId(opts) {
     port: String(opts.port)
   });
   return createHash("sha256").update(material).digest("hex").slice(0, 16);
+}
+
+function tunnelHealthArgs() {
+  if (process.platform === "win32") {
+    return ["--health.listen-addr", "127.0.0.1:0"];
+  }
+  const socketPath = `/tmp/lca-tunnel-${process.pid}.sock`;
+  rmSync(socketPath, { force: true });
+  return ["--health.unix-socket", socketPath];
 }
 
 async function readJson(url, timeoutMs = 1500) {
@@ -1006,11 +1012,11 @@ async function setup(flags) {
     cfg.node = cfg.node || "node";
     cfg.workspace = await promptLine(rl, "Default workspace root", cfg.workspace || process.cwd());
     const securityDefaults = setupSecurityDefaults(flags);
-    cfg.mode = (await promptChoice(rl, "Mode", [{ id: "safe", label: "safe" }, { id: "full", label: "full" }], securityDefaults.mode)).id;
+    cfg.mode = (await promptChoice(rl, "Mode", [{ id: "full", label: "full" }, { id: "safe", label: "safe" }], securityDefaults.mode)).id;
     cfg.policy = (await promptChoice(rl, "Policy", [
+      { id: "full", label: "full" },
       { id: "balanced", label: "balanced" },
-      { id: "strict", label: "strict" },
-      { id: "full", label: "full" }
+      { id: "strict", label: "strict" }
     ], securityDefaults.policy)).id;
     cfg.port = await promptLine(rl, "MCP port", cfg.port || DEFAULT_PORT);
     cfg.extraRoots = flags.extraRoots ?? cfg.extraRoots ?? "";
@@ -1072,9 +1078,6 @@ function stripRuntimeFields(cfg) {
   delete out.background;
   delete out.json;
   delete out.force;
-  delete out.dashboardPort;
-  delete out.openWebUi;
-  delete out.tunnelHealthPort;
   return out;
 }
 
@@ -1207,7 +1210,13 @@ async function start(flags) {
       env.MCP_AUTH_HEADER = `Bearer ${opts.authToken}`;
       env.MCP_EXTRA_HEADERS = "Authorization: env:MCP_AUTH_HEADER";
     }
-    const args = ["run", "--profile", opts.profile, "--profile-dir", opts.profileDir, "--control-plane.tunnel-id", opts.tunnelId];
+    const args = [
+      "run",
+      "--profile", opts.profile,
+      "--profile-dir", opts.profileDir,
+      "--control-plane.tunnel-id", opts.tunnelId,
+      ...tunnelHealthArgs()
+    ];
     const stdio = flags.background ? ["ignore", "ignore", "ignore"] : "inherit";
     tunnelChild = spawnLogged("tunnel", opts.tunnelBin, args, {
       cwd: dirname(opts.tunnelBin),
@@ -1337,9 +1346,6 @@ function redactConfigForDisplay(cfg) {
   const visible = { ...cfg };
   if (visible.runtimeKey) visible.runtimeKey = "<saved>";
   if (visible.authToken) visible.authToken = "<saved>";
-  delete visible.dashboardPort;
-  delete visible.openWebUi;
-  delete visible.tunnelHealthPort;
   return visible;
 }
 
@@ -1372,14 +1378,14 @@ async function promptConfigWizard() {
       ], "save");
       if (action.id === "mode") {
         cfg.mode = (await promptChoice(rl, "Mode", [
-          { id: "safe", label: "safe - recommended command guardrail" },
-          { id: "full", label: "full - fewer command blocks" }
+          { id: "full", label: "full - fewer command blocks" },
+          { id: "safe", label: "safe - stricter command guardrail" }
         ], cfg.mode)).id;
       } else if (action.id === "policy") {
         cfg.policy = (await promptChoice(rl, "Policy", [
-          { id: "balanced", label: "balanced - recommended" },
-          { id: "strict", label: "strict - tighter/read-review focused" },
-          { id: "full", label: "full - fewer approval gates" }
+          { id: "full", label: "full - fewer approval gates" },
+          { id: "balanced", label: "balanced - approval for risky actions" },
+          { id: "strict", label: "strict - tighter/read-review focused" }
         ], cfg.policy)).id;
       } else if (action.id === "workspace") {
         cfg.workspace = await promptLine(rl, "Workspace path", cfg.workspace || process.cwd());
@@ -1425,14 +1431,6 @@ async function configCommand(rest) {
   }
   if (sub === "set") {
     if (!key || valueParts.length === 0) throw new Error("Usage: config set <key> <value>");
-    if (key === "dashboardPort" || key === "openWebUi" || key === "tunnelHealthPort") {
-      delete cfg.dashboardPort;
-      delete cfg.openWebUi;
-      delete cfg.tunnelHealthPort;
-      await saveConfig(cfg);
-      console.log(`Ignored removed key ${key}.`);
-      return;
-    }
     cfg[key] = valueParts.join(" ");
     await saveConfig(cfg);
     console.log(`Set ${key}.`);
