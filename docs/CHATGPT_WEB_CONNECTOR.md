@@ -7,7 +7,7 @@ cd /repo/can-lam-viec
 lca
 ```
 
-Không dùng OAuth connector. Không nhập Runtime API key vào Auth của ChatGPT connector.
+Không bật OAuth/Auth trong connector. Không nhập Runtime API key vào Auth của ChatGPT connector.
 
 ## 1. Setup Local Agent
 
@@ -102,4 +102,3 @@ lca stop
 - Runtime API key ở `.env.local` dành cho tunnel-client chạy local.
 - Nếu bật Auth/OAuth trong connector sẽ lỗi vì server này đang dùng hướng `No auth`.
 - Chỉ kết nối workspace tin tưởng.
-- `scripts/start-tunnel.sh` và `scripts/start-tunnel.ps1` chỉ còn là legacy/debug launcher.

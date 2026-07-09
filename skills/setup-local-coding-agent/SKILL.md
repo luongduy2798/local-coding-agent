@@ -15,7 +15,6 @@ start Local Coding Agent.
   customer-provided path if download/extraction fails.
 - Do not print, commit, or upload API keys, tunnel IDs, auth tokens, or local config.
 - Default to `mode=safe` and `policy=balanced`.
-- Prefer the universal CLI over the Windows tray app unless the customer asks for GUI.
 
 ## Steps
 

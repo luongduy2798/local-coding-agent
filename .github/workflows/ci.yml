@@ -49,18 +49,10 @@ jobs:
           node ../scripts/network-doctor.mjs --help
           node ../scripts/validate-skills.mjs
           node ../scripts/local-coding-agent.mjs skills validate
-      - name: Parse PowerShell launchers
-        run: |
-          [void][scriptblock]::Create((Get-Content -Raw ../scripts/start-tunnel.ps1))
-        working-directory: server
-      - name: Parse Bash launchers
+      - name: Parse Bash launcher
         if: runner.os != 'Windows'
         shell: bash
-        run: |
-          bash -n scripts/start-tunnel.sh
-          bash -n scripts/lca
-          bash -n scripts/lca-here.sh
-          bash -n scripts/run-lca.sh
+        run: bash -n scripts/lca
       - name: Run MCP and runtime-security tests
         working-directory: server
         run: |
@@ -141,44 +133,3 @@ jobs:
         working-directory: server
       - run: npm run eval
         working-directory: server
-
-  studio-v5:
-    name: Studio v5 security (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [windows-latest, macos-latest, ubuntu-latest]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: experiments/standalone-client-roadmap/v5.0.0-local-agent-studio/package-lock.json
-      - name: Install locked Studio dependencies
-        run: npm ci
-        working-directory: experiments/standalone-client-roadmap/v5.0.0-local-agent-studio
-      - name: Verify Studio source and security boundaries
-        run: |
-          npm run check
-          npm test
-          npm run security:audit
-          npm run release:doctor
-          npm audit --omit=dev
-        working-directory: experiments/standalone-client-roadmap/v5.0.0-local-agent-studio
-
-  tray-windows:
-    name: Tray app (Windows)
-    runs-on: windows-latest
-    defaults:
-      run:
-        shell: pwsh
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: 10.0.x
-      - name: Publish tray app
-        run: powershell -ExecutionPolicy Bypass -File build.ps1
-        working-directory: tray-app

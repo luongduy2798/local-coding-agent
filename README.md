@@ -82,8 +82,6 @@ Tóm tắt:
 
 Runtime API key nằm ở `.env.local` và chỉ dùng cho local tunnel-client. Không nhập Runtime API key vào phần auth của ChatGPT connector.
 
-`scripts/start-tunnel.sh` và `scripts/start-tunnel.ps1` là low-level legacy/debug launcher. Flow bình thường nên dùng `lca setup`, sau đó `lca`.
-
 ## Config
 
 Secret runtime nằm ở:

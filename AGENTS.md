@@ -75,13 +75,7 @@ Chi tiết: [docs/CHATGPT_WEB_CONNECTOR.md](docs/CHATGPT_WEB_CONNECTOR.md).
 - Không expose server public nếu chưa hiểu rủi ro.
 - Với `policy=balanced`, đặt `AGENT_APPROVAL_TOKEN` nếu muốn duyệt action rủi ro mà không chuyển sang `policy=full`.
 
-## Legacy Flow To Avoid As Primary Docs
-
-Các script dưới đây chỉ để compatibility/debug:
-
-- `scripts/start-tunnel.sh`
-- `scripts/start-tunnel.ps1`
-- OAuth connector
+## Low-Level CLI
 
 CLI gốc vẫn dùng được để debug:
 

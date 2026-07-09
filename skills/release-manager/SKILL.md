@@ -22,7 +22,6 @@ Use this when preparing a new Local Coding Agent version.
    - `server/server.mjs`
    - `server/package.json`
    - `server/package-lock.json`
-   - `tray-app/LocalCodingAgentTray.csproj`
    - tests that assert version
    - `CHANGELOG.md`
 3. Run:
@@ -31,10 +30,8 @@ Use this when preparing a new Local Coding Agent version.
    - `npm run test:security`
    - `npm run test:hardening`
    - `npm run eval`
-   - `dotnet build tray-app/LocalCodingAgentTray.csproj -c Release`
 4. Commit, tag, push.
 5. Create GitHub Release notes.
-6. If publishing Windows tray asset, build self-contained exe and attach checksum.
 
 ## Release Notes Shape
 

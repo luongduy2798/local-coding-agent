@@ -20,7 +20,6 @@ Quy tắc:
 - Không in giá trị secret ra màn hình.
 - Không chạy lệnh destructive.
 - Default mode=safe và policy=balanced.
-- Không dùng scripts/start-tunnel.* làm flow chính.
 
 Các bước:
 1. Kiểm tra Node.js >= 18.
