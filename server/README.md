@@ -37,7 +37,7 @@ Low-level server-only run:
 cd server
 npm install
 # minimum: point it at a folder you want the agent to work in
-#   Windows PowerShell:  $env:AGENT_WORKSPACE="C:\path\to\your\repo"
+#   Windows PowerShell:  $env:AGENT_WORKSPACE="<path-to-your-repo>"
 #   bash:                export AGENT_WORKSPACE="/path/to/your/repo"
 npm start
 ```

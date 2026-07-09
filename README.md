@@ -32,13 +32,20 @@ bash scripts/lca setup
 scripts\lca.cmd setup
 ```
 
-Wizard sẽ tự detect hệ điều hành hiện tại, kiểm tra prerequisite, mở trang tạo Tunnel/API key, tạo/cập nhật `.env.local`, cài dependency trong `server/`, tải `tools/tunnel-client`, ghi config local và cài global command `lca`.
+Wizard sẽ tự detect hệ điều hành hiện tại, kiểm tra prerequisite, mở trang tạo Tunnel/API key, tạo/cập nhật `.env.local`, cài dependency trong `server/`, tải `tools/tunnel-client`, ghi config local và cài global command `lca`. Trên Windows, wizard sẽ thêm thư mục `lca.cmd` vào User PATH; mở terminal mới trước khi gõ `lca`.
 
 Nếu cần xem hướng dẫn cho hệ điều hành khác máy đang chạy, dùng `node scripts/local-coding-agent.mjs setup --choose-os`.
 
 ## Dùng Hằng Ngày
 
-Vào repo muốn dùng làm workspace:
+Vào repo muốn dùng làm workspace. Trên Windows, mở terminal mới sau setup rồi chạy:
+
+```powershell
+cd /d <path-to-your-repo>
+lca
+```
+
+macOS/Linux:
 
 ```bash
 cd /path/to/your-repo
@@ -154,7 +161,7 @@ Chọn `Mode` hoặc `Policy`, lưu lại, và nếu agent đang chạy thì `lc
 
 | Lỗi | Cách xử lý |
 |---|---|
-| `lca: command not found` | Chạy lại `lca setup` hoặc `node scripts/local-coding-agent.mjs cli`, rồi thêm path wizard in ra vào `PATH`. |
+| `lca: command not found` / `'lca' is not recognized` | Trên Windows: đóng terminal cũ, mở terminal mới rồi chạy lại `lca`. Nếu vẫn lỗi, chạy `scripts\lca.cmd cli` để cài lại wrapper hoặc gọi trực tiếp path wizard in ra. |
 | Server chạy nhầm repo | `cd` vào repo đúng rồi chạy lại `lca`. |
 | Port `8789` bận | Chạy `lca setup` và đổi MCP port, hoặc set `PORT` trước khi chạy. |
 | Server không health | Kiểm tra `lca status` và `http://127.0.0.1:8789/healthz`. |

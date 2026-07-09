@@ -29,7 +29,7 @@ Các bước:
    - macOS/Linux/WSL: bash scripts/lca setup
    - Windows: scripts\lca.cmd setup
 5. Khi wizard hỏi, để tôi nhập Tunnel ID và Runtime API key.
-6. Kiểm tra command lca có trong PATH.
+6. Kiểm tra command lca wrapper chạy được. Trên Windows, yêu cầu mở terminal mới trước khi dùng lệnh `lca` vì User PATH mới không áp dụng cho terminal đang mở.
 7. Hướng dẫn dùng:
    cd /path/to/repo
    lca

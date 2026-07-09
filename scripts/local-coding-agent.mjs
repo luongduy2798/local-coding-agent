@@ -130,7 +130,7 @@ Fast path:
   lca                         # From any repo, set workspace to git root and run
 
 One-shot examples:
-  node scripts/local-coding-agent.mjs start --workspace "C:\\path\\repo" --no-tunnel
+  node scripts/local-coding-agent.mjs start --workspace "<path-to-repo>" --no-tunnel
   CONTROL_PLANE_API_KEY=sk-proj-... node scripts/local-coding-agent.mjs start --workspace /path/repo --tunnel-id tunnel_...
 `);
 }
@@ -879,11 +879,38 @@ function chooseCliBinDir() {
   return defaultCliBinDir();
 }
 
+function pathEnvKey() {
+  return Object.keys(process.env).find((key) => key.toLowerCase() === "path") || "PATH";
+}
+
+function getProcessPath() {
+  return process.env[pathEnvKey()] || "";
+}
+
+function setProcessPath(value) {
+  const key = pathEnvKey();
+  process.env[key] = value;
+  process.env.PATH = value;
+}
+
+function prependProcessPath(dir) {
+  const current = getProcessPath();
+  const sep = process.platform === "win32" ? ";" : ":";
+  setProcessPath(current ? `${dir}${sep}${current}` : dir);
+}
+
+function normalizePathForCompare(value) {
+  const resolved = resolve(String(value || ""));
+  return process.platform === "win32"
+    ? resolved.replace(/[\\/]+$/, "").toLowerCase()
+    : resolved;
+}
+
 function pathHasDir(dir) {
-  const target = resolve(dir).toLowerCase();
-  return String(process.env.PATH || "")
+  const target = normalizePathForCompare(dir);
+  return getProcessPath()
     .split(process.platform === "win32" ? ";" : ":")
-    .some((entry) => entry && resolve(entry).toLowerCase() === target);
+    .some((entry) => entry && normalizePathForCompare(entry) === target);
 }
 
 function shellProfileCandidates() {
@@ -903,11 +930,52 @@ function pathExportLine(dir, profilePath) {
   return `export PATH="${dir}:$PATH"`;
 }
 
-function configureShellPath(binDir) {
+async function setWindowsUserPath(binDir) {
+  const script = `
+$ErrorActionPreference = 'Stop'
+$dir = [System.IO.Path]::GetFullPath($args[0])
+$userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+if ($null -eq $userPath) { $userPath = '' }
+$exists = $false
+foreach ($part in ($userPath -split ';')) {
+  if ([string]::IsNullOrWhiteSpace($part)) { continue }
+  try { $full = [System.IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($part)) } catch { $full = $part }
+  if ($full.TrimEnd('\\') -ieq $dir.TrimEnd('\\')) { $exists = $true; break }
+}
+if (-not $exists) {
+  $newPath = if ([string]::IsNullOrWhiteSpace($userPath)) { $dir } else { "$userPath;$dir" }
+  [Environment]::SetEnvironmentVariable('Path', $newPath, 'User')
+  Write-Output 'added'
+} else {
+  Write-Output 'exists'
+}
+`;
+  const args = ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script, binDir];
+  let result = await capture("powershell.exe", args);
+  if (result.code !== 0) result = await capture("pwsh", ["-NoProfile", "-Command", script, binDir]);
+  return result;
+}
+
+async function configureShellPath(binDir) {
   if (pathHasDir(binDir)) return { changed: false, active: true, profile: "" };
   if (process.platform === "win32") {
-    process.env.PATH = `${binDir};${process.env.PATH || ""}`;
-    return { changed: false, active: false, profile: "", message: `Add to PATH: ${binDir}` };
+    prependProcessPath(binDir);
+    const result = await setWindowsUserPath(binDir);
+    if (result.code === 0) {
+      const changed = result.stdout.includes("added");
+      return {
+        changed,
+        active: false,
+        profile: "User PATH",
+        message: `${changed ? "Added" : "Already present in"} Windows User PATH: ${binDir}. Open a new terminal before running lca.`
+      };
+    }
+    return {
+      changed: false,
+      active: false,
+      profile: "",
+      message: `Could not update Windows User PATH automatically. Add this directory manually: ${binDir}`
+    };
   }
 
   const profile = shellProfileCandidates()[0];
@@ -918,8 +986,18 @@ function configureShellPath(binDir) {
     const block = `\n# Local Coding Agent CLI\n${line}\n`;
     writeFileSync(profile, `${existing.replace(/\s*$/, "")}${block}`, "utf8");
   }
-  process.env.PATH = `${binDir}:${process.env.PATH || ""}`;
+  prependProcessPath(binDir);
   return { changed: true, active: false, profile, message: `Added ${binDir} to ${profile}. Restart your terminal or run: source ${profile}` };
+}
+
+async function verifyCliShim(cliPath) {
+  const result = process.platform === "win32"
+    ? await capture("cmd.exe", ["/d", "/c", `call "${cliPath}" --help`], { cwd: REPO_ROOT })
+    : await capture(cliPath, ["--help"], { cwd: REPO_ROOT });
+  if (result.code !== 0) {
+    throw new Error(`Installed lca wrapper failed: ${result.stderr || result.stdout || `exit ${result.code}`}`);
+  }
+  console.log(`OK lca wrapper: ${cliPath}`);
 }
 
 async function installCliCommand() {
@@ -938,11 +1016,12 @@ async function installCliCommand() {
         throw new Error(`Refusing to overwrite: ${target}`);
       }
     }
-    writeFileSync(cmdPath, `@echo off\r\nrem ${marker}\r\nnode "${join(SCRIPT_DIR, "local-coding-agent.mjs")}" %*\r\n`, "utf8");
+    writeFileSync(cmdPath, `@echo off\r\nrem ${marker}\r\nwhere node >nul 2>nul\r\nif errorlevel 1 (\r\n  echo ERROR: Node.js 18+ is required but node was not found in PATH.\r\n  echo Install Node.js LTS from https://nodejs.org/ then open a new terminal and rerun setup.\r\n  exit /b 1\r\n)\r\nnode "${join(SCRIPT_DIR, "local-coding-agent.mjs")}" %*\r\nexit /b %ERRORLEVEL%\r\n`, "utf8");
     writeFileSync(psPath, `# ${marker}\n& node "${join(SCRIPT_DIR, "local-coding-agent.mjs")}" @args\nexit $LASTEXITCODE\n`, "utf8");
     console.log(`Installed: ${cmdPath}`);
-    const pathResult = configureShellPath(binDir);
+    const pathResult = await configureShellPath(binDir);
     if (pathResult.message) console.log(pathResult.message);
+    if (!pathResult.active) console.log(`Current terminal fallback: "${cmdPath}"`);
     return cmdPath;
   }
   const target = join(binDir, "lca");
@@ -952,7 +1031,7 @@ async function installCliCommand() {
   writeFileSync(target, `#!/usr/bin/env bash\n# ${marker}\nexec node "${join(SCRIPT_DIR, "local-coding-agent.mjs")}" "$@"\n`, "utf8");
   await chmod(target, 0o755);
   console.log(`Installed: ${target}`);
-  const pathResult = configureShellPath(binDir);
+  const pathResult = await configureShellPath(binDir);
   if (pathResult.message) console.log(pathResult.message);
   return target;
 }
@@ -1054,14 +1133,21 @@ async function setup(flags) {
     cfg.runtimeKey = "";
     validate(cfg);
     await saveConfig(stripRuntimeFields(cfg));
-    await installCliCommand();
+    const cliPath = await installCliCommand();
 
     printStep(8, 8, "Verify");
+    await verifyCliShim(cliPath);
     await status({ json: false });
     console.log("\nSetup complete.");
     console.log("Daily use:");
-    console.log("  cd /path/to/repo");
-    console.log("  lca");
+    if (process.platform === "win32") {
+      console.log("  Open a new terminal");
+      console.log("  cd /d <path-to-your-repo>");
+      console.log("  lca");
+    } else {
+      console.log("  cd /path/to/repo");
+      console.log("  lca");
+    }
     console.log(`Health: http://127.0.0.1:${cfg.port}/healthz`);
   } finally {
     rl.close();
