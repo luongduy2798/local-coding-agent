@@ -7,6 +7,7 @@ import { spawn } from "node:child_process";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { Script } from "node:vm";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
@@ -190,7 +191,17 @@ try {
   const resources = await client.listResources();
   check("Apps SDK companion widget resource is listed", resources.resources?.some((r) => r.uri === "ui://widget/lca-companion.html"), JSON.stringify(resources.resources));
   const widgetResource = await client.readResource({ uri: "ui://widget/lca-companion.html" });
-  check("Apps SDK companion widget resource is html", widgetResource.contents?.[0]?.mimeType === "text/html;profile=mcp-app" && widgetResource.contents?.[0]?.text?.includes("sendFollowUpMessage") && widgetResource.contents?.[0]?.text?.includes("slash_commands") && widgetResource.contents?.[0]?.text?.includes("suggestions.scrollTop = 0") && !widgetResource.contents?.[0]?.text?.includes("Prompt output"), JSON.stringify(widgetResource.contents?.[0]));
+  const widgetHtml = widgetResource.contents?.[0]?.text || "";
+  check("Apps SDK companion widget resource is html", widgetResource.contents?.[0]?.mimeType === "text/html;profile=mcp-app" && widgetHtml.includes("sendFollowUpMessage") && widgetHtml.includes("slash_commands") && widgetHtml.includes("suggestions.scrollTop = 0") && !widgetHtml.includes("Prompt output"), JSON.stringify(widgetResource.contents?.[0]));
+  const widgetScript = widgetHtml.match(/<script>([\s\S]*?)<\/script>/)?.[1] || "";
+  let widgetScriptError = "";
+  try {
+    new Script(widgetScript);
+  } catch (error) {
+    widgetScriptError = error instanceof Error ? error.message : String(error);
+  }
+  check("Apps SDK companion widget script compiles", Boolean(widgetScript) && !widgetScriptError, widgetScriptError || "inline script missing");
+  check("Apps SDK companion widget requests PiP from a user action", /id\s*=\s*(['\"])pip\1/.test(widgetHtml) && /pipButton\.addEventListener\(\s*(['\"])click\1\s*,\s*requestPipMode\s*\)/.test(widgetScript) && /requestDisplayMode\(\{\s*mode:\s*(['\"])pip\1\s*\}\)/.test(widgetScript), "PiP button, click handler, or requestDisplayMode({ mode: 'pip' }) missing");
   const lcaInput = await client.callTool({ name: "lca_input", arguments: { initial_input: "fix @deepFeature" } });
   check("lca_input returns structured widget payload", lcaInput.structuredContent?.initial_input === "fix @deepFeature" && lcaInput.structuredContent?.shortcuts?.length === 1 && lcaInput.structuredContent.shortcuts[0]?.name === "plan" && /LCA input is ready/.test(lcaInput.content?.[0]?.text || ""), JSON.stringify(lcaInput));
 

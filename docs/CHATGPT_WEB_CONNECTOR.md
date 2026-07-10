@@ -78,9 +78,18 @@ Trong ChatGPT, hỏi:
 
 ```text
 call workspace_info
+# or call lca
 ```
 
 Kết quả phải trả về root đúng với repo bạn vừa chạy `lca`.
+
+Để kiểm tra Apps SDK và PiP, gọi:
+
+```text
+call lca_input
+```
+
+Widget sẽ xuất hiện inline trước. Bấm **PiP** và kiểm tra mode được ChatGPT cấp. Khi host hỗ trợ, composer sẽ thành cửa sổ nổi; trên mobile, ChatGPT có thể mở fullscreen thay thế.
 
 ## 5. Đổi Repo
 

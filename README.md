@@ -95,7 +95,7 @@ Sau khi connector hoạt động, các tool thường dùng trong ChatGPT:
 
 ```text
 lca        # alias ngắn của workspace_info, kiểm tra workspace thật
-lca_input  # mở Apps SDK widget để nhập task, chọn @ context và / workflow
+lca_input  # mở Apps SDK widget, có thể ghim PiP để nhập task trong lúc chat
 ```
 
 `workspace_info` vẫn tồn tại cho tên rõ nghĩa hơn, còn `lca` tiện dùng khi mở chat mới.
@@ -106,8 +106,11 @@ lca_input  # mở Apps SDK widget để nhập task, chọn @ context và / work
 
 - `@...` để chọn file, folder, symbol hoặc skill trong workspace.
 - `/...` để gọi workflow hoặc skill, ví dụ `/debug`, `/review`, `/implement`, `/refactor`, `/skill:<name>`.
+- Nút **PiP** yêu cầu ChatGPT ghim composer thành cửa sổ nổi để vẫn dùng được trong lúc tiếp tục chat.
 - Nút nhanh **Plan** là quick action; không chèn chữ vào input.
 - Nút send sẽ tự compose prompt rồi gửi vào ChatGPT, không cần hiện Prompt output.
+
+ChatGPT luôn mở app ở inline trước, nên cần bấm **PiP** một lần để chuyển mode. Host sẽ quyết định mode cuối cùng; trên mobile, yêu cầu PiP có thể được chuyển thành fullscreen.
 
 Các tool nền phía sau:
 

@@ -1,0 +1,660 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>LCA Input</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #2b2b2c;
+      --bg-soft: #242426;
+      --line: rgba(255,255,255,.08);
+      --text: #f4f4f5;
+      --muted: #a1a1aa;
+      --accent: #10a37f;
+      --blue: #55b7ff;
+      --yellow: #facc15;
+      --danger: #fb7185;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; background: transparent; color: var(--text); }
+    button, textarea, .input-highlight { font: inherit; }
+    .shell { padding: 4px; }
+    .composer {
+      width: 100%;
+      min-height: 76px;
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      background: var(--bg);
+      box-shadow: 0 16px 42px rgba(0,0,0,.28);
+      overflow: visible;
+    }
+    .main-row {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 8px;
+      align-items: start;
+      padding: 13px 10px 6px 14px;
+    }
+    .editor-shell {
+      position: relative;
+      min-height: 28px;
+      overflow: hidden;
+    }
+    textarea,
+    .input-highlight {
+      width: 100%;
+      min-height: 28px;
+      max-height: 92px;
+      margin: 0;
+      border: 0;
+      outline: none;
+      padding: 0;
+      background: transparent;
+      font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      white-space: pre-wrap;
+      overflow-wrap: break-word;
+      tab-size: 2;
+    }
+    textarea {
+      position: relative;
+      z-index: 2;
+      resize: none;
+      color: var(--text);
+      caret-color: var(--text);
+      overflow-y: auto;
+    }
+    textarea::placeholder { color: #d4d4d8; opacity: .7; }
+    .input-highlight {
+      position: absolute;
+      inset: 0;
+      z-index: 1;
+      pointer-events: none;
+      overflow: hidden;
+      color: transparent;
+      user-select: none;
+    }
+    .input-token {
+      color: transparent;
+      border-radius: 5px;
+      padding: 0 2px;
+      margin: 0 -2px;
+      background: rgba(85,183,255,.18);
+      box-shadow: 0 0 0 1px rgba(85,183,255,.22);
+    }
+    .input-token.slash { background: rgba(16,163,127,.18); box-shadow: 0 0 0 1px rgba(16,163,127,.24); }
+    .input-token.skill { background: rgba(168,85,247,.18); box-shadow: 0 0 0 1px rgba(168,85,247,.24); }
+    .send {
+      width: 32px;
+      height: 32px;
+      border: 0;
+      border-radius: 999px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      background: #f4f4f5;
+      color: #18181b;
+      cursor: pointer;
+      flex: 0 0 auto;
+    }
+    .send:disabled { opacity: .55; cursor: wait; }
+    .send svg { width: 16px; height: 16px; }
+    .bottom-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 4px 10px 10px 14px;
+      color: var(--muted);
+      font-size: 12px;
+      min-height: 32px;
+    }
+    .icon-btn {
+      width: 24px;
+      height: 24px;
+      border: 0;
+      border-radius: 999px;
+      background: transparent;
+      color: #d4d4d8;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      padding: 0;
+      flex: 0 0 auto;
+    }
+    .icon-btn:hover { background: rgba(255,255,255,.06); }
+    .plan-btn {
+      height: 24px;
+      border: 1px solid rgba(255,255,255,.08);
+      border-radius: 999px;
+      background: transparent;
+      color: #d4d4d8;
+      padding: 0 9px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      flex: 0 0 auto;
+    }
+    .plan-btn:hover { background: rgba(255,255,255,.06); }
+    .plan-btn.selected {
+      border-color: rgba(16,163,127,.38);
+      background: rgba(16,163,127,.16);
+      color: #adf0dc;
+    }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      max-width: 40%;
+      min-width: 0;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .pill.hidden { display: none; }
+    .pill.mode { color: var(--accent); }
+    .pill.context { color: var(--blue); }
+    .pill.status { color: var(--muted); margin-left: auto; justify-content: flex-end; }
+    .pill.warn { color: var(--yellow); }
+    .pill.error { color: var(--danger); }
+    .suggestions {
+      position: static;
+      margin: 0 10px 10px 10px;
+      max-height: 220px;
+      overflow: auto;
+      background: #202024;
+      border: 1px solid rgba(255,255,255,.10);
+      border-radius: 14px;
+      z-index: 20;
+      box-shadow: 0 12px 30px rgba(0,0,0,.30);
+    }
+    .suggestions.hidden { display: none; }
+    .row {
+      display: grid;
+      grid-template-columns: 76px minmax(0, 1fr);
+      gap: 10px;
+      padding: 8px 10px;
+      border-bottom: 1px solid rgba(255,255,255,.06);
+      cursor: pointer;
+    }
+    .row:last-child { border-bottom: 0; }
+    .row.active { background: rgba(16,163,127,.13); }
+    .badge {
+      align-self: start;
+      justify-self: start;
+      min-width: 66px;
+      max-width: 76px;
+      border-radius: 999px;
+      padding: 2px 6px;
+      background: rgba(255,255,255,.08);
+      color: #d4d4d8;
+      font-size: 10px;
+      text-align: center;
+      text-transform: uppercase;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .row-title { color: var(--text); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .row-detail { color: var(--muted); font-size: 11px; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    body[data-display-mode="pip"] .shell { padding: 0; }
+    body[data-display-mode="pip"] .composer { border-radius: 18px; box-shadow: none; }
+    body[data-display-mode="pip"] .pill.status { display: none; }
+    @media (max-width: 460px) {
+      .bottom-row { gap: 6px; }
+      .pill.context { max-width: 34%; }
+      .pill.status { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <section class="composer" aria-label="LCA compact input">
+      <div class="main-row">
+        <div class="editor-shell">
+          <pre id="input-highlight" class="input-highlight" aria-hidden="true"></pre>
+          <textarea id="input" rows="1" spellcheck="false" placeholder="Chan đê"></textarea>
+        </div>
+        <button class="send" id="send" type="button" aria-label="Send to ChatGPT" title="Send">
+          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path d="M12 5v14M12 5l-6 6M12 5l6 6" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </button>
+      </div>
+      <div class="bottom-row">
+        <button class="icon-btn" id="add-context" type="button" aria-label="Add context" title="Add @ context">+</button>
+        <button class="plan-btn" id="plan-toggle" type="button" aria-pressed="false" title="Use Plan mode">Plan</button>
+        <button class="icon-btn" id="pip" type="button" aria-label="Open PiP" title="Open PiP">▣</button>
+        <span class="pill mode hidden" id="mode-pill"></span>
+        <span class="pill context hidden" id="context-pill"></span>
+        <span class="pill status" id="status">ready</span>
+      </div>
+      <div id="suggestions" class="suggestions hidden"></div>
+    </section>
+  </main>
+
+  <script>
+    const input = document.getElementById('input');
+    const inputHighlight = document.getElementById('input-highlight');
+    const suggestions = document.getElementById('suggestions');
+    const sendButton = document.getElementById('send');
+    const pipButton = document.getElementById('pip');
+    const addContextButton = document.getElementById('add-context');
+    const planButton = document.getElementById('plan-toggle');
+    const statusEl = document.getElementById('status');
+    const modePill = document.getElementById('mode-pill');
+    const contextPill = document.getElementById('context-pill');
+    const selected = [];
+    let selectedMode = null;
+    let active = -1;
+    let current = null;
+    let pendingTimer = null;
+    let shownItems = [];
+    let pipRequestPending = false;
+    let lastSearchKey = '';
+    let searchSeq = 0;
+    const suggestionCache = new Map();
+    const MAX_SUGGESTION_CACHE = 80;
+    const SEARCH_DEBOUNCE_MS = 20;
+
+    function unwrapToolResult(result) {
+      if (result && result.structuredContent) return result.structuredContent;
+      const text = result?.content?.[0]?.text;
+      if (typeof text === 'string') {
+        try { return JSON.parse(text); } catch {}
+      }
+      return result || {};
+    }
+
+    async function callTool(name, args) {
+      if (!window.openai?.callTool) throw new Error('callTool unavailable');
+      return unwrapToolResult(await window.openai.callTool(name, args || {}));
+    }
+
+    function setStatus(text, kind = '') {
+      statusEl.textContent = text;
+      statusEl.className = `pill status ${kind}`.trim();
+    }
+
+    function notifyHeightSoon() {
+      window.requestAnimationFrame(() => {
+        if (window.openai?.notifyIntrinsicHeight) window.openai.notifyIntrinsicHeight();
+      });
+    }
+
+    function autoResize() {
+      input.style.height = 'auto';
+      const next = Math.min(Math.max(input.scrollHeight, 28), 92);
+      input.style.height = `${next}px`;
+      if (inputHighlight) inputHighlight.style.height = `${next}px`;
+      notifyHeightSoon();
+    }
+
+    function tokenClass(token) {
+      if (token.startsWith('@skill:') || token.startsWith('/skill:')) return 'skill';
+      if (token.startsWith('/')) return 'slash';
+      return 'mention';
+    }
+
+    function syncHighlightScroll() {
+      if (!inputHighlight) return;
+      inputHighlight.style.transform = `translateY(${-input.scrollTop}px)`;
+    }
+
+    function renderInputHighlight() {
+      if (!inputHighlight) return;
+      const value = input.value || '';
+      const re = /(^|\s)([@/][^\s]+)/g;
+      const fragment = document.createDocumentFragment();
+      let match;
+      let last = 0;
+      while ((match = re.exec(value))) {
+        const lead = match[1] || '';
+        const token = match[2] || '';
+        const tokenStart = match.index + lead.length;
+        fragment.append(document.createTextNode(value.slice(last, tokenStart)));
+        const span = document.createElement('span');
+        span.className = `input-token ${tokenClass(token)}`;
+        span.textContent = token;
+        fragment.append(span);
+        last = tokenStart + token.length;
+      }
+      fragment.append(document.createTextNode(value.slice(last) || ' '));
+      inputHighlight.replaceChildren(fragment);
+      syncHighlightScroll();
+    }
+
+    function extractModeFromInput() {
+      const match = input.value.match(/(^|\s)\/([a-z][a-z0-9_-]*)/i);
+      return selectedMode || (match ? match[2] : null);
+    }
+
+    function updateCompactMeta() {
+      const mode = extractModeFromInput();
+      if (mode) {
+        modePill.textContent = `/${mode}`;
+        modePill.classList.remove('hidden');
+      } else {
+        modePill.textContent = '';
+        modePill.classList.add('hidden');
+      }
+      if (planButton) {
+        const isPlan = selectedMode === 'plan';
+        planButton.classList.toggle('selected', isPlan);
+        planButton.setAttribute('aria-pressed', String(isPlan));
+      }
+      if (selected.length) {
+        const label = selected.length === 1 ? selected[0] : `${selected.length} context`;
+        contextPill.textContent = `@ ${label}`;
+        contextPill.classList.remove('hidden');
+      } else {
+        contextPill.textContent = '';
+        contextPill.classList.add('hidden');
+      }
+    }
+
+    function syncDisplayMode(mode = window.openai?.displayMode || 'inline') {
+      const grantedMode = ['inline', 'pip', 'fullscreen'].includes(mode) ? mode : 'inline';
+      const canRequestPip = typeof window.openai?.requestDisplayMode === 'function';
+      document.body.dataset.displayMode = grantedMode;
+      pipButton.hidden = grantedMode !== 'inline' || !canRequestPip;
+      pipButton.disabled = pipRequestPending;
+      notifyHeightSoon();
+      return grantedMode;
+    }
+
+    async function requestPipMode() {
+      if (pipRequestPending) return;
+      if (!window.openai?.requestDisplayMode) {
+        setStatus('PiP unavailable', 'error');
+        return;
+      }
+      pipRequestPending = true;
+      pipButton.disabled = true;
+      setStatus('opening PiP…');
+      try {
+        const result = await window.openai.requestDisplayMode({ mode: 'pip' });
+        const grantedMode = syncDisplayMode(result?.mode || window.openai?.displayMode);
+        setStatus(grantedMode === 'pip' ? 'PiP' : 'ready');
+      } catch (error) {
+        setStatus(error instanceof Error ? error.message : 'PiP unavailable', 'error');
+      } finally {
+        pipRequestPending = false;
+        pipButton.disabled = false;
+      }
+    }
+
+    function triggerAtCaret() {
+      const pos = input.selectionStart || 0;
+      const before = input.value.slice(0, pos);
+      const hit = before.match(/(^|\s)([@/])([^\s]*)$/);
+      if (!hit) return null;
+      return { prefix: hit[2], query: hit[3] || '', start: pos - hit[3].length - 1, end: pos };
+    }
+
+    function rememberSuggestions(key, items) {
+      suggestionCache.set(key, items);
+      if (suggestionCache.size > MAX_SUGGESTION_CACHE) {
+        suggestionCache.delete(suggestionCache.keys().next().value);
+      }
+    }
+
+    function renderSuggestions(items) {
+      shownItems = items;
+      suggestions.replaceChildren();
+      if (!items.length) {
+        suggestions.classList.add('hidden');
+        notifyHeightSoon();
+        return;
+      }
+      active = 0;
+      const fragment = document.createDocumentFragment();
+      items.forEach((item, index) => {
+        const row = document.createElement('div');
+        row.className = `row ${index === active ? 'active' : ''}`;
+        row.dataset.index = String(index);
+
+        const badge = document.createElement('div');
+        badge.className = 'badge';
+        badge.textContent = item.type || 'item';
+
+        const content = document.createElement('div');
+        const title = document.createElement('div');
+        title.className = 'row-title';
+        title.textContent = item.label || item.path || item.name || '';
+        const detail = document.createElement('div');
+        detail.className = 'row-detail';
+        detail.textContent = item.detail || item.description || item.path || '';
+
+        content.append(title, detail);
+        row.append(badge, content);
+        fragment.append(row);
+      });
+      suggestions.append(fragment);
+      suggestions.scrollTop = 0;
+      suggestions.classList.remove('hidden');
+      notifyHeightSoon();
+    }
+
+    function refreshActive() {
+      [...suggestions.querySelectorAll('.row')].forEach((row, index) => {
+        const isActive = index === active;
+        row.classList.toggle('active', isActive);
+        if (isActive) row.scrollIntoView({ block: 'nearest' });
+      });
+    }
+
+    function replaceRange(start, end, text) {
+      const value = input.value;
+      input.value = value.slice(0, start) + text + value.slice(end);
+      const pos = start + text.length;
+      input.focus();
+      input.setSelectionRange(pos, pos);
+      syncInputUi();
+    }
+
+    function selectItem(item) {
+      if (!current) return;
+      if (current.prefix === '@') {
+        const token = item.type === 'skill' ? `@skill:${item.skill || item.name}` : `@${item.path || item.label}`;
+        replaceRange(current.start, current.end, `${token} `);
+        if (item.path && !selected.includes(item.path)) selected.push(item.path);
+      } else {
+        const command = item.command || `/${item.name}`;
+        replaceRange(current.start, current.end, `${command} `);
+      }
+      suggestions.classList.add('hidden');
+      shownItems = [];
+      current = null;
+      updateCompactMeta();
+      notifyHeightSoon();
+    }
+
+    async function preloadSuggestions() {
+      try {
+        const slashData = await callTool('slash_commands', { query: '/', limit: 24 });
+        rememberSuggestions('/:', slashData.commands || []);
+      } catch {}
+    }
+
+    async function updateSuggestions() {
+      const trigger = triggerAtCaret();
+      current = trigger;
+      if (!trigger) {
+        lastSearchKey = '';
+        searchSeq += 1;
+        suggestions.classList.add('hidden');
+        notifyHeightSoon();
+        return;
+      }
+
+      const normalizedQuery = trigger.query.toLowerCase();
+      const key = `${trigger.prefix}:${normalizedQuery}`;
+      if (key === lastSearchKey && shownItems.length && !suggestions.classList.contains('hidden')) return;
+      lastSearchKey = key;
+
+      const cached = suggestionCache.get(key);
+      if (cached) {
+        renderSuggestions(cached);
+        setStatus('ready');
+        return;
+      }
+
+      const seq = ++searchSeq;
+      setStatus('searching…');
+      try {
+        let items;
+        if (trigger.prefix === '@') {
+          const data = await callTool('workspace_search', { query: '@' + trigger.query, limit: 24 });
+          items = data.results || [];
+        } else {
+          const data = await callTool('slash_commands', { query: '/' + trigger.query, limit: 24 });
+          items = data.commands || [];
+        }
+        if (seq !== searchSeq) return;
+        rememberSuggestions(key, items);
+        renderSuggestions(items);
+        setStatus('ready');
+      } catch (error) {
+        if (seq !== searchSeq) return;
+        setStatus(error.message, 'error');
+      }
+    }
+
+    function syncInputUi() {
+      renderInputHighlight();
+      autoResize();
+      updateCompactMeta();
+    }
+
+    async function composePrompt() {
+      const task = input.value.trim();
+      if (!task) {
+        setStatus('type a task', 'error');
+        return '';
+      }
+      setStatus('composing…');
+      const data = await callTool('compose_prompt', {
+        input: task,
+        mode: selectedMode || undefined,
+        selected_context: selected,
+        include_context_pack: true
+      });
+      return data.prompt || '';
+    }
+
+    async function sendCurrentTask() {
+      try {
+        const prompt = await composePrompt();
+        if (!prompt) return;
+        if (!window.openai?.sendFollowUpMessage) {
+          setStatus('send unavailable', 'error');
+          return;
+        }
+        sendButton.disabled = true;
+        await window.openai.sendFollowUpMessage({ prompt, scrollToBottom: true });
+        input.value = '';
+        suggestions.classList.add('hidden');
+        shownItems = [];
+        current = null;
+        syncInputUi();
+        setStatus('sent');
+      } catch (error) {
+        setStatus(error.message, 'error');
+      } finally {
+        sendButton.disabled = false;
+      }
+    }
+
+    input.addEventListener('input', () => {
+      syncInputUi();
+      clearTimeout(pendingTimer);
+      const trigger = triggerAtCaret();
+      if (!trigger) {
+        updateSuggestions();
+        return;
+      }
+      const cached = suggestionCache.get(`${trigger.prefix}:${trigger.query.toLowerCase()}`);
+      const delay = cached ? 0 : SEARCH_DEBOUNCE_MS;
+      pendingTimer = setTimeout(updateSuggestions, delay);
+    });
+
+    input.addEventListener('scroll', syncHighlightScroll, { passive: true });
+
+    input.addEventListener('keydown', (event) => {
+      const rows = [...suggestions.querySelectorAll('.row')];
+      const hasSuggestions = rows.length && !suggestions.classList.contains('hidden');
+      if (hasSuggestions && event.key === 'ArrowDown') {
+        event.preventDefault();
+        active = Math.min(rows.length - 1, active + 1);
+        refreshActive();
+        return;
+      }
+      if (hasSuggestions && event.key === 'ArrowUp') {
+        event.preventDefault();
+        active = Math.max(0, active - 1);
+        refreshActive();
+        return;
+      }
+      if (hasSuggestions && (event.key === 'Enter' || event.key === 'Tab')) {
+        event.preventDefault();
+        const item = shownItems[active];
+        if (item) selectItem(item);
+        return;
+      }
+      if (event.key === 'Escape') {
+        suggestions.classList.add('hidden');
+        return;
+      }
+      if (event.key === 'Enter' && !event.shiftKey && !event.altKey && !event.metaKey && !event.ctrlKey && !event.isComposing) {
+        event.preventDefault();
+        sendCurrentTask();
+      }
+    });
+
+    suggestions.addEventListener('click', (event) => {
+      const row = event.target.closest('.row');
+      if (!row) return;
+      const item = shownItems[Number(row.dataset.index)];
+      if (item) selectItem(item);
+    });
+
+    addContextButton.addEventListener('click', () => {
+      input.focus();
+      if (!input.value || /\s$/.test(input.value)) input.value += '@';
+      else input.value += ' @';
+      input.setSelectionRange(input.value.length, input.value.length);
+      syncInputUi();
+      updateSuggestions();
+    });
+
+    planButton.addEventListener('click', () => {
+      selectedMode = selectedMode === 'plan' ? null : 'plan';
+      updateCompactMeta();
+      setStatus(selectedMode === 'plan' ? 'plan' : 'ready');
+    });
+
+    pipButton.addEventListener('click', requestPipMode);
+    sendButton.addEventListener('click', sendCurrentTask);
+
+    window.addEventListener('openai:set_globals', () => {
+      hydrateFromToolOutput();
+      syncDisplayMode();
+    }, { passive: true });
+
+    function hydrateFromToolOutput() {
+      const output = window.openai?.toolOutput || {};
+      const inputArgs = window.openai?.toolInput || {};
+      const initial = output.initial_input || inputArgs.initial_input || '';
+      if (initial && !input.value) input.value = initial;
+      syncInputUi();
+    }
+
+    hydrateFromToolOutput();
+    syncDisplayMode();
+    preloadSuggestions();
+  </script>
+</body>
+</html>

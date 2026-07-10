@@ -40,8 +40,8 @@ const HOST = process.env.AGENT_HOST || "127.0.0.1";
 const CONFIG_ID = String(process.env.AGENT_CONFIG_ID || "");
 
 const APP_DIR = path.dirname(fileURLToPath(import.meta.url));
-const COMPANION_WIDGET_PATH = path.join(APP_DIR, "companion-widget.html");
-const COMPANION_WIDGET_URI = "ui://widget/lca-companion.html";
+const COMPANION_WIDGET_PATH = path.join(APP_DIR, "lca-compact-input-v2.html");
+const COMPANION_WIDGET_URI = "ui://widget/lca-compact-input-v2.html";
 const DEFAULT_WORKSPACE = path.resolve(APP_DIR, "..", "agent-workspace");
 const PRIMARY_ROOT = path.resolve(process.env.AGENT_WORKSPACE || DEFAULT_WORKSPACE);
 const STARTUP_PROFILE = (() => {
@@ -620,7 +620,7 @@ function registerCompanionAppResources(mcp) {
             prefersBorder: true,
             csp: { connectDomains: [], resourceDomains: [] }
           },
-          "openai/widgetDescription": "LCA companion UI for @ workspace context search and Plan/Review quick actions.",
+          "openai/widgetDescription": "Compact LCA input composer for PiP: one low-height prompt box with @ context, / workflow autocomplete, Enter-to-send, and token highlights.",
           "openai/widgetPrefersBorder": true,
           "openai/widgetCSP": { connect_domains: [], resource_domains: [] }
         }
@@ -692,7 +692,7 @@ function registerCompanionTools(mcp) {
     }
   );
 
-  registerLcaInputTool(mcp, "lca_input", "LCA input", "Render the LCA Apps SDK input widget inside ChatGPT. Use this to open the in-chat LCA composer.");
+  registerLcaInputTool(mcp, "lca_input", "LCA input", "Render the LCA Apps SDK input widget inside ChatGPT. The widget lets the user request PiP so the composer can stay visible while the conversation continues.");
 }
 
 function registerLcaInputTool(mcp, name, title, description) {
@@ -724,7 +724,7 @@ function registerLcaInputTool(mcp, name, title, description) {
       };
       return {
         structuredContent: payload,
-        content: [{ type: "text", text: "LCA input is ready. Use @ for context, / for workflows or skills, or the Plan quick action." }]
+        content: [{ type: "text", text: "LCA input is ready. Request PiP to keep it visible when supported, use @ for context, / for workflows or skills, or the Plan quick action." }]
       };
     }
   );
