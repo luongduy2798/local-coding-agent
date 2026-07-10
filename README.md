@@ -4,7 +4,7 @@
 
 # Local Coding Agent
 
-Local MCP server giúp ChatGPT Web đọc/sửa code, chạy command và xem git trên máy bạn.
+Local MCP server giúp ChatGPT Web đọc/sửa code, chạy command và xem git trên máy bạn. Mục tiêu là biến ChatGPT thành coding agent làm việc trực tiếp trên workspace local, nhưng vẫn giữ quyền kiểm soát ở phía bạn.
 
 </div>
 
@@ -13,6 +13,12 @@ Local MCP server giúp ChatGPT Web đọc/sửa code, chạy command và xem git
 
 ## Cài Nhanh
 
+Bạn chỉ cần làm 3 bước:
+
+1. Chạy setup wizard trong repo `local-coding-agent`.
+2. Vào repo muốn làm việc và chạy `lca`.
+3. Thêm custom MCP connector trong ChatGPT Web.
+
 Yêu cầu:
 
 - Node.js >= 18
@@ -20,7 +26,7 @@ Yêu cầu:
 - Git, khuyên dùng để `lca` tự lấy git root làm workspace
 - OpenAI Tunnel ID và Runtime API key nếu dùng ChatGPT Web tunnel
 
-Chạy setup wizard trong repo `local-coding-agent`:
+Chạy setup wizard:
 
 ```bash
 # macOS / Linux / WSL
@@ -38,7 +44,9 @@ Nếu cần xem hướng dẫn cho hệ điều hành khác máy đang chạy, d
 
 ## Dùng Hằng Ngày
 
-Vào repo muốn dùng làm workspace. Trên Windows, mở terminal mới sau setup rồi chạy:
+Mỗi lần muốn ChatGPT làm việc trên repo nào, hãy mở terminal tại repo đó rồi chạy `lca`. LCA sẽ tự nhận git root làm workspace.
+
+Trên Windows, mở terminal mới sau setup rồi chạy:
 
 ```powershell
 cd /d <path-to-your-repo>
@@ -52,7 +60,7 @@ cd /path/to/your-repo
 lca
 ```
 
-`lca` tự lấy git root của repo hiện tại làm workspace. Nếu server đang chạy workspace cũ, nó tự restart sang workspace mới.
+Nếu server đang chạy workspace cũ, `lca` sẽ tự restart sang workspace mới.
 
 Lệnh chính:
 
@@ -91,24 +99,30 @@ Runtime API key nằm ở `.env.local` và chỉ dùng cho local tunnel-client. 
 
 ## ChatGPT Tools
 
-Sau khi connector hoạt động, các tool thường dùng trong ChatGPT:
+Sau khi connector hoạt động, bạn thường chỉ cần gọi 2 tool này trong ChatGPT:
 
 ```text
 lca        # alias ngắn của workspace_info, kiểm tra workspace thật
 lca_input  # mở Apps SDK widget, có thể ghim PiP để nhập task trong lúc chat
 ```
 
-`workspace_info` vẫn tồn tại cho tên rõ nghĩa hơn, còn `lca` tiện dùng khi mở chat mới.
+`workspace_info` vẫn tồn tại cho tên rõ nghĩa hơn. `lca` là alias ngắn, tiện dùng khi mở chat mới hoặc muốn kiểm tra nhanh connector đang trỏ vào workspace nào.
 
 ## LCA Input: `@` Context và `/` Workflow
 
-`lca_input` mở widget ngay trong ChatGPT. Widget này dùng:
+`lca_input` mở widget ngay trong ChatGPT để nhập task có context rõ hơn. Widget này dùng:
 
 - `@...` để chọn file, folder, symbol hoặc skill trong workspace.
 - `/...` để gọi workflow hoặc skill, ví dụ `/debug`, `/review`, `/implement`, `/refactor`, `/skill:<name>`.
 - Nút **PiP** yêu cầu ChatGPT ghim composer thành cửa sổ nổi để vẫn dùng được trong lúc tiếp tục chat.
 - Nút nhanh **Plan** là quick action; không chèn chữ vào input.
 - Nút send sẽ tự compose prompt rồi gửi vào ChatGPT, không cần hiện Prompt output.
+
+Ví dụ task trong widget:
+
+```text
+/refactor @README.md làm README ngắn gọn hơn, giữ nguyên ý chính
+```
 
 ChatGPT luôn mở app ở inline trước, nên cần bấm **PiP** một lần để chuyển mode. Host sẽ quyết định mode cuối cùng; trên mobile, yêu cầu PiP có thể được chuyển thành fullscreen.
 
@@ -141,7 +155,7 @@ lca config path
 
 ## Workspace Là Gì
 
-Workspace là thư mục ChatGPT được phép đọc/sửa/chạy command.
+Workspace là thư mục ChatGPT được phép đọc/sửa/chạy command thông qua connector.
 
 Khi chạy:
 
@@ -154,9 +168,12 @@ workspace sẽ là git root của repo đó. Nếu không nằm trong git repo, 
 
 ## Bảo Mật
 
+Nguyên tắc an toàn:
+
 - Không commit `.env.local`.
 - Không in API key, Tunnel ID, token hoặc local config có secret.
 - Chỉ mở workspace bạn tin tưởng.
+- Luôn gọi `lca` hoặc `workspace_info` trong ChatGPT để kiểm tra root trước khi yêu cầu sửa file.
 
 ### Mode Và Policy
 

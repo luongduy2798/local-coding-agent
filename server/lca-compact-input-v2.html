@@ -529,6 +529,18 @@
       updateCompactMeta();
     }
 
+    function resetComposerAfterSend() {
+      input.value = '';
+      selected.length = 0;
+      selectedMode = null;
+      suggestions.classList.add('hidden');
+      shownItems = [];
+      current = null;
+      lastSearchKey = '';
+      searchSeq += 1;
+      syncInputUi();
+    }
+
     async function composePrompt() {
       const task = input.value.trim();
       if (!task) {
@@ -555,11 +567,7 @@
         }
         sendButton.disabled = true;
         await window.openai.sendFollowUpMessage({ prompt, scrollToBottom: true });
-        input.value = '';
-        suggestions.classList.add('hidden');
-        shownItems = [];
-        current = null;
-        syncInputUi();
+        resetComposerAfterSend();
         setStatus('sent');
       } catch (error) {
         setStatus(error.message, 'error');
