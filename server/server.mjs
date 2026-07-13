@@ -26,12 +26,32 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 import { summarizeArgs } from "./core/redaction.mjs";
+import {
+  VERSION,
+  PRODUCT_TIER,
+  COMPANION_WIDGET_URI,
+  DEFAULT_ACCESS_MODE,
+  DEFAULT_POLICY,
+  DEFAULT_WORKFLOW_MODE,
+  EXPLICIT_VERIFICATION_INSTRUCTION,
+  CODE_MUTATION_TOOLS,
+  POTENTIAL_CODE_MUTATION_TOOLS,
+  BACKGROUND_CODE_ACTIVITY_TOOLS,
+  toolCanAffectCode,
+  collectMutationPaths,
+  mutationTouchesCode,
+  isCodePath
+} from "./core/constants.mjs";
+import { buildChildEnv } from "./core/child-env.mjs";
+import { createTaskRuntime } from "./core/task-runtime.mjs";
+import { createAtomicMutationEngine } from "./core/atomic-mutation.mjs";
+import { discoverInstructionChain, buildProjectGraph } from "./core/repo-intelligence.mjs";
+import { createHookManager, HOOK_EVENTS } from "./core/hooks.mjs";
+import { wrapSpawnSpec, boundaryStatus } from "./core/execution-boundary.mjs";
 
 // ----------------------------------------------------------------------------
 // Configuration (all overridable via environment variables)
 // ----------------------------------------------------------------------------
-const VERSION = "4.4.0-pro";
-const PRODUCT_TIER = "pro";
 const PORT = Number(process.env.PORT || 8789);
 // Bind to loopback by default. The local OpenAI tunnel-client forwards to this,
 // so we never need to listen on 0.0.0.0 (which would expose a shell to the LAN).
@@ -41,7 +61,6 @@ const CONFIG_ID = String(process.env.AGENT_CONFIG_ID || "");
 
 const APP_DIR = path.dirname(fileURLToPath(import.meta.url));
 const COMPANION_WIDGET_PATH = path.join(APP_DIR, "lca-compact-input-v2.html");
-const COMPANION_WIDGET_URI = "ui://widget/lca-compact-input-v2.html";
 const DEFAULT_WORKSPACE = path.resolve(APP_DIR, "..", "agent-workspace");
 const PRIMARY_ROOT = path.resolve(process.env.AGENT_WORKSPACE || DEFAULT_WORKSPACE);
 const STARTUP_PROFILE = (() => {
@@ -54,12 +73,27 @@ const STARTUP_PROFILE = (() => {
 const EXTRA_ROOTS = parseExtraRoots();
 const ROOTS = dedupe([PRIMARY_ROOT, ...EXTRA_ROOTS]);
 
-// "safe" (default): file/command tools are confined to roots, destructive
-// commands and absolute Windows paths inside commands are blocked.
-// "full": full power inside roots, only catastrophic system commands stay
-// blocked (unless AGENT_ALLOW_DANGEROUS=1).
-const MODE = String(process.env.AGENT_MODE || STARTUP_PROFILE?.mode || "safe").toLowerCase() === "full" ? "full" : "safe";
+// Access defaults to full for trusted local development. Safe and balanced
+// remain available for users who explicitly select them.
+const ACCESS_MODE = (() => {
+  const raw = String(
+    process.env.AGENT_ACCESS_MODE ||
+    process.env.AGENT_MODE ||
+    STARTUP_PROFILE?.accessMode ||
+    STARTUP_PROFILE?.mode ||
+    DEFAULT_ACCESS_MODE
+  ).toLowerCase();
+  return raw === "safe" || raw === "balanced" ? raw : "full";
+})();
+const MODE = ACCESS_MODE === "full" ? "full" : "safe";
+const WORKFLOW_MODE = (() => {
+  const raw = String(process.env.AGENT_WORKFLOW_MODE || STARTUP_PROFILE?.workflowMode || DEFAULT_WORKFLOW_MODE).toLowerCase();
+  return raw === "fast" || raw === "plan" ? raw : "auto";
+})();
 const ALLOW_DANGEROUS = process.env.AGENT_ALLOW_DANGEROUS === "1";
+const CHILD_ENV_EXCLUDE = Array.isArray(STARTUP_PROFILE?.excludedCommandEnv)
+  ? STARTUP_PROFILE.excludedCommandEnv.map(String)
+  : [];
 
 // Optional defense-in-depth bearer token. If set, every /mcp request must send
 // Authorization: Bearer <token>. Leave empty when relying on the
@@ -89,11 +123,23 @@ const INDEX_PATH = path.resolve(WORKSPACE_DATA_DIR, "index.json");
 // v2.2 Patch history
 const PATCH_HISTORY_PATH = path.resolve(WORKSPACE_DATA_DIR, "patch-history.json");
 const BACKUPS_DIR = path.resolve(WORKSPACE_DATA_DIR, "backups");
+const WORKTREES_DIR = path.resolve(WORKSPACE_DATA_DIR, "worktrees");
+const WORKTREES_STATE_PATH = path.resolve(WORKSPACE_DATA_DIR, "worktrees.json");
+const PROCESS_STATE_PATH = path.resolve(WORKSPACE_DATA_DIR, "processes.json");
 
 // v2.5 Planner state
 const AGENT_STATE_DIR = path.join(PRIMARY_ROOT, ".agent", "state");
 const TASK_PLAN_PATH = path.join(AGENT_STATE_DIR, "current-task.json");
 const DECISIONS_PATH = path.join(AGENT_STATE_DIR, "decisions.md");
+const TASK_RUNTIME = createTaskRuntime({
+  dataDir: WORKSPACE_DATA_DIR,
+  root: PRIMARY_ROOT,
+  defaultAccessMode: ACCESS_MODE,
+  defaultWorkflowMode: WORKFLOW_MODE,
+  version: VERSION
+});
+let MUTATION_ENGINE = null;
+const HOOK_MANAGER = createHookManager({ root: PRIMARY_ROOT, excludedEnv: CHILD_ENV_EXCLUDE, accessMode: ACCESS_MODE });
 
 // v2.6 Approvals
 const APPROVALS_DIR = path.resolve(WORKSPACE_DATA_DIR, "approvals");
@@ -102,7 +148,8 @@ const APPROVAL_TTL_MINUTES = boundedNumber(process.env.AGENT_APPROVAL_TTL_MINUTE
 
 // v2.6 Policy
 const AGENT_POLICY = (() => {
-  const p = String(process.env.AGENT_POLICY || STARTUP_PROFILE?.policy || "balanced").toLowerCase();
+  const accessDefault = ACCESS_MODE === "full" ? DEFAULT_POLICY : ACCESS_MODE === "balanced" ? "balanced" : "strict";
+  const p = String(process.env.AGENT_POLICY || STARTUP_PROFILE?.policy || accessDefault).toLowerCase();
   if (p === "strict" || p === "full") return p;
   return "balanced";
 })();
@@ -200,6 +247,20 @@ await mkdir(PRIMARY_ROOT, { recursive: true });
 await mkdir(BACKUPS_DIR, { recursive: true });
 await mkdir(APPROVALS_DIR, { recursive: true });
 await mkdir(AGENT_STATE_DIR, { recursive: true });
+MUTATION_ENGINE = createAtomicMutationEngine({
+  dataDir: WORKSPACE_DATA_DIR,
+  resolvePath,
+  toRel,
+  maxHistory: 100
+});
+await MUTATION_ENGINE.cleanupOrphans();
+await restoreProcessState();
+await HOOK_MANAGER.run("SessionStart", {
+  version: VERSION,
+  accessMode: ACCESS_MODE,
+  workflowMode: WORKFLOW_MODE,
+  root: PRIMARY_ROOT
+}).catch(() => {});
 if (AUDIT_ENABLED) {
   auditStream = createWriteStream(AUDIT_PATH, { flags: "a" });
   auditStream.on("error", () => {});
@@ -245,7 +306,11 @@ const httpServer = http.createServer(async (req, res) => {
         status: "ok",
         version: VERSION,
         mode: MODE,
+        access_mode: ACCESS_MODE,
+        workflow_mode: WORKFLOW_MODE,
         policy: AGENT_POLICY,
+        verification: { tests: "explicit", lint: "explicit", build: "explicit" },
+        dashboard: { show_on_code_change: true, all_modes: true },
         roots: ROOTS,
         mcp_endpoint: `http://${HOST}:${PORT}/mcp`
       });
@@ -257,7 +322,11 @@ const httpServer = http.createServer(async (req, res) => {
         tier: PRODUCT_TIER,
         pid: process.pid,
         mode: MODE,
+        access_mode: ACCESS_MODE,
+        workflow_mode: WORKFLOW_MODE,
         policy: AGENT_POLICY,
+        verification: { tests: "explicit", lint: "explicit", build: "explicit" },
+        dashboard: { show_on_code_change: true, all_modes: true },
         allow_dangerous: ALLOW_DANGEROUS,
         auth: AUTH_TOKEN ? "bearer" : "none",
         config_id: CONFIG_ID || null,
@@ -360,8 +429,9 @@ async function handleMcp(req, res) {
 }
 
 const SERVER_INSTRUCTIONS = [
-  "Local Coding Agent Pro MCP: tool calls cross a tunnel, so start with workspace_snapshot or workspace_doctor, then use read_many/search_text/run_commands to batch work; prefer dedicated tools over run_command. Policy may require token approval via AGENT_APPROVAL_TOKEN for risky delete/install/network/mutating-git actions; exact action batches can use request_approval_batch. File tools are root-confined, but commands are not an OS sandbox.",
-  "WORKFLOW: (1) Start with workspace_snapshot for repo/git/policy in one call; use workspace_doctor when you need operational readiness. (2) Use read_many/search_text/repo_symbols to gather context in batches. (3) Use preview_patch/validate_patch before apply_patch for large edits. (4) Before marking 'done', call review_diff and session_report; run tests/build/lint only when the user explicitly asks. (5) For multi-step tasks, use task_plan + decision_log to maintain state across chats.",
+  "Local Coding Agent Pro MCP: tool calls cross a tunnel, so start with workspace_snapshot or workspace_doctor, then use read_many/search_text/run_commands to batch work; prefer dedicated tools over run_command. Access defaults to full, while balanced/safe remain configurable. File tools are root-confined, but commands are not an OS sandbox in full mode.",
+  `WORKFLOW: access_mode=${ACCESS_MODE}, workflow_mode=${WORKFLOW_MODE}. Use fast execution for simple work, structured plans for difficult work, and task_prepare_implementation after the user presses Implement. Every successful code mutation returns the Apps SDK task dashboard in every access/workflow mode. ${EXPLICIT_VERIFICATION_INSTRUCTION}`,
+  "WORKFLOW DETAILS: (1) Start with workspace_snapshot for repo/git/policy in one call; use workspace_doctor when you need operational readiness. (2) Use read_many/search_text/repo_symbols to gather context in batches. (3) Use preview_patch/validate_patch before apply_patch for large edits. (4) Before marking 'done', call review_diff and session_report; never claim tests/build/lint passed when they were not explicitly requested. (5) For multi-step tasks, use task_create/plan_create or task_plan + decision_log to maintain state across chats.",
   "POLICY: Check policy_status if you are unsure whether an action is allowed. In balanced policy, risky operations (delete, install, network, mutating git, risky processes) require one-time approval with request_approval/request_approval_batch followed by approve_request using AGENT_APPROVAL_TOKEN.",
   "Use the DEDICATED tools instead of run_command for these — they are faster and cheaper:",
   "- Find files by name -> find_files (NOT dir/ls/Get-ChildItem/where).",
@@ -390,13 +460,16 @@ function createMcpServer() {
   registerExecTools(mcp);
   registerProcessTools(mcp);
   registerGitTool(mcp);
+  registerWorktreeTools(mcp);     // v5.0 — task-isolated Git worktrees
   registerSkillTools(mcp);
-  registerRepoIntelTools(mcp);    // v2.1
+  registerRepoIntelTools(mcp);    // v2.1 + v5 project graph/instructions
   registerCompanionTools(mcp);    // v2.9 — @ context + / workflow UI helpers
   registerPatchEngineTools(mcp);  // v2.2
   registerTestRunnerTools(mcp);   // v2.3
   registerReviewTools(mcp);       // v2.4
   registerPlannerTools(mcp);      // v2.5
+  registerTaskRuntimeTools(mcp);  // v5.0 — persistent tasks/plans/dashboard
+  registerHookTools(mcp);         // v5.3 — explicit lifecycle hooks
   registerPolicyTools(mcp);       // v2.6
   registerProfileTools(mcp);      // v2.8
   return mcp;
@@ -547,16 +620,16 @@ const WORKFLOW_COMMANDS = [
     type: "mode",
     command: "/plan",
     label: "Plan mode",
-    description: "Inspect context and propose a plan first. Do not edit files until the user approves.",
-    prompt: "Use plan mode. Do not edit files yet. Inspect the selected context, identify risks, then return a concrete plan and verification steps."
+    description: "Inspect context, persist a versioned plan, and wait for the Apps SDK Implement button.",
+    prompt: "Use plan mode. Do not edit files yet. Create a persistent task with task_create, inspect targeted context and AGENTS instructions, then call plan_create so the Apps SDK Plan card shows an Implement button. Tests/build/lint stay disabled unless explicitly selected."
   },
   {
     name: "implement",
     type: "workflow",
     command: "/implement",
     label: "Implement",
-    description: "Apply the requested change with focused edits, then summarize what changed.",
-    prompt: "Implement the requested change using LCA tools. Keep edits focused, preserve existing behavior, and summarize the modified files."
+    description: "Apply a requested or accepted plan with focused edits; every code mutation opens the task dashboard.",
+    prompt: "Implement the requested change using LCA tools. When a task/plan id is present, load and validate it first. Keep edits focused, preserve existing behavior, and do not run tests/build/lint unless explicitly requested. Every code mutation will render the dashboard automatically."
   },
   {
     name: "debug",
@@ -572,7 +645,7 @@ const WORKFLOW_COMMANDS = [
     command: "/review",
     label: "Review",
     description: "Review code or a diff for bugs, risks, and missing verification.",
-    prompt: "Use review workflow. Focus on correctness, security, edge cases, and test coverage. Return prioritized findings and concrete fixes."
+    prompt: "Use review workflow. Call review_prepare with the requested scope, include untracked files when relevant, then focus on correctness, security, edge cases, compatibility, and missing verification. Return prioritized findings and concrete fixes."
   },
   {
     name: "refactor",
@@ -620,7 +693,7 @@ function registerCompanionAppResources(mcp) {
             prefersBorder: true,
             csp: { connectDomains: [], resourceDomains: [] }
           },
-          "openai/widgetDescription": "Compact LCA input composer for PiP: one low-height prompt box with @ context, / workflow autocomplete, Enter-to-send, and token highlights.",
+          "openai/widgetDescription": "LCA composer and task dashboard. It provides @ context, / workflows, versioned Plan→Implement, automatic dashboard rendering after every code mutation in every mode, changes/activity/verification/undo, terminal sessions, PiP, and fullscreen.",
           "openai/widgetPrefersBorder": true,
           "openai/widgetCSP": { connect_domains: [], resource_domains: [] }
         }
@@ -977,15 +1050,32 @@ async function composeLcaPrompt(input, rootDir, { mode, selectedContext = [], in
   }
 
   const task = stripPromptControlTokens(input) || input.trim();
+  await HOOK_MANAGER.run("UserPromptSubmit", { task, rawInput: input.slice(0, 10000) });
+  const targetForInstructions = deduped.find((item) => item.path)?.path || ".";
+  const [instructionChain, taskAnalysis] = await Promise.all([
+    discoverInstructionChain(PRIMARY_ROOT, targetForInstructions, { maxChars: 18000 }),
+    TASK_RUNTIME.analyzeTask(task)
+  ]);
+  const effectiveWorkflow = workflow?.name || (WORKFLOW_MODE === "auto" ? taskAnalysis.recommendedWorkflow : WORKFLOW_MODE);
   const lines = [];
   if (workflow) {
     lines.push(`Use LCA ${workflow.label}.`);
     lines.push(workflow.prompt);
+  } else if (effectiveWorkflow === "plan") {
+    lines.push("Use LCA Plan workflow: create a persistent task and structured plan, render the Plan card, and do not modify code until the user presses Implement.");
   } else {
-    lines.push("Use LCA workspace tools when useful.");
+    lines.push("Use LCA Fast workflow: gather only targeted context and implement directly. Any code mutation will automatically render the task dashboard.");
   }
+  lines.push(`Access mode: ${ACCESS_MODE}. Workflow mode: ${effectiveWorkflow}. ${EXPLICIT_VERIFICATION_INSTRUCTION}`);
   if (includeContextPack) {
     lines.push("Start by calling workspace_snapshot or workspace_search if more context is needed; do not ask me to copy file paths unless the @ context is ambiguous.");
+  }
+  if (instructionChain.instructions.length) {
+    lines.push("", "Applicable repository instructions (later/nested overrides have higher priority):");
+    for (const instruction of instructionChain.instructions) {
+      lines.push(`\n--- ${instruction.path} [scope=${instruction.scope}${instruction.override ? ", override" : ""}] ---`);
+      lines.push(instruction.content);
+    }
   }
   if (skillTokens.length) {
     lines.push("", "Requested skills:");
@@ -1005,14 +1095,18 @@ async function composeLcaPrompt(input, rootDir, { mode, selectedContext = [], in
   }
   lines.push("", "Task:", task);
 
-  const suggested = workflow?.name === "plan"
-    ? ["workspace_snapshot", "workspace_search", "read_many", "task_plan"]
+  const suggested = effectiveWorkflow === "plan"
+    ? ["workspace_snapshot", "task_create", "plan_create", "instruction_chain"]
     : workflow?.name === "review"
       ? ["workspace_snapshot", "review_diff", "read_many"]
       : ["workspace_snapshot", "workspace_search", "read_many", "apply_patch"];
 
   return {
-    mode: workflow?.name || null,
+    mode: effectiveWorkflow,
+    access_mode: ACCESS_MODE,
+    workflow_mode: WORKFLOW_MODE,
+    complexity: taskAnalysis,
+    instruction_chain: instructionChain.instructions.map(({ content, ...meta }) => meta),
     slash_commands: slashTokens.map((token) => `/${token}`),
     skills: skillTokens,
     mentions: mentionTokens.map((token) => `@${token}`),
@@ -1027,8 +1121,118 @@ async function composeLcaPrompt(input, rootDir, { mode, selectedContext = [], in
 // ----------------------------------------------------------------------------
 // Tool registration helper: audit + uniform error handling
 // ----------------------------------------------------------------------------
+const VERIFICATION_TOOL_KIND = new Map([
+  ["run_tests", "tests"],
+  ["run_changed_tests", "tests"],
+  ["run_lint", "lint"],
+  ["run_build", "build"]
+]);
+
+function mutationToolDefinition(name, def) {
+  if (!toolCanAffectCode(name)) return def;
+  return {
+    ...def,
+    _meta: {
+      ...(def._meta || {}),
+      ui: { resourceUri: COMPANION_WIDGET_URI, visibility: ["model", "app"], ...(def._meta?.ui || {}) },
+      "openai/outputTemplate": COMPANION_WIDGET_URI,
+      "openai/widgetAccessible": true,
+      "openai/toolInvocation/invoking": def._meta?.["openai/toolInvocation/invoking"] || "Updating code…",
+      "openai/toolInvocation/invoked": def._meta?.["openai/toolInvocation/invoked"] || "Code updated — dashboard ready."
+    }
+  };
+}
+
+function resultObject(result) {
+  if (result?.structuredContent && typeof result.structuredContent === "object") return result.structuredContent;
+  const text = result?.content?.find?.((item) => item?.type === "text")?.text;
+  if (typeof text !== "string") return null;
+  try { return JSON.parse(text); } catch { return { message: text }; }
+}
+
+async function captureWorkspaceMutationState() {
+  const [status, head] = await Promise.all([
+    spawnCapture("git", ["status", "--porcelain=v1", "-z", "--untracked-files=all"], PRIMARY_ROOT, DEFAULT_CMD_TIMEOUT),
+    spawnCapture("git", ["rev-parse", "HEAD"], PRIMARY_ROOT, DEFAULT_CMD_TIMEOUT)
+  ]);
+  if (status.exit_code !== 0) return { supported: false, fingerprint: null, paths: [] };
+  const records = (status.stdout || "").split("\0").filter(Boolean);
+  const paths = [];
+  const codeStatus = [];
+  for (let index = 0; index < records.length; index++) {
+    const record = records[index];
+    if (record.length < 4) continue;
+    const code = record.slice(0, 2);
+    const rel = record.slice(3);
+    if (rel) {
+      paths.push(rel);
+      if (isCodePath(rel)) codeStatus.push(`${code}:${rel}`);
+    }
+    // In -z mode rename/copy records are followed by the old path.
+    if (/[RC]/.test(code) && records[index + 1]) index += 1;
+  }
+  const codePaths = [...new Set(paths.filter(isCodePath))].sort().slice(0, 1000);
+  const states = [];
+  for (const rel of codePaths) {
+    try {
+      const content = await readFile(resolvePath(rel));
+      states.push(`${rel}:file:${createHash("sha256").update(content).digest("hex")}`);
+    } catch {
+      states.push(`${rel}:missing`);
+    }
+  }
+  return {
+    supported: true,
+    fingerprint: createHash("sha256").update([String(head.stdout || "").trim(), ...codeStatus.sort(), ...states].join("\n")).digest("hex"),
+    paths: codePaths
+  };
+}
+
+async function attachMutationDashboard(name, args, result, detectedPaths = null) {
+  const operation = resultObject(result);
+  const transactionId = operation?.transaction_id || operation?.transactionId || operation?.id || null;
+  const paths = detectedPaths?.length ? detectedPaths : collectMutationPaths(name, args);
+  const dashboard = await TASK_RUNTIME.recordMutation({
+    tool: name,
+    paths,
+    transactionId,
+    taskId: args.task_id || null,
+    accessMode: ACCESS_MODE,
+    workflowMode: WORKFLOW_MODE,
+    summary: operation?.summary || `${name} changed code`
+  });
+  return {
+    ...result,
+    structuredContent: {
+      kind: "lca_code_mutation",
+      operation,
+      dashboard
+    }
+  };
+}
+
+async function attachActivityDashboard(name, args, result) {
+  const operation = resultObject(result);
+  const dashboard = await TASK_RUNTIME.recordActivity({
+    tool: name,
+    type: "command_session",
+    accessMode: ACCESS_MODE,
+    workflowMode: WORKFLOW_MODE,
+    message: operation?.summary || `${name} started; dashboard remains visible for code changes from this session`,
+    metadata: { sessionId: operation?.session_id || operation?.id || null }
+  });
+  return {
+    ...result,
+    structuredContent: {
+      kind: "lca_task_dashboard",
+      operation,
+      dashboard
+    }
+  };
+}
+
 function reg(mcp, name, def, handler) {
-  mcp.registerTool(name, def, async (args, extra) => {
+  mcp.registerTool(name, mutationToolDefinition(name, def), async (args, extra) => {
     const startedAt = isoNow();
     const startedMs = performance.now();
     const argSummary = AUDIT_ENABLED && AUDIT_ARGS ? summarizeArgs(args) : "";
@@ -1037,9 +1241,53 @@ function reg(mcp, name, def, handler) {
     let ok = true;
     try {
       await enforceToolPolicy(name, args ?? {});
-      result = await handler(args ?? {}, extra);
+      const toolArgs = args ?? {};
+      const directMutation = mutationTouchesCode(name, toolArgs);
+      const potentialMutation = POTENTIAL_CODE_MUTATION_TOOLS.has(name);
+      const backgroundActivity = BACKGROUND_CODE_ACTIVITY_TOOLS.has(name);
+      const verificationKind = VERIFICATION_TOOL_KIND.get(name) || null;
+      const beforeState = potentialMutation ? await captureWorkspaceMutationState() : null;
+      await HOOK_MANAGER.run("BeforeTool", { tool: name, args: summarizeArgs(toolArgs) });
+      if (directMutation) await HOOK_MANAGER.run("BeforeMutation", { tool: name, paths: collectMutationPaths(name, toolArgs) });
+      if (verificationKind) await HOOK_MANAGER.run("BeforeVerification", { tool: name, kind: verificationKind, taskId: toolArgs.task_id || null });
+      result = await handler(toolArgs, extra);
+      if (!result?.isError) {
+        let changed = directMutation;
+        let changedPaths = directMutation ? collectMutationPaths(name, toolArgs) : [];
+        if (potentialMutation) {
+          const afterState = await captureWorkspaceMutationState();
+          changed = Boolean(beforeState?.supported && afterState.supported && beforeState.fingerprint !== afterState.fingerprint);
+          changedPaths = [...new Set([...(beforeState?.paths || []), ...(afterState.paths || [])])];
+        }
+        let verificationDashboard = null;
+        if (verificationKind) {
+          verificationDashboard = await TASK_RUNTIME.recordVerification({
+            taskId: toolArgs.task_id || null,
+            kind: verificationKind,
+            result: resultObject(result)
+          });
+          await HOOK_MANAGER.run("AfterVerification", { tool: name, kind: verificationKind, taskId: verificationDashboard?.task?.id || null, result: resultObject(result) });
+        }
+        if (changed) {
+          result = await attachMutationDashboard(name, toolArgs, result, changedPaths);
+          await HOOK_MANAGER.run("AfterMutation", { tool: name, paths: changedPaths, result: resultObject(result) });
+        } else if (verificationDashboard) {
+          result = {
+            ...result,
+            structuredContent: {
+              kind: "lca_task_dashboard",
+              operation: resultObject(result),
+              dashboard: verificationDashboard
+            }
+          };
+        } else if (backgroundActivity || potentialMutation) {
+          result = await attachActivityDashboard(name, toolArgs, result);
+        }
+      }
+      await HOOK_MANAGER.run("AfterTool", { tool: name, ok: !result?.isError });
     } catch (err) {
       ok = false;
+      await HOOK_MANAGER.run("AfterTool", { tool: name, ok: false, error: String(err?.message || err) }).catch(() => {});
       result = { content: [{ type: "text", text: `ERROR: ${err?.message || err}` }], isError: true };
     }
     const success = ok && !result?.isError;
@@ -1060,7 +1308,11 @@ function workspaceInfoPayload() {
     version: VERSION,
     tier: PRODUCT_TIER,
     mode: MODE,
+    access_mode: ACCESS_MODE,
+    workflow_mode: WORKFLOW_MODE,
     policy: AGENT_POLICY,
+    verification: { tests: "explicit", lint: "explicit", build: "explicit" },
+    dashboard: { show_on_code_change: true, all_modes: true, auto_open_fullscreen_on_complete: false },
     allow_dangerous: ALLOW_DANGEROUS,
     auth: AUTH_TOKEN ? "bearer" : "none",
     roots: ROOTS,
@@ -1073,10 +1325,11 @@ function workspaceInfoPayload() {
       max_procs: MAX_PROCS
     },
     running_processes: [...processes.values()].filter((p) => p.status === "running").length,
+    execution_boundary: boundaryStatus(ACCESS_MODE, PRIMARY_ROOT),
     safety:
-      MODE === "full"
-        ? ["File tools are root-confined; command cwd is root-confined but command execution is not an OS sandbox.", "Catastrophic system commands stay blocked unless AGENT_ALLOW_DANGEROUS=1.", "Paths outside the roots are rejected by file tools."]
-        : ["File tools are root-confined; command cwd is root-confined but command execution is not an OS sandbox.", "Destructive commands and absolute Windows paths in commands are blocked.", "Switch to AGENT_MODE=full only for trusted automation."]
+      ACCESS_MODE === "full"
+        ? ["File tools are root-confined; full command execution runs directly without OS sandbox.", "Catastrophic system commands stay blocked unless AGENT_ALLOW_DANGEROUS=1.", "Paths outside the roots are rejected by file tools."]
+        : ["File tools are root-confined and command cwd is root-confined.", `Command boundary: ${boundaryStatus(ACCESS_MODE, PRIMARY_ROOT).adapter} (${boundaryStatus(ACCESS_MODE, PRIMARY_ROOT).active ? "active" : "policy-only"}).`, "Safe/balanced policy and approvals remain enabled according to the selected mode."]
   };
 }
 
@@ -1159,7 +1412,7 @@ function registerBasicTools(mcp) {
       }
     },
     async ({ summary, next_steps = [], files_touched = [] }) => {
-      // v2.5: snapshot current-task.json into checkpoints dir
+      await HOOK_MANAGER.run("BeforeCheckpoint", { summary, next_steps, files_touched });
       try {
         const cpStateDir = path.join(AGENT_STATE_DIR, "checkpoints");
         await mkdir(cpStateDir, { recursive: true });
@@ -1168,10 +1421,35 @@ function registerBasicTools(mcp) {
           await writeFile(path.join(cpStateDir, `task-${Date.now()}.json`), taskPlan, "utf8");
         }
       } catch { /* best-effort */ }
-      const cp = { saved_at: isoNow(), summary, next_steps, files_touched };
+      const [headResult, diffResult, statusResult, dashboard, transactions] = await Promise.all([
+        spawnCapture("git", ["rev-parse", "HEAD"], PRIMARY_ROOT, DEFAULT_CMD_TIMEOUT),
+        spawnCapture("git", ["diff", "--binary"], PRIMARY_ROOT, DEFAULT_CMD_TIMEOUT),
+        spawnCapture("git", ["status", "--short"], PRIMARY_ROOT, DEFAULT_CMD_TIMEOUT),
+        TASK_RUNTIME.getDashboard(),
+        MUTATION_ENGINE.list(50)
+      ]);
+      const runningProcesses = [...processes.values()]
+        .filter((proc) => proc.status === "running")
+        .map((proc) => ({ id: proc.id, name: proc.name, command: proc.command, cwd: proc.cwd, started_at: proc.startedAt }));
+      const cp = {
+        saved_at: isoNow(),
+        summary,
+        next_steps,
+        files_touched,
+        git_head: (headResult.stdout || "").trim() || null,
+        git_status: (statusResult.stdout || "").trim().split(/\r?\n/).filter(Boolean),
+        diff_sha256: createHash("sha256").update(diffResult.stdout || "").digest("hex"),
+        task: dashboard?.task || null,
+        plan_id: dashboard?.task?.planId || null,
+        changes: dashboard?.changes || [],
+        transactions: transactions.map((tx) => ({ id: tx.id, status: tx.status, label: tx.label, updatedAt: tx.updatedAt })),
+        verification: dashboard?.verification || { tests: { status: "not_requested" }, lint: { status: "not_requested" }, build: { status: "not_requested" } },
+        running_processes: runningProcesses
+      };
       await mkdir(path.dirname(CHECKPOINT_PATH), { recursive: true });
       await writeFile(CHECKPOINT_PATH, `${JSON.stringify(cp, null, 2)}\n`, "utf8");
-      return textResult("Checkpoint saved. Tell the user to open a NEW chat (resets the heavy context), then call resume() to continue.");
+      await HOOK_MANAGER.run("AfterCheckpoint", { checkpoint: cp });
+      return jsonResult({ ok: true, checkpoint: cp, message: "Checkpoint saved. A fresh chat can call resume without losing task, diff, transaction, or process context." });
     }
   );
 
@@ -1186,7 +1464,19 @@ function registerBasicTools(mcp) {
     async () => {
       try {
         const cp = JSON.parse(await readFile(CHECKPOINT_PATH, "utf8"));
-        return jsonResult(cp);
+        const [headResult, diffResult] = await Promise.all([
+          spawnCapture("git", ["rev-parse", "HEAD"], PRIMARY_ROOT, DEFAULT_CMD_TIMEOUT),
+          spawnCapture("git", ["diff", "--binary"], PRIMARY_ROOT, DEFAULT_CMD_TIMEOUT)
+        ]);
+        const currentHead = (headResult.stdout || "").trim() || null;
+        const currentDiffHash = createHash("sha256").update(diffResult.stdout || "").digest("hex");
+        return jsonResult({
+          ...cp,
+          stale: Boolean((cp.git_head && currentHead && cp.git_head !== currentHead) || (cp.diff_sha256 && cp.diff_sha256 !== currentDiffHash)),
+          current_git_head: currentHead,
+          current_diff_sha256: currentDiffHash,
+          dashboard: await TASK_RUNTIME.getDashboard(cp.task?.id)
+        });
       } catch {
         return textResult("No checkpoint saved yet.");
       }
@@ -1557,11 +1847,11 @@ function registerFsWriteTools(mcp) {
       inputSchema: { path: z.string().min(1), content: z.string() }
     },
     async ({ path: rel, content }) => {
-      const filePath = resolvePath(rel);
-      await createBackupBatch("write_file", [filePath]);
-      await mkdir(path.dirname(filePath), { recursive: true });
-      await writeFile(filePath, content, "utf8");
-      return jsonResult({ ok: true, path: toRel(filePath), bytes: Buffer.byteLength(content) });
+      const result = await MUTATION_ENGINE.applyOperations(
+        [{ op: "create", path: rel, content, overwrite: true }],
+        { label: "write_file" }
+      );
+      return jsonResult({ ...result, path: rel, bytes: Buffer.byteLength(content) });
     }
   );
 
@@ -1575,17 +1865,21 @@ function registerFsWriteTools(mcp) {
         path: z.string().min(1),
         old_text: z.string().min(1),
         new_text: z.string(),
-        replace_all: z.boolean().optional()
+        replace_all: z.boolean().optional(),
+        expected_occurrences: z.number().int().min(1).optional(),
+        expected_sha256: z.string().optional()
       }
     },
-    async ({ path: rel, old_text, new_text, replace_all = false }) => {
-      const filePath = resolvePath(rel);
-      await createBackupBatch("replace_in_file", [filePath]);
-      const content = await readFile(filePath, "utf8");
-      if (!content.includes(old_text)) throw new Error(`old_text not found in ${filePath}`);
-      const next = replace_all ? content.split(old_text).join(new_text) : content.replace(old_text, new_text);
-      await writeFile(filePath, next, "utf8");
-      return jsonResult({ ok: true, path: toRel(filePath), replacements: replace_all ? content.split(old_text).length - 1 : 1 });
+    async ({ path: rel, old_text, new_text, replace_all = false, expected_occurrences, expected_sha256 }) => {
+      const result = await MUTATION_ENGINE.applyOperations([
+        {
+          op: "update",
+          path: rel,
+          expected_sha256,
+          edits: [{ old_text, new_text, replace_all, expected_occurrences }]
+        }
+      ], { label: "replace_in_file" });
+      return jsonResult({ ...result, path: rel });
     }
   );
 
@@ -1605,8 +1899,16 @@ function registerFsWriteTools(mcp) {
               content: z.string().optional().describe("For create: full file content."),
               rename_to: z.string().optional().describe("For rename: destination path."),
               recursive: z.boolean().optional().describe("For delete of a directory."),
+              overwrite: z.boolean().optional().describe("Explicitly allow create/rename destination overwrite."),
+              expected_sha256: z.string().optional().describe("Fail if the file changed since it was read."),
               edits: z
-                .array(z.object({ old_text: z.string().min(1), new_text: z.string(), replace_all: z.boolean().optional() }))
+                .array(z.object({
+                  old_text: z.string().min(1),
+                  new_text: z.string(),
+                  replace_all: z.boolean().optional(),
+                  expected_occurrences: z.number().int().min(1).optional(),
+                  near_line: z.number().int().min(1).optional()
+                }))
                 .optional()
                 .describe("For update: ordered text replacements.")
             })
@@ -1616,41 +1918,10 @@ function registerFsWriteTools(mcp) {
     },
     async ({ diff, operations }) => {
       if (diff && diff.trim()) {
-        // Collect affected file paths for backup
-        const affectedPaths = new Set();
-        for (const line of diff.split(/\r?\n/)) {
-          if ((line.startsWith("--- ") || line.startsWith("+++ ")) && !line.includes("/dev/null")) {
-            const p = line.slice(4).replace(/^[ab]\//, "").trim();
-            if (p) {
-              try { affectedPaths.add(resolvePath(p)); } catch { /* apply will report invalid paths */ }
-            }
-          }
-        }
-        if (affectedPaths.size > 0) await createBackupBatch("apply_patch_diff", [...affectedPaths]);
-        const results = await applyUnifiedDiff(diff);
-        const ok = results.every((r) => r.ok);
-        return jsonResult({ ok, mode: "diff", applied: results.filter((r) => r.ok).length, results });
+        return jsonResult({ mode: "diff", ...(await MUTATION_ENGINE.applyDiff(diff, { label: "apply_patch_diff" })) });
       }
-      if (!operations || !operations.length) {
-        throw new Error("Provide either `diff` or a non-empty `operations` array.");
-      }
-      // Backup existing files that will be modified/deleted
-      const pathsToBackup = operations
-        .flatMap((op) => [op.path, ...(op.op === "rename" && op.rename_to ? [op.rename_to] : [])])
-        .map((p) => { try { return resolvePath(p); } catch { return null; } })
-        .filter(Boolean);
-      if (pathsToBackup.length > 0) await createBackupBatch("apply_patch_ops", pathsToBackup);
-      const results = [];
-      for (const op of operations) {
-        try {
-          results.push(await applyOne(op));
-        } catch (err) {
-          results.push({ op: op.op, path: op.path, ok: false, error: String(err?.message || err) });
-          break; // stop on first failure to keep state predictable
-        }
-      }
-      const ok = results.every((r) => r.ok);
-      return jsonResult({ ok, mode: "operations", applied: results.filter((r) => r.ok).length, results });
+      if (!operations || !operations.length) throw new Error("Provide either `diff` or a non-empty `operations` array.");
+      return jsonResult({ mode: "operations", ...(await MUTATION_ENGINE.applyOperations(operations, { label: "apply_patch_ops" })) });
     }
   );
 
@@ -1677,14 +1948,10 @@ function registerFsWriteTools(mcp) {
       description: "Move or rename a file or directory. Both ends must be inside the roots.",
       inputSchema: { from: z.string().min(1), to: z.string().min(1) }
     },
-    async ({ from, to }) => {
-      const src = resolvePath(from);
-      const dst = resolvePath(to);
-      await createBackupBatch("move_path", [src, dst]);
-      await mkdir(path.dirname(dst), { recursive: true });
-      await rename(src, dst);
-      return jsonResult({ ok: true, from: toRel(src), to: toRel(dst) });
-    }
+    async ({ from, to }) => jsonResult(await MUTATION_ENGINE.applyOperations(
+      [{ op: "rename", path: from, rename_to: to }],
+      { label: "move_path" }
+    ))
   );
 
   reg(
@@ -1698,11 +1965,10 @@ function registerFsWriteTools(mcp) {
     async ({ path: rel, recursive = false }) => {
       const target = resolvePath(rel);
       if (target === PRIMARY_ROOT || ROOTS.includes(target)) throw new Error("Refusing to delete a configured root.");
-      const info = await stat(target);
-      if (info.isDirectory() && !recursive) throw new Error("Path is a directory; pass recursive=true to delete it.");
-      if (info.isFile()) await createBackupBatch("delete_path", [target]);
-      await rm(target, { recursive, force: false });
-      return jsonResult({ ok: true, deleted: toRel(target) });
+      return jsonResult(await MUTATION_ENGINE.applyOperations(
+        [{ op: "delete", path: rel, recursive }],
+        { label: "delete_path" }
+      ));
     }
   );
 }
@@ -2029,6 +2295,180 @@ function registerProcessTools(mcp) {
       return jsonResult({ ok: true, id, status: proc.status });
     }
   );
+
+  reg(
+    mcp,
+    "exec_start",
+    {
+      title: "Start terminal session",
+      description: "Start an interactive-capable command session associated with a task/worktree. stdin and cursor reads are supported; native PTY activates only when a future adapter is installed.",
+      inputSchema: {
+        command: z.string().min(1),
+        cwd: z.string().optional(),
+        shell: z.enum(["cmd", "powershell", "bash", "sh", "zsh"]).optional(),
+        name: z.string().optional(),
+        task_id: z.string().optional(),
+        worktree_id: z.string().optional(),
+        pty: z.boolean().optional()
+      }
+    },
+    async ({ command, cwd = ".", shell, name, task_id, worktree_id, pty = true }) => {
+      assertCommandAllowed(command);
+      const running = [...processes.values()].filter((p) => p.status === "running").length;
+      if (running >= MAX_PROCS) throw new Error(`Too many running processes (max ${MAX_PROCS}).`);
+      const workdir = resolvePath(cwd);
+      const proc = startBackground(command, workdir, shell, name, { taskId: task_id, worktreeId: worktree_id, pty });
+      return jsonResult({
+        ok: true,
+        session_id: proc.id,
+        pid: proc.child.pid,
+        task_id: proc.taskId,
+        worktree_id: proc.worktreeId,
+        pty_requested: proc.ptyRequested,
+        pty_active: proc.ptyActive,
+        pty_adapter: proc.ptyAdapter || null,
+        stdin_supported: Boolean(proc.child.stdin),
+        resize_supported: proc.resizeSupported,
+        cursor: proc.cursorBase
+      });
+    }
+  );
+
+  reg(
+    mcp,
+    "exec_read",
+    {
+      title: "Read terminal session",
+      description: "Read terminal output after a cursor without resending the complete buffer.",
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
+      inputSchema: {
+        session_id: z.string().min(1),
+        cursor: z.number().int().min(0).optional(),
+        max_chars: z.number().int().min(100).max(PROC_BUFFER).optional()
+      }
+    },
+    async ({ session_id, cursor = 0, max_chars = 20000 }) => {
+      const proc = processes.get(session_id);
+      if (!proc) throw new Error(`No process with id ${session_id}`);
+      const availableStart = proc.cursorBase;
+      const effective = Math.max(cursor, availableStart);
+      const offset = Math.max(0, effective - availableStart);
+      const chunk = proc.output.slice(offset, offset + max_chars);
+      return jsonResult({
+        session_id,
+        status: proc.status,
+        exit_code: proc.exitCode,
+        cursor_requested: cursor,
+        cursor_reset: cursor < availableStart,
+        cursor_start: effective,
+        next_cursor: effective + chunk.length,
+        output: chunk,
+        has_more: offset + chunk.length < proc.output.length,
+        pty_active: proc.ptyActive
+      });
+    }
+  );
+
+  reg(
+    mcp,
+    "exec_write",
+    {
+      title: "Write terminal input",
+      description: "Write stdin to a running terminal session.",
+      inputSchema: { session_id: z.string().min(1), input: z.string(), end: z.boolean().optional() }
+    },
+    async ({ session_id, input, end = false }) => {
+      const proc = processes.get(session_id);
+      if (!proc) throw new Error(`No process with id ${session_id}`);
+      if (proc.status !== "running" || !proc.child.stdin?.writable) throw new Error("Process stdin is not writable.");
+      if (end) proc.child.stdin.end(input);
+      else proc.child.stdin.write(input);
+      return jsonResult({ ok: true, session_id, bytes: Buffer.byteLength(input), ended: end });
+    }
+  );
+
+  reg(
+    mcp,
+    "exec_resize",
+    {
+      title: "Resize terminal session",
+      description: "Request terminal resize. Script-based PTY adapters report unsupported rather than pretending success.",
+      inputSchema: { session_id: z.string().min(1), cols: z.number().int().min(20).max(1000), rows: z.number().int().min(5).max(500) }
+    },
+    async ({ session_id, cols, rows }) => {
+      const proc = processes.get(session_id);
+      if (!proc) throw new Error(`No process with id ${session_id}`);
+      if (!proc.resizeSupported) return jsonResult({ ok: false, session_id, cols, rows, supported: false, pty_active: proc.ptyActive, adapter: proc.ptyAdapter || null });
+      return jsonResult({ ok: true, session_id, cols, rows, supported: true });
+    }
+  );
+
+  reg(
+    mcp,
+    "exec_signal",
+    {
+      title: "Signal terminal session",
+      description: "Send a supported signal to a running command session.",
+      inputSchema: { session_id: z.string().min(1), signal: z.enum(["SIGINT", "SIGTERM", "SIGHUP", "SIGKILL"]).optional() }
+    },
+    async ({ session_id, signal = "SIGINT" }) => {
+      const proc = processes.get(session_id);
+      if (!proc) throw new Error(`No process with id ${session_id}`);
+      if (process.platform === "win32" && signal !== "SIGTERM" && signal !== "SIGKILL") {
+        proc.child.stdin?.write("\u0003");
+      } else {
+        proc.child.kill(signal);
+      }
+      return jsonResult({ ok: true, session_id, signal });
+    }
+  );
+
+  reg(
+    mcp,
+    "exec_cancel",
+    {
+      title: "Cancel terminal session",
+      description: "Terminate one session and its process tree.",
+      inputSchema: { session_id: z.string().min(1) }
+    },
+    async ({ session_id }) => {
+      const proc = processes.get(session_id);
+      if (!proc) throw new Error(`No process with id ${session_id}`);
+      killProcessTree(proc);
+      return jsonResult({ ok: true, session_id, status: proc.status });
+    }
+  );
+
+  reg(
+    mcp,
+    "exec_list",
+    {
+      title: "List terminal sessions",
+      description: "List terminal sessions with task/worktree association and terminal capabilities.",
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
+      inputSchema: { task_id: z.string().optional() }
+    },
+    async ({ task_id }) => jsonResult({
+      sessions: [...processes.values()]
+        .filter((proc) => !task_id || proc.taskId === task_id)
+        .map((proc) => ({
+          session_id: proc.id,
+          name: proc.name,
+          command: proc.command,
+          cwd: proc.cwd,
+          status: proc.status,
+          exit_code: proc.exitCode,
+          pid: proc.child?.pid,
+          task_id: proc.taskId,
+          worktree_id: proc.worktreeId,
+          pty_active: proc.ptyActive,
+          pty_adapter: proc.ptyAdapter || null,
+          stdin_supported: Boolean(proc.child?.stdin),
+          started_at: proc.startedAt,
+          next_cursor: proc.cursorBase + proc.output.length
+        }))
+    })
+  );
 }
 
 // Git flags blocked on the raw `git` tool (any mode): they can write arbitrary
@@ -2066,15 +2506,14 @@ function registerGitTool(mcp) {
       if (args.some((a) => BAD_GIT_FLAGS.some((re) => re.test(a)))) {
         throw new Error("That git flag is blocked (can write files, run external programs, or escape the repo).");
       }
-      if (MODE !== "full") {
-        // safe mode: only allow read-only git subcommands. Mutations
-        // (restore, checkout --, rm, branch -D, push --force, reset, clean, …)
-        // require AGENT_MODE=full.
+      if (ACCESS_MODE === "safe") {
+        // safe mode: only allow read-only git subcommands. Balanced mutations
+        // are handled by the approval policy; full runs directly.
         const sub = (args.find((a) => !a.startsWith("-")) || "").toLowerCase();
         const infoFlag = args.some((a) => /^(--version|--help)$/i.test(a) || /^-[vh]$/.test(a));
         if (!infoFlag && !GIT_READONLY.has(sub)) {
           throw new Error(
-            `Git "${sub || args[0] || ""}" is blocked in safe mode (only read-only git is allowed). Use git_status/git_diff, or set AGENT_MODE=full.`
+            `Git "${sub || args[0] || ""}" is blocked in safe mode (only read-only git is allowed). Use git_status/git_diff, or select balanced/full access.`
           );
         }
       }
@@ -2156,6 +2595,195 @@ function registerGitTool(mcp) {
         diff: result.stdout || "",
         empty: !(result.stdout || "").trim()
       });
+    }
+  );
+}
+
+async function readWorktreeState() {
+  try { return JSON.parse(await readFile(WORKTREES_STATE_PATH, "utf8")); } catch { return []; }
+}
+
+async function writeWorktreeState(items) {
+  await mkdir(path.dirname(WORKTREES_STATE_PATH), { recursive: true });
+  await writeFile(WORKTREES_STATE_PATH, `${JSON.stringify(items, null, 2)}\n`, "utf8");
+}
+
+function safeTaskSlug(value) {
+  const slug = String(value || randomUUID()).toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 80);
+  return slug || randomUUID();
+}
+
+async function createTaskWorktreeRecord(taskId, { base = "HEAD", branch } = {}) {
+  const task = await TASK_RUNTIME.getTask(taskId);
+  const state = await readWorktreeState();
+  const existing = [...state].reverse().find((item) => item.taskId === task.id && item.status === "active" && existsSync(item.path));
+  if (existing) return { created: false, worktree: existing };
+  const slug = safeTaskSlug(taskId);
+  let worktreePath = path.join(WORKTREES_DIR, slug);
+  if (existsSync(worktreePath)) worktreePath = path.join(WORKTREES_DIR, `${slug}-${Date.now()}`);
+  await mkdir(WORKTREES_DIR, { recursive: true });
+  const branchName = branch || `lca/${slug}-${Date.now().toString(36)}`;
+  const result = await spawnCapture("git", ["worktree", "add", "-b", branchName, worktreePath, base], PRIMARY_ROOT, 120_000);
+  if (result.exit_code !== 0) throw new Error(result.stderr || "git worktree add failed");
+  const record = { id: `wt-${randomUUID()}`, taskId: task.id, path: worktreePath, branch: branchName, base, status: "active", createdAt: isoNow(), updatedAt: isoNow() };
+  state.push(record);
+  await writeWorktreeState(state);
+  await TASK_RUNTIME.updateTask(task.id, { activityType: "worktree_created", activityMessage: `Worktree ${branchName} created` });
+  return { created: true, worktree: record };
+}
+
+async function worktreeRecommendation(task, requestedMode = "when-needed") {
+  const mode = requestedMode || STARTUP_PROFILE?.worktree?.mode || "when-needed";
+  const state = await readWorktreeState();
+  const activeForTask = [...state].reverse().find((item) => item.taskId === task.id && item.status === "active" && existsSync(item.path));
+  if (activeForTask) return { mode, useWorktree: true, reason: "existing_task_worktree", existing: activeForTask };
+  if (mode === "never") return { mode, useWorktree: false, reason: "configured_never" };
+  if (mode === "always") return { mode, useWorktree: true, reason: "configured_always" };
+  const [status, tasks] = await Promise.all([
+    spawnCapture("git", ["status", "--porcelain"], PRIMARY_ROOT, DEFAULT_CMD_TIMEOUT),
+    TASK_RUNTIME.listTasks(100)
+  ]);
+  const dirty = parsePorcelain(status.stdout || "");
+  const otherActiveTasks = tasks.filter((item) => item.id !== task.id && ["analyzing", "planned", "implementing", "verifying", "changed"].includes(item.status));
+  if (otherActiveTasks.length > 0) return { mode, useWorktree: true, reason: "parallel_active_task", otherTaskIds: otherActiveTasks.map((item) => item.id), dirty };
+  if (dirty.length > 0 && task.complexity === "complex") return { mode, useWorktree: true, reason: "complex_task_with_dirty_checkout", dirty };
+  return { mode, useWorktree: false, reason: dirty.length ? "dirty_but_direct_task" : "single_task_clean_checkout", dirty };
+}
+
+function registerWorktreeTools(mcp) {
+  reg(
+    mcp,
+    "task_create_worktree",
+    {
+      title: "Create task worktree",
+      description: "Create an isolated Git worktree for a task. Worktrees are opt-in/when-needed, not created for every task.",
+      inputSchema: {
+        task_id: z.string().min(1),
+        base: z.string().optional(),
+        branch: z.string().optional()
+      }
+    },
+    async ({ task_id, base = "HEAD", branch }) => jsonResult({ ok: true, ...(await createTaskWorktreeRecord(task_id, { base, branch })) })
+  );
+
+  reg(
+    mcp,
+    "task_prepare_workspace",
+    {
+      title: "Prepare task workspace",
+      description: "Choose direct checkout or a task worktree using when-needed rules. Can create the recommended worktree in one call.",
+      inputSchema: {
+        task_id: z.string().min(1),
+        mode: z.enum(["when-needed", "always", "never"]).optional(),
+        create: z.boolean().optional(),
+        base: z.string().optional()
+      }
+    },
+    async ({ task_id, mode = STARTUP_PROFILE?.worktree?.mode || "when-needed", create = true, base = "HEAD" }) => {
+      const task = await TASK_RUNTIME.getTask(task_id);
+      const recommendation = await worktreeRecommendation(task, mode);
+      if (!recommendation.useWorktree) {
+        await TASK_RUNTIME.updateTask(task_id, { activityType: "workspace_selected", activityMessage: `Using primary checkout (${recommendation.reason})` });
+        return jsonResult({ ok: true, task_id, workspace: PRIMARY_ROOT, worktree: null, recommendation });
+      }
+      if (recommendation.existing) return jsonResult({ ok: true, task_id, workspace: recommendation.existing.path, worktree: recommendation.existing, recommendation });
+      if (!create) return jsonResult({ ok: true, task_id, workspace: PRIMARY_ROOT, worktree: null, recommendation, creation_required: true });
+      const result = await createTaskWorktreeRecord(task_id, { base });
+      return jsonResult({ ok: true, task_id, workspace: result.worktree.path, ...result, recommendation });
+    }
+  );
+
+  reg(
+    mcp,
+    "task_worktree_list",
+    {
+      title: "List task worktrees",
+      description: "List LCA-managed task worktrees.",
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
+      inputSchema: { task_id: z.string().optional() }
+    },
+    async ({ task_id }) => {
+      const state = await readWorktreeState();
+      return jsonResult({ worktrees: state.filter((item) => !task_id || item.taskId === task_id) });
+    }
+  );
+
+  reg(
+    mcp,
+    "task_diff",
+    {
+      title: "Task worktree diff",
+      description: "Collect tracked and untracked changes from a task worktree.",
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
+      inputSchema: { task_id: z.string().min(1), max_chars: z.number().int().min(1000).max(500000).optional() }
+    },
+    async ({ task_id, max_chars = 250000 }) => {
+      const state = await readWorktreeState();
+      const worktree = [...state].reverse().find((item) => item.taskId === task_id && item.status === "active");
+      if (!worktree) throw new Error(`No active worktree for task ${task_id}`);
+      const tracked = await spawnCapture("git", ["diff", "--binary", "HEAD"], worktree.path, DEFAULT_CMD_TIMEOUT);
+      const extra = await untrackedDiff(worktree.path);
+      const diff = `${tracked.stdout || ""}${tracked.stdout && extra.diff ? "\n" : ""}${extra.diff || ""}`;
+      return jsonResult({ ok: tracked.exit_code === 0, task_id, worktree, untracked: extra.files, diff: diff.slice(0, max_chars), truncated: diff.length > max_chars });
+    }
+  );
+
+  reg(
+    mcp,
+    "task_apply_to_main",
+    {
+      title: "Apply task worktree changes",
+      description: "Apply a task worktree's tracked and untracked patch to the primary checkout after a complete git apply --check.",
+      inputSchema: { task_id: z.string().min(1) }
+    },
+    async ({ task_id }) => {
+      const state = await readWorktreeState();
+      const worktree = [...state].reverse().find((item) => item.taskId === task_id && item.status === "active");
+      if (!worktree) throw new Error(`No active worktree for task ${task_id}`);
+      const tracked = await spawnCapture("git", ["diff", "--binary", "HEAD"], worktree.path, DEFAULT_CMD_TIMEOUT);
+      if (tracked.exit_code !== 0) throw new Error(tracked.stderr || "Could not collect task diff");
+      const extra = await untrackedDiff(worktree.path);
+      const diff = `${tracked.stdout || ""}${tracked.stdout && extra.diff ? "\n" : ""}${extra.diff || ""}`;
+      if (!diff.trim()) return jsonResult({ ok: true, task_id, applied: false, message: "Task worktree has no changes." });
+      const patchFile = path.join(WORKSPACE_DATA_DIR, `apply-${safeTaskSlug(task_id)}-${Date.now()}.patch`);
+      await writeFile(patchFile, diff, "utf8");
+      try {
+        const check = await spawnCapture("git", ["apply", "--check", "--whitespace=nowarn", patchFile], PRIMARY_ROOT, DEFAULT_CMD_TIMEOUT);
+        if (check.exit_code !== 0) throw new Error(`WORKTREE_APPLY_CONFLICT: ${check.stderr || check.stdout}`);
+        const apply = await spawnCapture("git", ["apply", "--whitespace=nowarn", patchFile], PRIMARY_ROOT, DEFAULT_CMD_TIMEOUT);
+        if (apply.exit_code !== 0) throw new Error(apply.stderr || "git apply failed");
+        worktree.updatedAt = isoNow();
+        worktree.lastAppliedAt = isoNow();
+        await writeWorktreeState(state);
+        await TASK_RUNTIME.updateTask(task_id, { status: "changed", activityType: "worktree_applied", activityMessage: "Worktree changes applied to primary checkout" });
+        return jsonResult({ ok: true, task_id, worktree_id: worktree.id, applied: true, untracked: extra.files });
+      } finally {
+        await rm(patchFile, { force: true }).catch(() => {});
+      }
+    }
+  );
+
+  reg(
+    mcp,
+    "task_discard_worktree",
+    {
+      title: "Discard task worktree",
+      description: "Remove a task worktree and optionally delete its local task branch.",
+      inputSchema: { task_id: z.string().min(1), delete_branch: z.boolean().optional() }
+    },
+    async ({ task_id, delete_branch = true }) => {
+      const state = await readWorktreeState();
+      const index = state.findLastIndex((item) => item.taskId === task_id && item.status === "active");
+      if (index < 0) throw new Error(`No active worktree for task ${task_id}`);
+      const worktree = state[index];
+      const remove = await spawnCapture("git", ["worktree", "remove", "--force", worktree.path], PRIMARY_ROOT, 120_000);
+      if (remove.exit_code !== 0) throw new Error(remove.stderr || "git worktree remove failed");
+      if (delete_branch) await spawnCapture("git", ["branch", "-D", worktree.branch], PRIMARY_ROOT, DEFAULT_CMD_TIMEOUT);
+      worktree.status = "discarded";
+      worktree.updatedAt = isoNow();
+      await writeWorktreeState(state);
+      await TASK_RUNTIME.updateTask(task_id, { activityType: "worktree_discarded", activityMessage: `Worktree ${worktree.branch} discarded` });
+      return jsonResult({ ok: true, worktree });
     }
   );
 }
@@ -2530,14 +3158,29 @@ function assertCommandAllowed(command) {
   if (!ALLOW_DANGEROUS && CATASTROPHIC.some((re) => re.test(cmd))) {
     throw new Error("Command blocked: catastrophic system operation (set AGENT_ALLOW_DANGEROUS=1 to override).");
   }
-  if (MODE !== "full" && SAFE_MODE_BLOCKS.some((re) => re.test(cmd))) {
-    throw new Error("Command blocked by safe mode. Switch to AGENT_MODE=full for unrestricted in-root commands.");
+  if (ACCESS_MODE === "safe" && SAFE_MODE_BLOCKS.some((re) => re.test(cmd))) {
+    throw new Error("Command blocked by safe mode. Switch to balanced/full for broader command access.");
   }
 }
 
 function defaultShell() {
   if (process.platform === "win32") return "cmd";
   return hasCommand("bash") ? "bash" : "sh";
+}
+
+function shellQuotePosix(value) {
+  return `'${String(value).replace(/'/g, `'\\''`)}'`;
+}
+
+function buildPtySpawn(command, shell) {
+  if (process.platform === "win32" || !hasCommand("script")) return null;
+  const selected = shell || defaultShell();
+  const shellFile = selected === "powershell" ? (hasCommand("pwsh") ? "pwsh" : "powershell") : selected;
+  if (process.platform === "darwin") {
+    return { file: "/usr/bin/script", args: ["-q", "/dev/null", shellFile, "-lc", command], opts: {}, ptyAdapter: "bsd-script" };
+  }
+  const wrappedCommand = `${shellFile} -lc ${shellQuotePosix(command)}`;
+  return { file: hasCommand("script") ? "script" : "/usr/bin/script", args: ["-qefc", wrappedCommand, "/dev/null"], opts: {}, ptyAdapter: "util-linux-script" };
 }
 
 function buildSpawn(command, shell) {
@@ -2559,12 +3202,12 @@ function buildSpawn(command, shell) {
   return { file: command, args: [], opts: { shell: true } };
 }
 
-function spawnOptions(cwd, opts = {}, env) {
+function spawnOptions(cwd, opts = {}, env = buildChildEnv(process.env, { AGENT_WORKSPACE: PRIMARY_ROOT }, { exclude: CHILD_ENV_EXCLUDE })) {
   return {
     cwd,
     windowsHide: true,
     detached: process.platform !== "win32",
-    ...(env ? { env } : {}),
+    env,
     ...opts
   };
 }
@@ -2585,14 +3228,15 @@ function terminateChildTree(child, signal = "SIGTERM") {
 }
 
 function runShellCommand(command, cwd, shell, timeoutMs) {
-  const { file, args, opts } = buildSpawn(command, shell);
+  const base = buildSpawn(command, shell);
+  const { file, args, opts } = wrapSpawnSpec(base, cwd, ACCESS_MODE);
   return new Promise((resolve) => {
     let stdout = "";
     let stderr = "";
     let timedOut = false;
     let child;
     try {
-      child = spawn(file, args, spawnOptions(cwd, opts, { ...process.env, AGENT_WORKSPACE: PRIMARY_ROOT }));
+      child = spawn(file, args, spawnOptions(cwd, opts));
     } catch (err) {
       resolve({ exit_code: null, timed_out: false, stdout: "", stderr: String(err?.message || err) });
       return;
@@ -2615,13 +3259,14 @@ function runShellCommand(command, cwd, shell, timeoutMs) {
 }
 
 function spawnCapture(file, args, cwd, timeoutMs) {
+  const wrapped = wrapSpawnSpec({ file, args, opts: {} }, cwd, ACCESS_MODE);
   return new Promise((resolve) => {
     let stdout = "";
     let stderr = "";
     let timedOut = false;
     let child;
     try {
-      child = spawn(file, args, spawnOptions(cwd));
+      child = spawn(wrapped.file, wrapped.args, spawnOptions(cwd, wrapped.opts));
     } catch (err) {
       resolve({ exit_code: null, timed_out: false, stdout: "", stderr: String(err?.message || err) });
       return;
@@ -2643,9 +3288,68 @@ function spawnCapture(file, args, cwd, timeoutMs) {
   });
 }
 
-function startBackground(command, cwd, shell, name) {
-  const { file, args, opts } = buildSpawn(command, shell);
-  const child = spawn(file, args, spawnOptions(cwd, opts, { ...process.env, AGENT_WORKSPACE: PRIMARY_ROOT }));
+async function persistProcessState() {
+  const rows = [...processes.values()].map((proc) => ({
+    id: proc.id,
+    name: proc.name,
+    command: proc.command,
+    cwd: proc.cwd,
+    shell: proc.shell,
+    status: proc.status,
+    exitCode: proc.exitCode,
+    pid: proc.child?.pid || null,
+    startedAt: proc.startedAt,
+    taskId: proc.taskId || null,
+    worktreeId: proc.worktreeId || null,
+    ptyRequested: Boolean(proc.ptyRequested),
+    ptyActive: Boolean(proc.ptyActive),
+    ptyAdapter: proc.ptyAdapter || null,
+    boundary: proc.boundary || null,
+    cursorBase: proc.cursorBase || 0,
+    output: String(proc.output || "").slice(-20000),
+    stdout: String(proc.stdout || "").slice(-10000),
+    stderr: String(proc.stderr || "").slice(-10000)
+  }));
+  await mkdir(path.dirname(PROCESS_STATE_PATH), { recursive: true });
+  await writeFile(PROCESS_STATE_PATH, `${JSON.stringify(rows, null, 2)}\n`, "utf8");
+}
+
+function pidAlive(pid) {
+  if (!pid) return false;
+  try { process.kill(Number(pid), 0); return true; } catch { return false; }
+}
+
+async function restoreProcessState() {
+  let rows;
+  try { rows = JSON.parse(await readFile(PROCESS_STATE_PATH, "utf8")); } catch { return; }
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const alive = row.status === "running" && pidAlive(row.pid);
+    const child = row.pid ? {
+      pid: row.pid,
+      stdin: null,
+      kill(signal = "SIGTERM") { try { process.kill(Number(row.pid), signal); } catch {} }
+    } : null;
+    processes.set(row.id, {
+      ...row,
+      child,
+      status: alive ? "running" : (row.status === "running" ? "orphaned" : row.status),
+      stdout: row.stdout || "",
+      stderr: row.stderr || "",
+      output: row.output || "",
+      cursorBase: Number(row.cursorBase || 0),
+      ptyActive: Boolean(row.ptyActive),
+      ptyAdapter: row.ptyAdapter || null,
+      resizeSupported: false,
+      restored: true
+    });
+  }
+}
+
+function startBackground(command, cwd, shell, name, metadata = {}) {
+  const ptySpec = metadata.pty ? buildPtySpawn(command, shell) : null;
+  const base = ptySpec || buildSpawn(command, shell);
+  const { file, args, opts, boundary } = wrapSpawnSpec(base, cwd, ACCESS_MODE);
+  const child = spawn(file, args, spawnOptions(cwd, opts));
   const proc = {
     id: randomUUID(),
     name: name || command.slice(0, 40),
@@ -2654,20 +3358,41 @@ function startBackground(command, cwd, shell, name) {
     status: "running",
     exitCode: null,
     startedAt: isoNow(),
+    cwd,
+    shell: shell || defaultShell(),
+    taskId: metadata.taskId || null,
+    worktreeId: metadata.worktreeId || null,
+    boundary,
+    ptyRequested: Boolean(metadata.pty),
+    ptyActive: Boolean(ptySpec),
+    ptyAdapter: ptySpec?.ptyAdapter || null,
+    resizeSupported: false,
     stdout: "",
-    stderr: ""
+    stderr: "",
+    output: "",
+    cursorBase: 0
   };
-  child.stdout?.on("data", (c) => (proc.stdout = appendLimited(proc.stdout, c.toString(), PROC_BUFFER)));
-  child.stderr?.on("data", (c) => (proc.stderr = appendLimited(proc.stderr, c.toString(), PROC_BUFFER)));
+  const appendProcessOutput = (stream, chunk) => {
+    const text = chunk.toString();
+    proc[stream] = appendLimited(proc[stream], text, PROC_BUFFER);
+    const next = appendLimited(proc.output, text, PROC_BUFFER);
+    if (next.length < proc.output.length + text.length) proc.cursorBase += proc.output.length + text.length - next.length;
+    proc.output = next;
+  };
+  child.stdout?.on("data", (c) => appendProcessOutput("stdout", c));
+  child.stderr?.on("data", (c) => appendProcessOutput("stderr", c));
   child.on("error", (err) => {
     proc.status = "error";
     proc.stderr = appendLimited(proc.stderr, String(err?.message || err), PROC_BUFFER);
+    persistProcessState().catch(() => {});
   });
   child.on("close", (code) => {
     proc.status = "exited";
     proc.exitCode = code;
+    persistProcessState().catch(() => {});
   });
   processes.set(proc.id, proc);
+  persistProcessState().catch(() => {});
   return proc;
 }
 
@@ -2681,6 +3406,7 @@ function killProcessTree(proc) {
     if (pid) terminateChildTree(proc.child, "SIGTERM");
   } catch {}
   proc.status = "stopped";
+  persistProcessState().catch(() => {});
 }
 
 // ----------------------------------------------------------------------------
@@ -2782,6 +3508,10 @@ function firstText(result) {
 // ----------------------------------------------------------------------------
 function dedupe(arr) {
   return [...new Set(arr)];
+}
+
+function escapeRegex(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function boundedNumber(raw, fallback, min, max) {
@@ -3368,19 +4098,38 @@ function recommendNextActions({ profile, git, truncated }) {
   return actions.slice(0, 6);
 }
 
+function profileFromProjectGraph(graph, fallback = {}) {
+  const projects = Array.isArray(graph?.projects) ? graph.projects : [];
+  const commands = Array.isArray(graph?.commands) ? graph.commands : [];
+  return {
+    languages: [...new Set([...(fallback.languages || []), ...projects.map((project) => project.language).filter((value) => value && value !== "unknown")])],
+    frameworks: [...new Set([...(fallback.frameworks || []), ...projects.map((project) => project.framework).filter(Boolean)])],
+    packageManagers: [...new Set([...(fallback.packageManagers || []), ...projects.map((project) => project.packageManager).filter(Boolean)])],
+    manifests: [...new Set([...(fallback.manifests || []), ...(graph?.manifests || [])])],
+    scripts: Object.fromEntries(commands.map((command) => [`${command.project || command.cwd || "."}:${command.id}`, command.shell_command || [command.file, ...(command.args || [])].join(" ")])),
+    projects,
+    commands
+  };
+}
+
 async function collectWorkspaceDoctor(rootDir) {
-  const [profile, git, importantFiles] = await Promise.all([
+  const [legacyProfile, graph, git, importantFiles] = await Promise.all([
     detectProjectProfile(rootDir).catch(() => ({ languages: [], frameworks: [], packageManagers: [], manifests: [], scripts: {} })),
+    buildProjectGraph(rootDir, { maxDepth: 7, maxFiles: 20000 }).catch(() => ({ projects: [], commands: [], manifests: [] })),
     compactGitStatus(rootDir),
     collectImportantFiles(rootDir).catch(() => [])
   ]);
+  const profile = profileFromProjectGraph(graph, legacyProfile);
   const checks = [];
   const add = (id, status, title, detail, recommendation) => checks.push({ id, status, title, detail, recommendation });
 
   add("version", "pass", "Version", `Local Coding Agent ${VERSION} (${PRODUCT_TIER})`, null);
   add("roots", ROOTS.length ? "pass" : "fail", "Workspace roots", `${ROOTS.length} root(s) configured`, ROOTS.length ? null : "Set AGENT_WORKSPACE to the repository you want to work on.");
-  add("policy", AGENT_POLICY === "balanced" ? "pass" : "warn", "Policy", `AGENT_POLICY=${AGENT_POLICY}`, AGENT_POLICY === "full" ? "Use balanced for day-to-day work unless this is trusted automation." : AGENT_POLICY === "strict" ? "Strict is safe but write flows will be blocked." : null);
-  add("mode", MODE === "safe" ? "pass" : "warn", "Command mode", `AGENT_MODE=${MODE}`, MODE === "full" ? "Use safe mode for normal agent work; full is best reserved for trusted automation." : null);
+  add("policy", "pass", "Policy", `AGENT_POLICY=${AGENT_POLICY}`, AGENT_POLICY === "strict" ? "Strict intentionally blocks write flows." : null);
+  add("mode", "pass", "Access mode", `AGENT_ACCESS_MODE=${ACCESS_MODE}`, ACCESS_MODE === "full" ? "Full is the configured default for trusted local automation; balanced and safe remain available." : null);
+  add("workflow", "pass", "Workflow mode", `AGENT_WORKFLOW_MODE=${WORKFLOW_MODE}`, null);
+  add("verification", "pass", "Verification policy", EXPLICIT_VERIFICATION_INSTRUCTION, null);
+  add("dashboard", "pass", "Code-change dashboard", "Enabled for every code mutation in every access/workflow mode", null);
   add("auth", AUTH_TOKEN ? "pass" : "warn", "MCP auth", AUTH_TOKEN ? "Bearer auth enabled" : "MCP_AUTH_TOKEN is not set", AUTH_TOKEN ? null : "Set MCP_AUTH_TOKEN if exposing beyond the private OpenAI tunnel/local loopback.");
   add("origin", ALLOWED_ORIGINS.size ? "warn" : "pass", "Browser Origin policy", ALLOWED_ORIGINS.size ? `${ALLOWED_ORIGINS.size} browser origin(s) allowed` : "Browser-origin MCP calls blocked by default", ALLOWED_ORIGINS.size ? "Keep MCP_ALLOWED_ORIGINS as narrow as possible." : null);
   add("rg", RG_BIN ? "pass" : "warn", "ripgrep", RG_BIN ? `Found: ${RG_BIN}` : "ripgrep not found; search_text falls back to slower scanning", RG_BIN ? null : "Install ripgrep for faster searches on large repos.");
@@ -3402,7 +4151,10 @@ async function collectWorkspaceDoctor(rootDir) {
     version: VERSION,
     tier: PRODUCT_TIER,
     mode: MODE,
+    access_mode: ACCESS_MODE,
+    workflow_mode: WORKFLOW_MODE,
     policy: AGENT_POLICY,
+    execution_boundary: boundaryStatus(ACCESS_MODE, rootDir),
     checks,
     summary: { pass: checks.filter((c) => c.status === "pass").length, warn, fail },
     profile,
@@ -3466,7 +4218,11 @@ async function buildSessionReport(rootDir) {
     ts: isoNow(),
     root: toRel(rootDir),
     mode: MODE,
+    access_mode: ACCESS_MODE,
+    workflow_mode: WORKFLOW_MODE,
     policy: AGENT_POLICY,
+    verification: { tests: "explicit", lint: "explicit", build: "explicit" },
+    dashboard: await TASK_RUNTIME.getDashboard(),
     git,
     doctor: {
       status: doctor.status,
@@ -3652,8 +4408,11 @@ function registerRepoIntelTools(mcp) {
     },
     async ({ path: rel = ".", depth = 3, max_entries = 350, include_symbols = false, refresh = false }) => {
       const rootDir = resolvePath(rel);
-      const idx = await buildRepoIndex(rootDir, { depth, maxEntries: max_entries, includeSymbols: include_symbols, refresh });
-      const profile = idx.profile || {};
+      const [idx, graph] = await Promise.all([
+        buildRepoIndex(rootDir, { depth, maxEntries: max_entries, includeSymbols: include_symbols, refresh }),
+        buildProjectGraph(rootDir, { maxDepth: Math.max(7, depth + 2), maxFiles: 20000, refresh })
+      ]);
+      const profile = profileFromProjectGraph(graph, idx.profile || {});
       const tree = idx.tree || { depth, dirs: 0, files: 0, truncated: false, entries: [] };
       const importantFiles = idx.important_files || [];
       const git = idx.git || {};
@@ -3668,12 +4427,17 @@ function registerRepoIntelTools(mcp) {
         root: toRel(rootDir),
         roots: ROOTS,
         mode: MODE,
+        access_mode: ACCESS_MODE,
+        workflow_mode: WORKFLOW_MODE,
         policy: AGENT_POLICY,
+        verification: { tests: "explicit", lint: "explicit", build: "explicit" },
+        dashboard: { show_on_code_change: true, all_modes: true },
         auth: AUTH_TOKEN ? "bearer" : "none",
         safety: {
           file_tools_root_confined: true,
           command_cwd_root_confined: true,
-          command_os_sandbox: false,
+          command_os_sandbox: boundaryStatus(ACCESS_MODE, rootDir).active,
+          execution_boundary: boundaryStatus(ACCESS_MODE, rootDir),
           browser_origin_mcp_default: ALLOWED_ORIGINS.size ? "allowlist" : "blocked"
         },
         profile: {
@@ -3681,7 +4445,15 @@ function registerRepoIntelTools(mcp) {
           frameworks: profile.frameworks || [],
           packageManagers: profile.packageManagers || [],
           manifests: profile.manifests || [],
-          scripts: profile.scripts || {}
+          scripts: profile.scripts || {},
+          projects: (profile.projects || []).map((project) => ({
+            id: project.id,
+            path: project.path,
+            language: project.language,
+            framework: project.framework,
+            packageManager: project.packageManager,
+            command_count: project.commands?.length || 0
+          }))
         },
         git,
         tree: {
@@ -3722,15 +4494,16 @@ function registerRepoIntelTools(mcp) {
     },
     async ({ path: rel = ".", refresh = false }) => {
       const rootDir = resolvePath(rel);
-      const idx = await readRepoIndex();
-      if (!refresh && idx && indexFresh(idx) && idx.profile && idx.profile.rootDir === rootDir) {
-        return jsonResult({ ...idx.profile, cached: true, ts: idx.ts });
-      }
-      const profile = await detectProjectProfile(rootDir);
-      const entry = { rootDir, ...profile };
-      const newIdx = { ...(idx || {}), ts: isoNow(), profile: entry };
-      await writeRepoIndex(newIdx);
-      return jsonResult({ ...entry, cached: false, ts: newIdx.ts });
+      const [legacyProfile, graph] = await Promise.all([
+        detectProjectProfile(rootDir),
+        buildProjectGraph(rootDir, { maxDepth: 7, maxFiles: 20000, refresh })
+      ]);
+      return jsonResult({
+        rootDir,
+        ...profileFromProjectGraph(graph, legacyProfile),
+        cached: Boolean(graph.cached),
+        ts: graph.generatedAt
+      });
     }
   );
 
@@ -3766,10 +4539,16 @@ function registerRepoIntelTools(mcp) {
     },
     async ({ path: rel = ".", depth = 3, max_entries = 800, refresh = false }) => {
       const rootDir = resolvePath(rel);
-      const idx = await buildRepoIndex(rootDir, { depth, maxEntries: max_entries, includeSymbols: false, refresh });
+      const [idx, graph] = await Promise.all([
+        buildRepoIndex(rootDir, { depth, maxEntries: max_entries, includeSymbols: false, refresh }),
+        buildProjectGraph(rootDir, { maxDepth: Math.max(7, depth + 2), maxFiles: 20000, refresh })
+      ]);
       const tree = idx.tree || { depth, dirs: 0, files: 0, truncated: false, entries: [] };
-      const manifests = (tree.entries || []).filter((f) => MANIFEST_NAMES.has(path.basename(f).toLowerCase()));
-      const profile = idx.profile || {};
+      const manifests = [...new Set([
+        ...(tree.entries || []).filter((f) => MANIFEST_NAMES.has(path.basename(f).toLowerCase())),
+        ...(graph.manifests || [])
+      ])];
+      const profile = profileFromProjectGraph(graph, idx.profile || {});
 
       return jsonResult({
         root: toRel(rootDir),
@@ -3784,9 +4563,15 @@ function registerRepoIntelTools(mcp) {
           languages: profile.languages || [],
           frameworks: profile.frameworks || [],
           packageManagers: profile.packageManagers || [],
-          scripts: profile.scripts || {}
+          scripts: profile.scripts || {},
+          projects: (profile.projects || []).map((project) => ({
+            id: project.id,
+            path: project.path,
+            language: project.language,
+            packageManager: project.packageManager
+          }))
         },
-        cached: Boolean(idx.cached),
+        cached: Boolean(idx.cached && graph.cached),
         ripgrep: idx.ripgrep_status || { available: Boolean(RG_BIN), bin: RG_BIN || null }
       });
     }
@@ -3823,6 +4608,211 @@ function registerRepoIntelTools(mcp) {
       const filtered = kind ? symbols.filter((s) => s.kind === kind) : symbols;
       return jsonResult({ count: filtered.length, cached: Boolean(idx.cached), symbols: filtered.slice(0, max_matches) });
     }
+  );
+
+  reg(
+    mcp,
+    "instruction_chain",
+    {
+      title: "Instruction hierarchy",
+      description: "Load global, repository, and nested AGENTS.md / AGENTS.override.md instructions for a target path, ordered by scope and priority.",
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
+      inputSchema: {
+        path: z.string().optional().describe("Target file or directory whose nested instruction chain should apply."),
+        max_chars: z.number().int().min(1000).max(100000).optional()
+      }
+    },
+    async ({ path: target = ".", max_chars = 32000 }) => jsonResult(await discoverInstructionChain(PRIMARY_ROOT, target, { maxChars: max_chars }))
+  );
+
+  reg(
+    mcp,
+    "project_graph",
+    {
+      title: "Monorepo project graph",
+      description: "Scan nested manifests and return projects, package managers, frameworks, dependencies, and every detected script/verification command without running them.",
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
+      inputSchema: {
+        path: z.string().optional(),
+        max_depth: z.number().int().min(1).max(12).optional(),
+        max_files: z.number().int().min(100).max(50000).optional(),
+        refresh: z.boolean().optional()
+      }
+    },
+    async ({ path: rel = ".", max_depth = 7, max_files = 20000, refresh = false }) => {
+      const rootDir = resolvePath(rel);
+      return jsonResult(await buildProjectGraph(rootDir, { maxDepth: max_depth, maxFiles: max_files, refresh }));
+    }
+  );
+
+  reg(
+    mcp,
+    "symbol_search",
+    {
+      title: "Search repository symbols",
+      description: "Search the incremental symbol index by name/kind. Uses the built-in parser fallback and reports optional Tree-sitter availability.",
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
+      inputSchema: {
+        query: z.string().min(1),
+        path: z.string().optional(),
+        kind: z.enum(["function", "class", "const", "method", "route"]).optional(),
+        limit: z.number().int().min(1).max(500).optional()
+      }
+    },
+    async ({ query, path: rel = ".", kind, limit = 100 }) => {
+      const rootDir = resolvePath(rel);
+      const idx = await buildRepoIndex(rootDir, { depth: 8, maxEntries: 4000, includeSymbols: true, symbolMaxFiles: 2000, symbolMaxMatches: 10000, refresh: false });
+      const needle = query.toLowerCase();
+      const matches = (idx.symbols || [])
+        .filter((symbol) => (!kind || symbol.kind === kind) && String(symbol.name || "").toLowerCase().includes(needle))
+        .slice(0, limit);
+      return jsonResult({ count: matches.length, engine: hasCommand("tree-sitter") ? "tree-sitter-cli-available+fallback-index" : "builtin-symbol-index", matches });
+    }
+  );
+
+  reg(
+    mcp,
+    "find_references",
+    {
+      title: "Find symbol references",
+      description: "Find textual references to a symbol across repository source files using ripgrep when available.",
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
+      inputSchema: {
+        symbol: z.string().min(1),
+        path: z.string().optional(),
+        limit: z.number().int().min(1).max(2000).optional()
+      }
+    },
+    async ({ symbol, path: rel = ".", limit = 500 }) => {
+      const rootDir = resolvePath(rel);
+      let matches = RG_BIN ? await ripgrepGrep(rootDir, `\\b${escapeRegex(symbol)}\\b`, { regex: true, limit, glob: null }) : null;
+      if (!matches) matches = await searchTree(rootDir, `\\b${escapeRegex(symbol)}\\b`, { regex: true, limit, glob: null });
+      return jsonResult({ symbol, count: matches.length, engine: RG_BIN ? "ripgrep" : "scan", references: matches });
+    }
+  );
+
+  reg(
+    mcp,
+    "dependency_impact",
+    {
+      title: "Dependency impact",
+      description: "Estimate direct import/reference impact for a changed file or exported symbol without running builds/tests.",
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
+      inputSchema: {
+        path: z.string().min(1),
+        symbol: z.string().optional(),
+        limit: z.number().int().min(1).max(1000).optional()
+      }
+    },
+    async ({ path: rel, symbol, limit = 300 }) => {
+      const target = resolvePath(rel);
+      const rootDir = PRIMARY_ROOT;
+      const relative = toRel(target).replace(/\\/g, "/");
+      const basename = path.basename(relative, path.extname(relative));
+      const needles = [...new Set([symbol, relative, `./${basename}`, `../${basename}`, basename].filter(Boolean))];
+      const references = [];
+      for (const needle of needles) {
+        let hits = RG_BIN ? await ripgrepGrep(rootDir, escapeRegex(needle), { regex: true, limit, glob: null }) : null;
+        if (!hits) hits = await searchTree(rootDir, escapeRegex(needle), { regex: true, limit, glob: null });
+        for (const hit of hits) if (hit.path !== relative && !references.some((item) => item.path === hit.path && item.line === hit.line)) references.push({ ...hit, matched: needle });
+        if (references.length >= limit) break;
+      }
+      return jsonResult({ path: relative, symbol: symbol || null, direct_reference_count: references.length, references: references.slice(0, limit), note: "Static impact estimate only; verification commands remain explicit-only." });
+    }
+  );
+
+  reg(
+    mcp,
+    "go_to_definition",
+    {
+      title: "Go to symbol definition",
+      description: "Resolve likely definitions for a symbol using the cached repository symbol index. Returns all plausible matches instead of guessing.",
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
+      inputSchema: {
+        symbol: z.string().min(1),
+        path: z.string().optional(),
+        limit: z.number().int().min(1).max(100).optional()
+      }
+    },
+    async ({ symbol, path: rel = ".", limit = 30 }) => {
+      const rootDir = resolvePath(rel);
+      const idx = await buildRepoIndex(rootDir, { depth: 8, maxEntries: 5000, includeSymbols: true, symbolMaxFiles: 3000, symbolMaxMatches: 20000, refresh: false });
+      const exact = (idx.symbols || []).filter((item) => String(item.name || "") === symbol);
+      const insensitive = exact.length ? [] : (idx.symbols || []).filter((item) => String(item.name || "").toLowerCase() === symbol.toLowerCase());
+      const matches = [...exact, ...insensitive].slice(0, limit);
+      return jsonResult({ symbol, count: matches.length, ambiguous: matches.length > 1, engine: "repository-symbol-index", definitions: matches });
+    }
+  );
+
+  reg(
+    mcp,
+    "parallel_inspect",
+    {
+      title: "Parallel repository inspection",
+      description: "Run deterministic repository inspectors concurrently: project graph, instruction chain, Git diff/review metadata, symbols, important files, and language service availability.",
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
+      inputSchema: {
+        path: z.string().optional(),
+        target_path: z.string().optional(),
+        diff_scope: z.enum(["working-tree", "staged", "uncommitted", "commit", "branch", "task", "last-transaction", "transaction"]).optional(),
+        base: z.string().optional(),
+        commit: z.string().optional(),
+        task_id: z.string().optional(),
+        transaction_id: z.string().optional(),
+        include_symbols: z.boolean().optional(),
+        max_symbols: z.number().int().min(1).max(1000).optional()
+      }
+    },
+    async ({ path: rel = ".", target_path = ".", diff_scope = "uncommitted", base, commit, task_id, transaction_id, include_symbols = true, max_symbols = 300 }) => {
+      const rootDir = resolvePath(rel);
+      const [graph, instructions, collected, important, index] = await Promise.all([
+        buildProjectGraph(rootDir, { maxDepth: 7, maxFiles: 20000 }),
+        discoverInstructionChain(PRIMARY_ROOT, target_path, { maxChars: 24000 }),
+        collectGitDiff({ rootDir, scope: diff_scope, base, commit, taskId: task_id, transactionId: transaction_id, includeUntracked: true }),
+        collectImportantFiles(rootDir),
+        include_symbols ? buildRepoIndex(rootDir, { depth: 8, maxEntries: 5000, includeSymbols: true, symbolMaxFiles: 2000, symbolMaxMatches: max_symbols, refresh: false }) : Promise.resolve(null)
+      ]);
+      const diffAnalysis = analyzeDiff(collected.diff || "");
+      return jsonResult({
+        root: toRel(rootDir),
+        projects: graph.projects,
+        commands: graph.commands,
+        instruction_chain: instructions.instructions,
+        diff: { ...collected, diff: (collected.diff || "").slice(0, 150000), deterministic_findings: diffAnalysis.findings },
+        important_files: important.slice(0, 100),
+        symbols: include_symbols ? (index?.symbols || []).slice(0, max_symbols) : [],
+        language_services: {
+          tree_sitter: hasCommand("tree-sitter"),
+          typescript: hasCommand("typescript-language-server"),
+          python: hasCommand("pyright-langserver") || hasCommand("pylsp"),
+          rust: hasCommand("rust-analyzer"),
+          go: hasCommand("gopls")
+        },
+        verification_instruction: EXPLICIT_VERIFICATION_INSTRUCTION
+      });
+    }
+  );
+
+  reg(
+    mcp,
+    "language_service_status",
+    {
+      title: "Language service adapters",
+      description: "Report optional Tree-sitter and common LSP executables. LSP servers start only when explicitly requested by a future adapter/tool.",
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
+      inputSchema: {}
+    },
+    async () => jsonResult({
+      tree_sitter: { available: hasCommand("tree-sitter"), mode: hasCommand("tree-sitter") ? "optional" : "builtin-regex-fallback" },
+      lsp: {
+        typescript: hasCommand("typescript-language-server"),
+        python: hasCommand("pyright-langserver") || hasCommand("pylsp"),
+        rust: hasCommand("rust-analyzer"),
+        go: hasCommand("gopls"),
+        dart: hasCommand("dart")
+      },
+      auto_start: false
+    })
   );
 
   reg(
@@ -3979,102 +4969,107 @@ async function dryRunUnifiedDiff(diffText) {
   return results;
 }
 
+function patchOperationSchema() {
+  return z.object({
+    op: z.enum(["create", "update", "delete", "rename"]),
+    path: z.string().min(1),
+    content: z.string().optional(),
+    rename_to: z.string().optional(),
+    recursive: z.boolean().optional(),
+    overwrite: z.boolean().optional(),
+    expected_sha256: z.string().optional(),
+    edits: z.array(z.object({
+      old_text: z.string().min(1),
+      new_text: z.string(),
+      replace_all: z.boolean().optional(),
+      expected_occurrences: z.number().int().min(1).optional(),
+      near_line: z.number().int().min(1).optional()
+    })).optional()
+  });
+}
+
 function registerPatchEngineTools(mcp) {
   reg(
     mcp,
     "preview_patch",
     {
-      title: "Preview patch (dry run)",
-      description: "DRY RUN — compute what a patch/operations would change WITHOUT writing. Returns per-file match status and before/after summary.",
+      title: "Preview atomic patch",
+      description: "Validate a unified diff or structured operation batch without writing. Detects create collisions, stale hashes, missing/ambiguous hunks, and rename collisions.",
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
       inputSchema: {
-        diff: z.string().optional().describe("Unified diff to preview."),
-        operations: z.array(z.object({
-          op: z.enum(["create", "update", "delete", "rename"]),
-          path: z.string().min(1),
-          content: z.string().optional(),
-          rename_to: z.string().optional(),
-          recursive: z.boolean().optional(),
-          edits: z.array(z.object({ old_text: z.string().min(1), new_text: z.string(), replace_all: z.boolean().optional() })).optional()
-        })).optional()
+        diff: z.string().optional(),
+        operations: z.array(patchOperationSchema()).optional()
       }
     },
-    async ({ diff, operations }) => {
-      if (diff && diff.trim()) {
-        const results = await dryRunUnifiedDiff(diff);
-        const allOk = results.every((r) => r.ok);
-        return jsonResult({ ok: allOk, mode: "diff", files: results });
-      }
-      if (!operations || !operations.length) throw new Error("Provide diff or operations.");
-      const results = [];
-      for (const op of operations) {
-        try {
-          const target = resolvePath(op.path);
-          if (op.op === "create") {
-            results.push({ op: "create", path: op.path, ok: true, bytes: Buffer.byteLength(op.content ?? "") });
-          } else if (op.op === "update") {
-            const content = await readFile(target, "utf8");
-            const checks = (op.edits || []).map((e) => ({ old_text_chars: e.old_text.length, match: content.includes(e.old_text), new_text_chars: e.new_text.length }));
-            const allMatch = checks.every((c) => c.match);
-            results.push({ op: "update", path: op.path, ok: allMatch, edits: checks, conflict: allMatch ? null : "old_text not found" });
-          } else if (op.op === "delete") {
-            const exists = existsSync(target);
-            results.push({ op: "delete", path: op.path, ok: exists, conflict: exists ? null : "file not found" });
-          } else if (op.op === "rename") {
-            const exists = existsSync(target);
-            results.push({ op: "rename", path: op.path, rename_to: op.rename_to, ok: exists, conflict: exists ? null : "source not found" });
-          }
-        } catch (err) {
-          results.push({ op: op.op, path: op.path, ok: false, conflict: String(err?.message || err) });
-        }
-      }
-      return jsonResult({ ok: results.every((r) => r.ok), mode: "operations", files: results });
-    }
+    async ({ diff, operations }) => jsonResult(diff?.trim()
+      ? { mode: "diff", ...(await MUTATION_ENGINE.previewDiff(diff)) }
+      : { mode: "operations", ...(await MUTATION_ENGINE.previewOperations(operations || [])) })
   );
 
   reg(
     mcp,
     "validate_patch",
     {
-      title: "Validate patch",
-      description: "Like preview_patch but only returns ok status and a list of conflicts (ambiguous/not-found hunks). Fast check before apply.",
+      title: "Validate atomic patch",
+      description: "Fast conflict-only validation for the atomic mutation engine.",
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
       inputSchema: {
         diff: z.string().optional(),
-        operations: z.array(z.object({
-          op: z.enum(["create", "update", "delete", "rename"]),
-          path: z.string().min(1),
-          content: z.string().optional(),
-          rename_to: z.string().optional(),
-          edits: z.array(z.object({ old_text: z.string().min(1), new_text: z.string() })).optional()
-        })).optional()
+        operations: z.array(patchOperationSchema()).optional()
       }
     },
     async ({ diff, operations }) => {
-      if (diff && diff.trim()) {
-        const results = await dryRunUnifiedDiff(diff);
-        const conflicts = results.filter((r) => !r.ok).map((r) => ({ path: r.path, conflict: r.conflict }));
-        return jsonResult({ ok: conflicts.length === 0, conflicts });
-      }
-      if (!operations || !operations.length) throw new Error("Provide diff or operations.");
-      const conflicts = [];
-      for (const op of operations) {
-        try {
-          const target = resolvePath(op.path);
-          if (op.op === "update") {
-            const content = await readFile(target, "utf8");
-            for (const e of op.edits || []) {
-              if (!content.includes(e.old_text)) {
-                conflicts.push({ path: op.path, conflict: `old_text not found: "${e.old_text.slice(0, 60)}..."` });
-              }
-            }
-          } else if (op.op === "delete" || op.op === "rename") {
-            if (!existsSync(target)) conflicts.push({ path: op.path, conflict: "file not found" });
-          }
-        } catch (err) {
-          conflicts.push({ path: op.path, conflict: String(err?.message || err) });
-        }
-      }
-      return jsonResult({ ok: conflicts.length === 0, conflicts });
+      const preview = diff?.trim()
+        ? await MUTATION_ENGINE.previewDiff(diff)
+        : await MUTATION_ENGINE.previewOperations(operations || []);
+      return jsonResult({ ok: preview.ok, conflicts: preview.ok ? [] : [{ conflict: preview.conflict }] });
     }
+  );
+
+  reg(
+    mcp,
+    "transaction_list",
+    {
+      title: "List mutation transactions",
+      description: "List recent atomic code mutation transactions and their status.",
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
+      inputSchema: { limit: z.number().int().min(1).max(100).optional() }
+    },
+    async ({ limit = 50 }) => jsonResult({ transactions: await MUTATION_ENGINE.list(limit) })
+  );
+
+  reg(
+    mcp,
+    "transaction_get",
+    {
+      title: "Get mutation transaction",
+      description: "Read one atomic mutation transaction including operations, results, and rollback metadata.",
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
+      inputSchema: { transaction_id: z.string().min(1) }
+    },
+    async ({ transaction_id }) => jsonResult(await MUTATION_ENGINE.get(transaction_id))
+  );
+
+  reg(
+    mcp,
+    "transaction_undo",
+    {
+      title: "Undo mutation transaction",
+      description: "Restore the complete snapshot for one transaction. Without an id, undoes the latest transaction.",
+      inputSchema: { transaction_id: z.string().optional(), task_id: z.string().optional(), force: z.boolean().optional() }
+    },
+    async ({ transaction_id, force = false }) => jsonResult(await MUTATION_ENGINE.undo(transaction_id, { force }))
+  );
+
+  reg(
+    mcp,
+    "transaction_redo",
+    {
+      title: "Redo mutation transaction",
+      description: "Reapply an undone transaction after validating the current workspace state.",
+      inputSchema: { transaction_id: z.string().min(1), task_id: z.string().optional() }
+    },
+    async ({ transaction_id }) => jsonResult(await MUTATION_ENGINE.redo(transaction_id))
   );
 
   reg(
@@ -4082,42 +5077,10 @@ function registerPatchEngineTools(mcp) {
     "undo_last_patch",
     {
       title: "Undo last patch",
-      description: "Restore files from the most recent backup batch. Reverts modified files, recreates deleted files, removes created files.",
+      description: "Backward-compatible alias for transaction_undo on the latest transaction.",
       inputSchema: {}
     },
-    async () => {
-      const history = await readPatchHistory();
-      if (!history.length) throw new Error("No patch history to undo.");
-      const batch = history[history.length - 1];
-      const restored = [];
-      const errors = [];
-      for (const f of batch.files) {
-        try {
-          const abs = resolvePath(f.path);
-          if (f.hadContent && f.backupFile && existsSync(f.backupFile)) {
-            await rm(abs, { recursive: true, force: true });
-            await mkdir(path.dirname(abs), { recursive: true });
-            if (f.kind === "directory") await cp(f.backupFile, abs, { recursive: true, force: true });
-            else if (f.kind === "file") await copyFile(f.backupFile, abs);
-            else await writeFile(abs, await readFile(f.backupFile, "utf8"), "utf8");
-            restored.push({ path: f.path, action: "restored" });
-          } else if (!f.hadContent && existsSync(abs)) {
-            await rm(abs, { recursive: true, force: true });
-            restored.push({ path: f.path, action: "removed (was created)" });
-          } else {
-            restored.push({ path: f.path, action: "skipped (no backup)" });
-          }
-        } catch (err) {
-          errors.push({ path: f.path, error: String(err?.message || err) });
-        }
-      }
-      // Pop the history entry
-      history.pop();
-      await writePatchHistory(history);
-      // Clean up backup dir
-      try { await rm(batch.batchDir, { recursive: true, force: true }); } catch { /* ok */ }
-      return jsonResult({ ok: errors.length === 0, tool: batch.tool, ts: batch.ts, restored, errors });
-    }
+    async () => jsonResult(await MUTATION_ENGINE.undo())
   );
 }
 
@@ -4245,6 +5208,23 @@ async function runGatedCommand(command, cwd, timeoutMs = 120_000) {
   return { ok, command, exit_code: result.exit_code, timed_out: result.timed_out, summary, failures };
 }
 
+async function runGatedArgv(file, args, cwd, timeoutMs = 120_000) {
+  const command = [file, ...args].map((part) => JSON.stringify(String(part))).join(" ");
+  const result = await spawnCapture(file, args, cwd, timeoutMs);
+  const output = `${result.stdout || ""}\n${result.stderr || ""}`.trim();
+  const ok = result.exit_code === 0;
+  return {
+    ok,
+    command,
+    file,
+    args,
+    exit_code: result.exit_code,
+    timed_out: result.timed_out,
+    summary: output.slice(0, 3000),
+    failures: ok ? [] : parseTestFailures(output)
+  };
+}
+
 function registerTestRunnerTools(mcp) {
   reg(
     mcp,
@@ -4274,9 +5254,19 @@ function registerTestRunnerTools(mcp) {
     },
     async ({ path: rel = "." }) => {
       const rootDir = resolvePath(rel);
-      const cmds = await getTestCommandsMerged(rootDir);
-      const profile = await detectProjectProfile(rootDir);
-      return jsonResult({ commands: cmds, languages: profile.languages, packageManagers: profile.packageManagers });
+      const [cmds, profile, graph] = await Promise.all([
+        getTestCommandsMerged(rootDir),
+        detectProjectProfile(rootDir),
+        buildProjectGraph(rootDir, { maxDepth: 7, maxFiles: 20000 })
+      ]);
+      return jsonResult({
+        commands: cmds,
+        command_list: graph.commands,
+        projects: graph.projects.map((project) => ({ id: project.id, path: project.path, language: project.language, packageManager: project.packageManager, command_count: project.commands?.length || 0 })),
+        languages: [...new Set([...(profile.languages || []), ...graph.projects.map((project) => project.language).filter(Boolean)])],
+        packageManagers: [...new Set([...(profile.packageManagers || []), ...graph.projects.map((project) => project.packageManager).filter(Boolean)])],
+        note: EXPLICIT_VERIFICATION_INSTRUCTION
+      });
     }
   );
 
@@ -4288,6 +5278,7 @@ function registerTestRunnerTools(mcp) {
       description: "Run the detected (or provided) test command. Returns {ok, exit_code, summary, failures}.",
       inputSchema: {
         command: z.string().optional().describe("Override detected test command."),
+        task_id: z.string().optional().describe("Task whose dashboard should receive the explicit verification result."),
         cwd: z.string().optional(),
         timeout_ms: z.number().int().min(1000).max(600000).optional()
       }
@@ -4314,6 +5305,7 @@ function registerTestRunnerTools(mcp) {
       description: "Run the detected (or provided) build command. Returns {ok, exit_code, summary, failures}.",
       inputSchema: {
         command: z.string().optional(),
+        task_id: z.string().optional(),
         cwd: z.string().optional(),
         timeout_ms: z.number().int().min(1000).max(600000).optional()
       }
@@ -4339,6 +5331,7 @@ function registerTestRunnerTools(mcp) {
       description: "Run the detected (or provided) lint command. Returns {ok, exit_code, summary, failures}.",
       inputSchema: {
         command: z.string().optional(),
+        task_id: z.string().optional(),
         cwd: z.string().optional(),
         timeout_ms: z.number().int().min(1000).max(600000).optional()
       }
@@ -4363,6 +5356,7 @@ function registerTestRunnerTools(mcp) {
       title: "Run changed tests",
       description: "Run tests for changed files only (git diff + untracked). Maps src files to test files heuristically; falls back to full test suite.",
       inputSchema: {
+        task_id: z.string().optional(),
         cwd: z.string().optional(),
         timeout_ms: z.number().int().min(1000).max(600000).optional()
       }
@@ -4405,28 +5399,88 @@ function registerTestRunnerTools(mcp) {
         return jsonResult({ ...res, strategy: "full_fallback", changed_files: changedFiles.length });
       }
 
-      // Build targeted test command
-      const fileList = [...testFiles].join(" ");
-      let cmd;
-      if (cmds.test && cmds.test.startsWith("npm")) {
-        // Jest / Vitest — pass file list
-        cmd = `${cmds.test} -- ${fileList}`;
-      } else if (cmds.test && cmds.test.includes("pytest")) {
-        cmd = `python -m pytest ${fileList}`;
+      // Build targeted tests with argv, never by concatenating Git-controlled filenames into a shell string.
+      const selectedFiles = [...testFiles];
+      let res;
+      const npmText = String(cmds.test || "");
+      const npmMatch = npmText.match(/^npm(?:\.cmd)?\s+(test|run\s+([^\s]+))$/i);
+      if (npmMatch) {
+        const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+        const baseArgs = npmMatch[1].toLowerCase() === "test" ? ["test"] : ["run", npmMatch[2]];
+        res = await runGatedArgv(npm, [...baseArgs, "--", ...selectedFiles], rootDir, timeout_ms);
+      } else if (npmText.includes("pytest")) {
+        const python = process.platform === "win32" ? "python.exe" : "python";
+        res = await runGatedArgv(python, ["-m", "pytest", ...selectedFiles], rootDir, timeout_ms);
       } else {
-        cmd = cmds.test || `echo "No test command"`;
+        // Unknown runners receive the normal full command rather than unsafe filename interpolation.
+        if (!cmds.test) throw new Error("No supported targeted test runner detected.");
+        assertCommandAllowed(cmds.test);
+        res = await runGatedCommand(cmds.test, rootDir, timeout_ms);
+        res.strategy = "full_fallback_unknown_runner";
       }
-
-      assertCommandAllowed(cmd);
-      const res = await runGatedCommand(cmd, rootDir, timeout_ms);
-      return jsonResult({ ...res, strategy: "targeted", test_files: [...testFiles], changed_files: changedFiles });
+      return jsonResult({ ...res, strategy: res.strategy || "targeted_argv", test_files: selectedFiles, changed_files: changedFiles });
     }
   );
 }
 
 // ============================================================================
-// v2.4 — Review Mode
+// v2.4 / v5 — Review Mode and rich diff scopes
 // ============================================================================
+
+async function untrackedDiff(rootDir, limit = 100) {
+  const listed = await spawnCapture("git", ["ls-files", "--others", "--exclude-standard"], rootDir, DEFAULT_CMD_TIMEOUT);
+  const files = (listed.stdout || "").split(/\r?\n/).filter(Boolean).slice(0, limit);
+  const chunks = [];
+  for (const file of files) {
+    const diff = await spawnCapture("git", ["diff", "--no-index", "--", "/dev/null", file], rootDir, DEFAULT_CMD_TIMEOUT);
+    if (diff.stdout) chunks.push(diff.stdout);
+  }
+  return { files, diff: chunks.join("\n") };
+}
+
+async function collectGitDiff({ rootDir, scope = "working-tree", base, commit, includeUntracked = false, taskId, transactionId }) {
+  let args;
+  let label = scope;
+  if (scope === "staged") args = ["diff", "--staged"];
+  else if (scope === "uncommitted") args = ["diff", "HEAD"];
+  else if (scope === "commit") {
+    if (!commit) throw new Error("commit scope requires commit.");
+    args = ["show", "--format=", "--find-renames", commit];
+    label = `commit:${commit}`;
+  } else if (scope === "branch") {
+    const resolvedBase = base || "main";
+    args = ["diff", `${resolvedBase}...HEAD`];
+    label = `branch:${resolvedBase}...HEAD`;
+  } else if (scope === "last-transaction" || scope === "transaction") {
+    const record = transactionId ? await MUTATION_ENGINE.get(transactionId) : (await MUTATION_ENGINE.list(1))[0];
+    if (!record) return { ok: true, scope, label, diff: "", files: [], untracked: [] };
+    const full = await MUTATION_ENGINE.get(record.id);
+    const paths = [...new Set((full.snapshots || []).map((item) => toRel(item.path)).filter(Boolean))];
+    args = ["diff", "--", ...paths];
+    label = `transaction:${record.id}`;
+  } else if (scope === "task") {
+    const task = taskId ? await TASK_RUNTIME.getTask(taskId) : await TASK_RUNTIME.getCurrentTask();
+    if (!task) return { ok: true, scope, label, diff: "", files: [], untracked: [] };
+    const paths = [...new Set((task.changes || []).map((item) => item.path).filter(Boolean))];
+    if (!paths.length) return { ok: true, scope, label: `task:${task.id}`, diff: "", files: [], untracked: [] };
+    args = ["diff", "--", ...paths];
+    label = `task:${task.id}`;
+  } else {
+    args = ["diff"];
+    scope = "working-tree";
+  }
+  const result = await spawnCapture("git", args, rootDir, DEFAULT_CMD_TIMEOUT);
+  if (result.exit_code !== 0) return { ok: false, scope, label, error: result.stderr || "git diff failed", diff: "", files: [], untracked: [] };
+  let diff = result.stdout || "";
+  let untracked = [];
+  if (includeUntracked || scope === "uncommitted") {
+    const extra = await untrackedDiff(rootDir);
+    untracked = extra.files;
+    if (extra.diff) diff += `${diff ? "\n" : ""}${extra.diff}`;
+  }
+  const summary = analyzeDiff(diff).summary;
+  return { ok: true, scope, label, diff, files: summary.files || [], untracked, summary };
+}
 
 function registerReviewTools(mcp) {
   reg(
@@ -4450,27 +5504,92 @@ function registerReviewTools(mcp) {
     "review_diff",
     {
       title: "Review diff",
-      description: "Run heuristic code-review checks on git diff (working tree). Returns findings as P1/P2/P3 file:line items + verdict.",
+      description: "Run heuristic review on working tree, staged, all uncommitted including untracked, commit, branch, task, or transaction scope.",
       inputSchema: {
-        staged: z.boolean().optional().describe("Review staged changes instead of working tree."),
+        staged: z.boolean().optional().describe("Backward-compatible alias for scope=staged."),
+        scope: z.enum(["working-tree", "staged", "uncommitted", "commit", "branch", "task", "last-transaction", "transaction"]).optional(),
+        base: z.string().optional(),
+        commit: z.string().optional(),
+        task_id: z.string().optional(),
+        transaction_id: z.string().optional(),
+        include_untracked: z.boolean().optional(),
         cwd: z.string().optional()
       }
     },
-    async ({ staged = false, cwd = "." }) => {
+    async ({ staged = false, scope, base, commit, task_id, transaction_id, include_untracked = false, cwd = "." }) => {
       const rootDir = resolvePath(cwd);
-      const args = ["diff"];
-      if (staged) args.push("--staged");
-      const result = await spawnCapture("git", args, rootDir, DEFAULT_CMD_TIMEOUT);
-      if (result.exit_code !== 0) {
-        return jsonResult({ ok: false, error: "Not a git repo or git error.", diff: "" });
-      }
-      const diff = result.stdout || "";
+      const collected = await collectGitDiff({
+        rootDir,
+        scope: staged ? "staged" : (scope || "working-tree"),
+        base,
+        commit,
+        taskId: task_id,
+        transactionId: transaction_id,
+        includeUntracked: include_untracked
+      });
+      if (!collected.ok) return jsonResult(collected);
+      const diff = collected.diff || "";
       if (!diff.trim()) return jsonResult({ ok: true, verdict: "CLEAN", summary: { changed_files: 0, source_files: 0, test_files: 0, config_files: 0, added_lines: 0, deleted_lines: 0, files: [] }, findings: [], message: "No changes in working tree." });
 
       const { summary, findings } = analyzeDiff(diff);
       const p1 = findings.filter((f) => f.priority === "P1").length;
       const verdict = p1 > 0 ? "BLOCK" : findings.length > 0 ? "WARN" : "PASS";
-      return jsonResult({ ok: verdict !== "BLOCK", verdict, summary, findings_count: findings.length, findings: findings.slice(0, 100), p1, p2: findings.filter((f) => f.priority === "P2").length, p3: findings.filter((f) => f.priority === "P3").length });
+      return jsonResult({ ok: verdict !== "BLOCK", verdict, scope: collected.scope, label: collected.label, summary, untracked: collected.untracked, findings_count: findings.length, findings: findings.slice(0, 100), p1, p2: findings.filter((f) => f.priority === "P2").length, p3: findings.filter((f) => f.priority === "P3").length });
+    }
+  );
+
+  reg(
+    mcp,
+    "diff_collect",
+    {
+      title: "Collect review diff",
+      description: "Collect a normalized diff and metadata for semantic review by ChatGPT, including untracked files when requested.",
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
+      inputSchema: {
+        scope: z.enum(["working-tree", "staged", "uncommitted", "commit", "branch", "task", "last-transaction", "transaction"]).optional(),
+        base: z.string().optional(),
+        commit: z.string().optional(),
+        task_id: z.string().optional(),
+        transaction_id: z.string().optional(),
+        include_untracked: z.boolean().optional(),
+        cwd: z.string().optional(),
+        max_chars: z.number().int().min(1000).max(500000).optional()
+      }
+    },
+    async ({ scope = "uncommitted", base, commit, task_id, transaction_id, include_untracked = true, cwd = ".", max_chars = 200000 }) => {
+      const result = await collectGitDiff({ rootDir: resolvePath(cwd), scope, base, commit, taskId: task_id, transactionId: transaction_id, includeUntracked: include_untracked });
+      return jsonResult({ ...result, diff: (result.diff || "").slice(0, max_chars), truncated: (result.diff || "").length > max_chars });
+    }
+  );
+
+  reg(
+    mcp,
+    "review_prepare",
+    {
+      title: "Prepare semantic code review",
+      description: "Collect diff scope, deterministic findings, instruction hierarchy, and suggested review focus for ChatGPT semantic review.",
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
+      inputSchema: {
+        scope: z.enum(["working-tree", "staged", "uncommitted", "commit", "branch", "task", "last-transaction", "transaction"]).optional(),
+        base: z.string().optional(),
+        commit: z.string().optional(),
+        task_id: z.string().optional(),
+        transaction_id: z.string().optional(),
+        cwd: z.string().optional()
+      }
+    },
+    async ({ scope = "uncommitted", base, commit, task_id, transaction_id, cwd = "." }) => {
+      const rootDir = resolvePath(cwd);
+      const collected = await collectGitDiff({ rootDir, scope, base, commit, taskId: task_id, transactionId: transaction_id, includeUntracked: true });
+      const analysis = analyzeDiff(collected.diff || "");
+      const instructions = await discoverInstructionChain(PRIMARY_ROOT, cwd, { maxChars: 24000 });
+      return jsonResult({
+        ...collected,
+        diff: (collected.diff || "").slice(0, 250000),
+        deterministic_findings: analysis.findings,
+        instruction_chain: instructions.instructions.map(({ content, ...meta }) => meta),
+        review_focus: ["correctness", "regressions", "security", "error handling", "API compatibility", "concurrency", "unwanted scope"]
+      });
     }
   );
 
@@ -4688,6 +5807,398 @@ function registerPlannerTools(mcp) {
   );
 }
 
+function taskUiMeta(invoking, invoked) {
+  return {
+    ui: { resourceUri: COMPANION_WIDGET_URI, visibility: ["model", "app"] },
+    "openai/outputTemplate": COMPANION_WIDGET_URI,
+    "openai/widgetAccessible": true,
+    "openai/toolInvocation/invoking": invoking,
+    "openai/toolInvocation/invoked": invoked
+  };
+}
+
+function registerTaskRuntimeTools(mcp) {
+  reg(
+    mcp,
+    "task_analyze",
+    {
+      title: "Analyze task workflow",
+      description: "Classify a task as simple or complex and recommend fast or plan workflow without modifying code.",
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
+      inputSchema: { task: z.string().min(1) }
+    },
+    async ({ task }) => structuredJsonResult(await TASK_RUNTIME.analyzeTask(task))
+  );
+
+  reg(
+    mcp,
+    "task_create",
+    {
+      title: "Create coding task",
+      description: "Create a persistent coding task. Access defaults to full and workflow defaults to auto; verification remains explicit-only.",
+      inputSchema: {
+        title: z.string().optional(),
+        goal: z.string().min(1),
+        access_mode: z.enum(["full", "balanced", "safe"]).optional(),
+        workflow_mode: z.enum(["fast", "plan", "auto"]).optional(),
+        verification: z.object({ tests: z.boolean().optional(), lint: z.boolean().optional(), build: z.boolean().optional() }).optional()
+      }
+    },
+    async ({ title, goal, access_mode, workflow_mode, verification }) => {
+      const task = await TASK_RUNTIME.createTask({
+        title,
+        goal,
+        accessMode: access_mode || ACCESS_MODE,
+        workflowMode: workflow_mode || WORKFLOW_MODE,
+        verification
+      });
+      await HOOK_MANAGER.run("TaskCreated", { task });
+      return structuredJsonResult({ task, dashboard: await TASK_RUNTIME.getDashboard(task.id) });
+    }
+  );
+
+  reg(
+    mcp,
+    "task_get",
+    {
+      title: "Get coding task",
+      description: "Read one persistent coding task and its dashboard state.",
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
+      inputSchema: { task_id: z.string().min(1) }
+    },
+    async ({ task_id }) => structuredJsonResult({ task: await TASK_RUNTIME.getTask(task_id), dashboard: await TASK_RUNTIME.getDashboard(task_id) })
+  );
+
+  reg(
+    mcp,
+    "task_list",
+    {
+      title: "List coding tasks",
+      description: "List recent persistent coding tasks.",
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
+      inputSchema: { limit: z.number().int().min(1).max(100).optional() }
+    },
+    async ({ limit = 30 }) => structuredJsonResult({ tasks: await TASK_RUNTIME.listTasks(limit) })
+  );
+
+  reg(
+    mcp,
+    "task_update",
+    {
+      title: "Update coding task",
+      description: "Update task status, workflow/access mode, verification request, or dashboard preferences.",
+      inputSchema: {
+        task_id: z.string().min(1),
+        status: z.enum(["created", "analyzing", "planned", "implementing", "paused", "verifying", "changed", "completed", "failed", "cancelled"]).optional(),
+        title: z.string().optional(),
+        goal: z.string().optional(),
+        access_mode: z.enum(["full", "balanced", "safe"]).optional(),
+        workflow_mode: z.enum(["fast", "plan", "auto"]).optional(),
+        verification: z.object({ tests: z.boolean().optional(), lint: z.boolean().optional(), build: z.boolean().optional() }).optional(),
+        activity_message: z.string().optional()
+      },
+      _meta: taskUiMeta("Updating task dashboard…", "Task dashboard updated.")
+    },
+    async ({ task_id, status, title, goal, access_mode, workflow_mode, verification, activity_message }) => {
+      const task = await TASK_RUNTIME.updateTask(task_id, {
+        status,
+        title,
+        goal,
+        accessMode: access_mode,
+        workflowMode: workflow_mode,
+        verification,
+        activityMessage: activity_message
+      });
+      if (status === "completed") await HOOK_MANAGER.run("TaskCompleted", { task });
+      if (status === "failed") await HOOK_MANAGER.run("TaskFailed", { task });
+      return structuredJsonResult({ task, dashboard: await TASK_RUNTIME.getDashboard(task.id) });
+    }
+  );
+
+  reg(
+    mcp,
+    "plan_create",
+    {
+      title: "Create implementation plan",
+      description: "Create or version a structured plan for a persistent task and render a Plan card with an Implement button.",
+      inputSchema: {
+        task_id: z.string().min(1),
+        goal: z.string().optional(),
+        assumptions: z.array(z.string()).optional(),
+        scope: z.array(z.string()).optional(),
+        steps: z.array(z.string()).min(1),
+        risks: z.array(z.string()).optional(),
+        verification: z.object({ tests: z.boolean().optional(), lint: z.boolean().optional(), build: z.boolean().optional() }).optional()
+      },
+      _meta: taskUiMeta("Creating implementation plan…", "Plan ready.")
+    },
+    async ({ task_id, goal, assumptions, scope, steps, risks, verification }) => {
+      const plan = await TASK_RUNTIME.createPlan({ taskId: task_id, goal, assumptions, scope, steps, risks, verification });
+      await HOOK_MANAGER.run("PlanCreated", { plan });
+      const dashboard = await TASK_RUNTIME.getDashboard(task_id);
+      return {
+        structuredContent: { kind: "lca_plan_card", plan, dashboard },
+        content: [{ type: "text", text: `Plan v${plan.version} ready for task ${task_id}. Press Implement in the dashboard to continue without retyping the request.` }]
+      };
+    }
+  );
+
+  reg(
+    mcp,
+    "plan_update",
+    {
+      title: "Update implementation plan",
+      description: "Create a new immutable plan version while preserving previous versions.",
+      inputSchema: {
+        plan_id: z.string().min(1),
+        goal: z.string().optional(),
+        assumptions: z.array(z.string()).optional(),
+        scope: z.array(z.string()).optional(),
+        steps: z.array(z.union([z.string(), z.object({ text: z.string(), enabled: z.boolean().optional(), done: z.boolean().optional() })])).optional(),
+        risks: z.array(z.string()).optional(),
+        verification: z.object({ tests: z.boolean().optional(), lint: z.boolean().optional(), build: z.boolean().optional() }).optional()
+      },
+      _meta: taskUiMeta("Updating implementation plan…", "Plan updated.")
+    },
+    async ({ plan_id, ...patch }) => {
+      const plan = await TASK_RUNTIME.updatePlan(plan_id, patch);
+      await HOOK_MANAGER.run("PlanCreated", { plan, updated: true });
+      return {
+        structuredContent: { kind: "lca_plan_card", plan, dashboard: await TASK_RUNTIME.getDashboard(plan.taskId) },
+        content: [{ type: "text", text: `Plan updated to v${plan.version}.` }]
+      };
+    }
+  );
+
+  reg(
+    mcp,
+    "plan_history",
+    {
+      title: "Implementation plan history",
+      description: "List preserved versions for a plan or task.",
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
+      inputSchema: { plan_id: z.string().optional(), task_id: z.string().optional() }
+    },
+    async ({ plan_id, task_id }) => structuredJsonResult({ plans: await TASK_RUNTIME.planHistory({ planId: plan_id, taskId: task_id }) })
+  );
+
+  reg(
+    mcp,
+    "plan_get",
+    {
+      title: "Get implementation plan",
+      description: "Read a structured implementation plan by id.",
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
+      inputSchema: { plan_id: z.string().min(1) }
+    },
+    async ({ plan_id }) => structuredJsonResult(await TASK_RUNTIME.getPlan(plan_id))
+  );
+
+  reg(
+    mcp,
+    "task_prepare_implementation",
+    {
+      title: "Prepare task implementation",
+      description: "Validate the selected plan version/hash, mark the task implementing, and return the compact follow-up instruction for ChatGPT Web.",
+      inputSchema: {
+        task_id: z.string().min(1),
+        plan_id: z.string().optional(),
+        expected_plan_version: z.number().int().min(1).optional(),
+        expected_plan_hash: z.string().optional()
+      },
+      _meta: taskUiMeta("Preparing implementation…", "Implementation ready.")
+    },
+    async ({ task_id, plan_id, expected_plan_version, expected_plan_hash }) => {
+      await HOOK_MANAGER.run("BeforeImplement", { task_id, plan_id, expected_plan_version, expected_plan_hash });
+      const prepared = await TASK_RUNTIME.prepareImplementation({
+        taskId: task_id,
+        planId: plan_id,
+        expectedPlanVersion: expected_plan_version,
+        expectedPlanHash: expected_plan_hash
+      });
+      const dashboard = await TASK_RUNTIME.getDashboard(task_id);
+      const requestedVerification = Object.entries(prepared.task.verification || {})
+        .filter(([, value]) => value?.status === "requested")
+        .map(([kind]) => kind);
+      const followUpPrompt = [
+        `Implement LCA task ${prepared.task.id} using plan ${prepared.plan.id} version ${prepared.plan.version}.`,
+        "Read the task and plan with task_get and plan_get before editing.",
+        `Use access mode ${prepared.task.accessMode}.`,
+        requestedVerification.length
+          ? `After implementation, run only the explicitly selected verification: ${requestedVerification.join(", ")}.`
+          : EXPLICIT_VERIFICATION_INSTRUCTION
+      ].join("\n");
+      return {
+        structuredContent: { kind: "lca_implementation_ready", task: prepared.task, plan: prepared.plan, dashboard, follow_up_prompt: followUpPrompt },
+        content: [{ type: "text", text: followUpPrompt }]
+      };
+    }
+  );
+
+  reg(
+    mcp,
+    "task_context",
+    {
+      title: "Prepare task context",
+      description: "Build a compact implementation/resume context packet with task, plan, instructions, project graph, diff, transactions, and running sessions.",
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
+      inputSchema: {
+        task_id: z.string().min(1),
+        target_path: z.string().optional(),
+        include_diff: z.boolean().optional(),
+        max_diff_chars: z.number().int().min(1000).max(250000).optional()
+      }
+    },
+    async ({ task_id, target_path = ".", include_diff = true, max_diff_chars = 100000 }) => {
+      const task = await TASK_RUNTIME.getTask(task_id);
+      const [plan, instructions, graph, transactions] = await Promise.all([
+        task.planId ? TASK_RUNTIME.getPlan(task.planId).catch(() => null) : null,
+        discoverInstructionChain(PRIMARY_ROOT, target_path, { maxChars: 24000 }),
+        buildProjectGraph(PRIMARY_ROOT, { maxDepth: 7, maxFiles: 20000 }),
+        MUTATION_ENGINE.list(100)
+      ]);
+      const collected = include_diff
+        ? await collectGitDiff({ rootDir: PRIMARY_ROOT, scope: "task", taskId: task_id, includeUntracked: true })
+        : { ok: true, diff: "", files: [], untracked: [] };
+      const sessions = [...processes.values()]
+        .filter((proc) => proc.taskId === task_id)
+        .map((proc) => ({ id: proc.id, name: proc.name, command: proc.command, cwd: proc.cwd, status: proc.status, pid: proc.child?.pid, cursor: proc.cursorBase + proc.output.length }));
+      return jsonResult({
+        task,
+        plan,
+        instruction_chain: instructions,
+        projects: graph.projects.map((project) => ({ id: project.id, path: project.path, language: project.language, packageManager: project.packageManager, commands: project.commands })),
+        diff: (collected.diff || "").slice(0, max_diff_chars),
+        diff_truncated: (collected.diff || "").length > max_diff_chars,
+        untracked: collected.untracked || [],
+        transactions: transactions.filter((transaction) => task.transactions?.includes(transaction.id)),
+        sessions,
+        verification_instruction: EXPLICIT_VERIFICATION_INSTRUCTION
+      });
+    }
+  );
+
+  reg(
+    mcp,
+    "task_complete",
+    {
+      title: "Complete coding task",
+      description: "Mark a task complete and render its completion dashboard without claiming unrun verification passed.",
+      inputSchema: { task_id: z.string().min(1), message: z.string().optional() },
+      _meta: taskUiMeta("Completing task…", "Task completed.")
+    },
+    async ({ task_id, message }) => {
+      const task = await TASK_RUNTIME.updateTask(task_id, { status: "completed", activityType: "task_completed", activityMessage: message || "Task completed" });
+      await HOOK_MANAGER.run("TaskCompleted", { task });
+      return {
+        structuredContent: { kind: "lca_task_dashboard", dashboard: await TASK_RUNTIME.getDashboard(task_id) },
+        content: [{ type: "text", text: `Task ${task_id} completed. ${EXPLICIT_VERIFICATION_INSTRUCTION}` }]
+      };
+    }
+  );
+
+  reg(
+    mcp,
+    "task_cancel",
+    {
+      title: "Cancel coding task",
+      description: "Cancel a task and stop all terminal sessions associated with it.",
+      inputSchema: { task_id: z.string().min(1), reason: z.string().optional() },
+      _meta: taskUiMeta("Cancelling task…", "Task cancelled.")
+    },
+    async ({ task_id, reason }) => {
+      for (const proc of processes.values()) if (proc.taskId === task_id && proc.status === "running") killProcessTree(proc);
+      const task = await TASK_RUNTIME.updateTask(task_id, { status: "cancelled", activityType: "task_cancelled", activityMessage: reason || "Task cancelled" });
+      return {
+        structuredContent: { kind: "lca_task_dashboard", dashboard: await TASK_RUNTIME.getDashboard(task_id) },
+        content: [{ type: "text", text: `Task ${task_id} cancelled.` }]
+      };
+    }
+  );
+
+  reg(
+    mcp,
+    "task_resume",
+    {
+      title: "Resume coding task",
+      description: "Resume a persisted task and return the dashboard plus an instruction to load task_context before continuing.",
+      inputSchema: { task_id: z.string().min(1) },
+      _meta: taskUiMeta("Resuming task…", "Task resumed.")
+    },
+    async ({ task_id }) => {
+      const existing = await TASK_RUNTIME.getTask(task_id);
+      const status = existing.planId ? "implementing" : "analyzing";
+      const task = await TASK_RUNTIME.updateTask(task_id, { status, activityType: "task_resumed", activityMessage: "Task resumed" });
+      return {
+        structuredContent: { kind: "lca_task_dashboard", dashboard: await TASK_RUNTIME.getDashboard(task_id) },
+        content: [{ type: "text", text: `Resume task ${task_id}. Call task_context before editing. ${EXPLICIT_VERIFICATION_INSTRUCTION}` }]
+      };
+    }
+  );
+
+  reg(
+    mcp,
+    "task_dashboard",
+    {
+      title: "Open task dashboard",
+      description: "Render the Apps SDK task dashboard. Code mutation tools also render this automatically in every access/workflow mode.",
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
+      inputSchema: { task_id: z.string().optional() },
+      _meta: taskUiMeta("Opening task dashboard…", "Task dashboard ready.")
+    },
+    async ({ task_id }) => {
+      const dashboard = await TASK_RUNTIME.getDashboard(task_id);
+      return {
+        structuredContent: { kind: "lca_task_dashboard", dashboard },
+        content: [{ type: "text", text: dashboard.visible ? `Dashboard ready for task ${dashboard.task?.id}.` : "No active task dashboard." }]
+      };
+    }
+  );
+}
+
+function registerHookTools(mcp) {
+  reg(
+    mcp,
+    "hook_status",
+    {
+      title: "Lifecycle hook status",
+      description: "Show explicitly configured .agent/hooks.json lifecycle hooks. Hooks do not run unless present in that file.",
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
+      inputSchema: {}
+    },
+    async () => jsonResult(await HOOK_MANAGER.status())
+  );
+
+  reg(
+    mcp,
+    "hook_reload",
+    {
+      title: "Reload lifecycle hooks",
+      description: "Reload .agent/hooks.json after it changes.",
+      inputSchema: {}
+    },
+    async () => {
+      await HOOK_MANAGER.load(true);
+      return jsonResult({ ok: true, ...(await HOOK_MANAGER.status()) });
+    }
+  );
+
+  reg(
+    mcp,
+    "hook_run",
+    {
+      title: "Run lifecycle hook event",
+      description: "Explicitly run one configured lifecycle event with a JSON payload.",
+      inputSchema: {
+        event: z.enum(HOOK_EVENTS),
+        payload: z.record(z.any()).optional(),
+        await_non_blocking: z.boolean().optional()
+      }
+    },
+    async ({ event, payload = {}, await_non_blocking = false }) => jsonResult(await HOOK_MANAGER.run(event, payload, { awaitNonBlocking: await_non_blocking }))
+  );
+}
+
 // Also update checkpoint to snapshot current-task.json
 const _origCheckpoint = null; // we'll patch via the registration
 
@@ -4726,8 +6237,11 @@ const POLICY_RULES = {
 
 const STRICT_MUTATION_TOOLS = new Set([
   "save_note", "checkpoint", "write_file", "replace_in_file", "apply_patch", "make_dir", "move_path", "delete_path",
-  "run_command", "run_commands", "proc_start", "proc_stop", "git", "create_skill", "delete_skill", "undo_last_patch",
-  "quality_gate", "run_tests", "run_build", "run_lint", "run_changed_tests", "task_plan", "task_state", "decision_log"
+  "run_command", "run_commands", "proc_start", "proc_stop", "exec_start", "exec_write", "exec_signal", "exec_cancel",
+  "git", "create_skill", "delete_skill", "undo_last_patch", "transaction_undo", "transaction_redo",
+  "quality_gate", "run_tests", "run_build", "run_lint", "run_changed_tests",
+  "task_plan", "task_state", "task_create", "task_update", "plan_create", "task_prepare_implementation", "decision_log",
+  "task_create_worktree", "task_prepare_workspace", "task_apply_to_main", "task_discard_worktree", "hook_run", "hook_reload"
 ]);
 
 function approvalActionForTool(tool, args) {
@@ -4867,6 +6381,23 @@ async function checkApprovalExists(action) {
 function registerPolicyTools(mcp) {
   reg(
     mcp,
+    "sandbox_status",
+    {
+      title: "Execution boundary status",
+      description: "Report the command execution boundary. Full runs directly; balanced/safe use native Seatbelt/bubblewrap when available.",
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
+      inputSchema: { cwd: z.string().optional() }
+    },
+    async ({ cwd = "." }) => jsonResult({
+      ...boundaryStatus(ACCESS_MODE, resolvePath(cwd)),
+      access_mode: ACCESS_MODE,
+      policy: AGENT_POLICY,
+      full_bypass: ACCESS_MODE === "full"
+    })
+  );
+
+  reg(
+    mcp,
     "policy_status",
     {
       title: "Policy status",
@@ -4878,6 +6409,9 @@ function registerPolicyTools(mcp) {
       return jsonResult({
         policy: AGENT_POLICY,
         mode: MODE,
+        access_mode: ACCESS_MODE,
+        workflow_mode: WORKFLOW_MODE,
+        execution_boundary: boundaryStatus(ACCESS_MODE, PRIMARY_ROOT),
         description: rules.description,
         allowed: AGENT_POLICY === "full" ? ["*"] : AGENT_POLICY === "balanced" ? ["read", "write", "edit", "test", "build"] : ["read", "search", "analyze"],
         needs_approval: AGENT_POLICY === "balanced" ? ["delete_path", "npm/pip install", "curl/wget", "git push/fetch/pull", "risky run_commands batch"] : [],
@@ -5080,8 +6614,15 @@ function registerProfileTools(mcp) {
           path: path.join(PRIMARY_ROOT, ".agent", "profile.json"),
           message: "No profile.json found. Create one to configure ignored dirs, conventions, policy, and optional manual test commands.",
           schema: {
-            mode: "safe|full",
+            accessMode: "full|balanced|safe (default full)",
+            mode: "backward-compatible alias for accessMode",
+            workflowMode: "fast|plan|auto (default auto)",
             policy: "strict|balanced|full",
+            verification: { tests: "explicit", lint: "explicit", build: "explicit" },
+            dashboard: { showOnCodeChange: true, autoPipOnImplement: true, autoOpenOnComplete: false },
+            worktree: { mode: "when-needed|always|never" },
+            commandEnv: "inherit",
+            excludedCommandEnv: ["array of additional environment keys to strip"],
             extraRoots: ["array of extra root paths"],
             testCommands: { test: "command", build: "command", lint: "command" },
             ignoredDirs: ["array of dir names to skip"],

@@ -10,6 +10,7 @@ import path from "node:path";
 import { Script } from "node:vm";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { COMPANION_WIDGET_URI } from "./core/constants.mjs";
 
 const SERVER = path.resolve("server.mjs");
 let pass = 0;
@@ -133,8 +134,11 @@ try {
   const snap = await callJson(client, "workspace_snapshot", { depth: 3, max_entries: 120, include_symbols: true, refresh: true });
   check("snapshot kind is workspace_snapshot", snap.kind === "workspace_snapshot");
   check("snapshot is pro", snap.pro === true && snap.tier === "pro");
-  check("snapshot version is 4.4.0-pro", snap.version === "4.4.0-pro", `version=${snap.version}`);
-  check("snapshot includes safety model", snap.safety?.file_tools_root_confined === true && snap.safety?.command_os_sandbox === false);
+  check("snapshot version is 5.0.0-pro", snap.version === "5.0.0-pro", `version=${snap.version}`);
+  check("snapshot includes execution safety model", snap.safety?.file_tools_root_confined === true && typeof snap.safety?.command_os_sandbox === "boolean");
+  check("snapshot exposes full/auto runtime metadata", ["full", "balanced", "safe"].includes(snap.access_mode) && ["fast", "plan", "auto"].includes(snap.workflow_mode));
+  check("snapshot keeps verification explicit-only", snap.verification?.tests === "explicit" && snap.verification?.lint === "explicit" && snap.verification?.build === "explicit");
+  check("snapshot enables dashboard on every code change", snap.dashboard?.show_on_code_change === true && snap.dashboard?.all_modes === true);
   check("snapshot detects javascript", snap.profile?.languages?.includes("javascript"), JSON.stringify(snap.profile));
   check("snapshot omits fast-workflow commands", snap.commands === undefined, JSON.stringify(snap.commands));
   check("snapshot includes ripgrep status", typeof snap.ripgrep?.available === "boolean", JSON.stringify(snap.ripgrep));
@@ -187,10 +191,10 @@ try {
   const lcaInputTool = tools.tools?.find((t) => t.name === "lca_input");
   check("Apps SDK lca_input tool is listed", Boolean(lcaInputTool), JSON.stringify(tools.tools?.map((t) => t.name)));
   check("open_companion tool is removed", !openCompanionTool, JSON.stringify(tools.tools?.map((t) => t.name)));
-  check("Apps SDK render tool has output template", lcaInputTool?._meta?.["openai/outputTemplate"] === "ui://widget/lca-companion.html", JSON.stringify({ lcaInput: lcaInputTool?._meta }));
+  check("Apps SDK render tool has output template", lcaInputTool?._meta?.["openai/outputTemplate"] === COMPANION_WIDGET_URI, JSON.stringify({ lcaInput: lcaInputTool?._meta }));
   const resources = await client.listResources();
-  check("Apps SDK companion widget resource is listed", resources.resources?.some((r) => r.uri === "ui://widget/lca-companion.html"), JSON.stringify(resources.resources));
-  const widgetResource = await client.readResource({ uri: "ui://widget/lca-companion.html" });
+  check("Apps SDK companion widget resource is listed", resources.resources?.some((r) => r.uri === COMPANION_WIDGET_URI), JSON.stringify(resources.resources));
+  const widgetResource = await client.readResource({ uri: COMPANION_WIDGET_URI });
   const widgetHtml = widgetResource.contents?.[0]?.text || "";
   check("Apps SDK companion widget resource is html", widgetResource.contents?.[0]?.mimeType === "text/html;profile=mcp-app" && widgetHtml.includes("sendFollowUpMessage") && widgetHtml.includes("slash_commands") && widgetHtml.includes("suggestions.scrollTop = 0") && !widgetHtml.includes("Prompt output"), JSON.stringify(widgetResource.contents?.[0]));
   const widgetScript = widgetHtml.match(/<script>([\s\S]*?)<\/script>/)?.[1] || "";

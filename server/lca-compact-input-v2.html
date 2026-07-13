@@ -202,16 +202,173 @@
     body[data-display-mode="pip"] .shell { padding: 0; }
     body[data-display-mode="pip"] .composer { border-radius: 18px; box-shadow: none; }
     body[data-display-mode="pip"] .pill.status { display: none; }
+    .hidden { display: none !important; }
+    .dashboard {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      background: var(--bg);
+      box-shadow: 0 16px 42px rgba(0,0,0,.28);
+      overflow: hidden;
+    }
+    .dashboard-head {
+      display: flex;
+      gap: 10px;
+      align-items: flex-start;
+      padding: 13px 14px 10px;
+      border-bottom: 1px solid var(--line);
+    }
+    .dashboard-title-wrap { min-width: 0; flex: 1; }
+    .dashboard-title { font-size: 14px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .dashboard-meta { margin-top: 3px; color: var(--muted); font-size: 11px; }
+    .dashboard-status {
+      flex: 0 0 auto;
+      border-radius: 999px;
+      padding: 3px 8px;
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      background: rgba(16,163,127,.15);
+      color: #adf0dc;
+    }
+    .dashboard-tabs {
+      display: flex;
+      gap: 5px;
+      padding: 8px 12px 0;
+      overflow-x: auto;
+    }
+    .dashboard-tab {
+      flex: 0 0 auto;
+      border: 0;
+      border-radius: 999px;
+      background: transparent;
+      color: var(--muted);
+      padding: 5px 9px;
+      font-size: 10px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .dashboard-tab.active { background: rgba(255,255,255,.08); color: #fff; }
+    .dashboard-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 10px;
+      padding: 10px 12px;
+    }
+    .dashboard-card {
+      min-width: 0;
+      border: 1px solid var(--line);
+      border-radius: 13px;
+      background: var(--bg-soft);
+      padding: 9px 10px;
+    }
+    .dashboard-card h3 { margin: 0 0 7px; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
+    .dashboard-list { margin: 0; padding: 0; list-style: none; max-height: 126px; overflow: auto; }
+    .dashboard-list li { font-size: 11px; padding: 3px 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .dashboard-empty { color: var(--muted); font-size: 11px; }
+    .verification-row { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center; padding: 3px 0; font-size: 11px; }
+    .verification-state { color: var(--muted); }
+    .dashboard-actions {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 6px;
+      padding: 9px 12px 12px;
+      border-top: 1px solid var(--line);
+    }
+    .dash-btn {
+      height: 28px;
+      border: 1px solid rgba(255,255,255,.1);
+      border-radius: 999px;
+      background: transparent;
+      color: #e4e4e7;
+      padding: 0 10px;
+      font-size: 11px;
+      font-weight: 650;
+      cursor: pointer;
+    }
+    .dash-btn:hover { background: rgba(255,255,255,.06); }
+    .dash-btn.primary { background: var(--accent); border-color: var(--accent); color: white; }
+    .dash-btn.danger { color: #fda4af; }
+    .dash-btn:disabled { opacity: .5; cursor: wait; }
+    .dashboard-message { margin-left: auto; color: var(--muted); font-size: 11px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    body[data-display-mode="pip"] .dashboard { border-radius: 16px; box-shadow: none; }
+    body[data-display-mode="pip"] .dashboard-grid { grid-template-columns: 1fr; }
+    body[data-display-mode="fullscreen"] .dashboard-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    body[data-display-mode="fullscreen"] .dashboard-list { max-height: 48vh; }
     @media (max-width: 460px) {
       .bottom-row { gap: 6px; }
       .pill.context { max-width: 34%; }
       .pill.status { display: none; }
+      .dashboard-grid { grid-template-columns: 1fr; }
+      .dashboard-message { width: 100%; margin-left: 0; }
     }
   </style>
 </head>
 <body>
   <main class="shell">
-    <section class="composer" aria-label="LCA compact input">
+    <section id="dashboard" class="dashboard hidden" aria-label="LCA task dashboard">
+      <div class="dashboard-head">
+        <div class="dashboard-title-wrap">
+          <div id="dashboard-title" class="dashboard-title">Code changes</div>
+          <div id="dashboard-meta" class="dashboard-meta">Full · Auto</div>
+        </div>
+        <span id="dashboard-status" class="dashboard-status">changed</span>
+      </div>
+      <nav class="dashboard-tabs" aria-label="Dashboard sections">
+        <button class="dashboard-tab active" data-dashboard-tab="all" type="button">All</button>
+        <button class="dashboard-tab" data-dashboard-tab="plan" type="button">Plan</button>
+        <button class="dashboard-tab" data-dashboard-tab="changes" type="button">Changes</button>
+        <button class="dashboard-tab" data-dashboard-tab="activity" type="button">History</button>
+        <button class="dashboard-tab" data-dashboard-tab="terminal" type="button">Terminal</button>
+        <button class="dashboard-tab" data-dashboard-tab="verification" type="button">Verification</button>
+        <button class="dashboard-tab" data-dashboard-tab="context" type="button">Context</button>
+      </nav>
+      <div class="dashboard-grid">
+        <section id="plan-card" class="dashboard-card hidden" data-dashboard-section="plan">
+          <h3>Plan</h3>
+          <ol id="plan-list" class="dashboard-list"></ol>
+        </section>
+        <section id="changes-card" class="dashboard-card" data-dashboard-section="changes">
+          <h3>Changes</h3>
+          <ul id="change-list" class="dashboard-list"></ul>
+          <div id="change-empty" class="dashboard-empty">No file details available.</div>
+        </section>
+        <section id="activity-card" class="dashboard-card" data-dashboard-section="activity">
+          <h3>Activity / History</h3>
+          <ul id="activity-list" class="dashboard-list"></ul>
+        </section>
+        <section id="terminal-card" class="dashboard-card hidden" data-dashboard-section="terminal">
+          <h3>Terminal sessions</h3>
+          <ul id="terminal-list" class="dashboard-list"></ul>
+          <div id="terminal-empty" class="dashboard-empty">No terminal sessions.</div>
+        </section>
+        <section id="verification-card" class="dashboard-card" data-dashboard-section="verification">
+          <h3>Verification</h3>
+          <div class="verification-row"><label><input id="select-tests" type="checkbox"> Tests</label><span id="verify-tests" class="verification-state">Not requested</span></div>
+          <div class="verification-row"><label><input id="select-lint" type="checkbox"> Lint</label><span id="verify-lint" class="verification-state">Not requested</span></div>
+          <div class="verification-row"><label><input id="select-build" type="checkbox"> Build</label><span id="verify-build" class="verification-state">Not requested</span></div>
+        </section>
+        <section id="context-card" class="dashboard-card" data-dashboard-section="context">
+          <h3>Context</h3>
+          <ul id="context-list" class="dashboard-list"></ul>
+        </section>
+      </div>
+      <div class="dashboard-actions">
+        <button id="implement-task" class="dash-btn primary hidden" type="button">Implement</button>
+        <button id="edit-plan" class="dash-btn hidden" type="button">Edit plan</button>
+        <button id="open-dashboard" class="dash-btn" type="button">Open</button>
+        <button id="prepare-workspace" class="dash-btn" type="button">Workspace</button>
+        <button id="open-terminal" class="dash-btn" type="button">Terminal</button>
+        <button id="run-tests" class="dash-btn" type="button">Run tests</button>
+        <button id="run-lint" class="dash-btn" type="button">Run lint</button>
+        <button id="run-build" class="dash-btn" type="button">Run build</button>
+        <button id="undo-change" class="dash-btn danger" type="button">Undo</button>
+        <button id="show-composer" class="dash-btn" type="button">New task</button>
+        <span id="dashboard-message" class="dashboard-message"></span>
+      </div>
+    </section>
+    <section id="composer" class="composer" aria-label="LCA compact input">
       <div class="main-row">
         <div class="editor-shell">
           <pre id="input-highlight" class="input-highlight" aria-hidden="true"></pre>
@@ -236,6 +393,35 @@
   </main>
 
   <script>
+    const composer = document.getElementById('composer');
+    const dashboardEl = document.getElementById('dashboard');
+    const dashboardTitle = document.getElementById('dashboard-title');
+    const dashboardMeta = document.getElementById('dashboard-meta');
+    const dashboardStatus = document.getElementById('dashboard-status');
+    const dashboardMessage = document.getElementById('dashboard-message');
+    const dashboardTabs = [...document.querySelectorAll('[data-dashboard-tab]')];
+    const planCard = document.getElementById('plan-card');
+    const planList = document.getElementById('plan-list');
+    const changeList = document.getElementById('change-list');
+    const changeEmpty = document.getElementById('change-empty');
+    const activityList = document.getElementById('activity-list');
+    const contextList = document.getElementById('context-list');
+    const terminalCard = document.getElementById('terminal-card');
+    const terminalList = document.getElementById('terminal-list');
+    const terminalEmpty = document.getElementById('terminal-empty');
+    const selectTests = document.getElementById('select-tests');
+    const selectLint = document.getElementById('select-lint');
+    const selectBuild = document.getElementById('select-build');
+    const implementButton = document.getElementById('implement-task');
+    const editPlanButton = document.getElementById('edit-plan');
+    const openDashboardButton = document.getElementById('open-dashboard');
+    const prepareWorkspaceButton = document.getElementById('prepare-workspace');
+    const openTerminalButton = document.getElementById('open-terminal');
+    const runTestsButton = document.getElementById('run-tests');
+    const runLintButton = document.getElementById('run-lint');
+    const runBuildButton = document.getElementById('run-build');
+    const undoButton = document.getElementById('undo-change');
+    const showComposerButton = document.getElementById('show-composer');
     const input = document.getElementById('input');
     const inputHighlight = document.getElementById('input-highlight');
     const suggestions = document.getElementById('suggestions');
@@ -253,6 +439,10 @@
     let pendingTimer = null;
     let shownItems = [];
     let pipRequestPending = false;
+    let dashboardState = null;
+    let dashboardPlan = null;
+    let dashboardBusy = false;
+    let activeDashboardTab = 'all';
     let lastSearchKey = '';
     let searchSeq = 0;
     const suggestionCache = new Map();
@@ -276,6 +466,272 @@
     function setStatus(text, kind = '') {
       statusEl.textContent = text;
       statusEl.className = `pill status ${kind}`.trim();
+    }
+
+    function humanStatus(value) {
+      const text = typeof value === 'string' ? value : value?.status;
+      if (!text || text === 'not_requested') return 'Not requested';
+      return String(text).replaceAll('_', ' ');
+    }
+
+    function normalizeDashboardOutput(output) {
+      if (!output || typeof output !== 'object') return { dashboard: null, plan: null };
+      if (output.kind === 'lca_code_mutation') return { dashboard: output.dashboard || null, plan: output.plan || null };
+      if (output.kind === 'lca_plan_card') return { dashboard: output.dashboard || null, plan: output.plan || null };
+      if (output.kind === 'lca_implementation_ready') return { dashboard: output.dashboard || null, plan: output.plan || null, followUpPrompt: output.follow_up_prompt || '' };
+      if (output.kind === 'lca_task_dashboard') return { dashboard: output.dashboard || output, plan: output.plan || null };
+      if (output.dashboard?.kind === 'lca_task_dashboard') return { dashboard: output.dashboard, plan: output.plan || null };
+      return { dashboard: null, plan: null };
+    }
+
+    function persistWidgetState(extra = {}) {
+      if (!window.openai?.setWidgetState) return;
+      const state = {
+        taskId: dashboardState?.task?.id || null,
+        activeDashboardTab,
+        view: dashboardEl.classList.contains('hidden') ? 'composer' : 'dashboard',
+        updatedAt: new Date().toISOString(),
+        ...extra
+      };
+      try {
+        const pending = window.openai.setWidgetState(state);
+        pending?.catch?.(() => {});
+      } catch { /* optional host capability */ }
+    }
+
+    function setDashboardMessage(text, kind = '') {
+      dashboardMessage.textContent = text || '';
+      dashboardMessage.style.color = kind === 'error' ? 'var(--danger)' : kind === 'ok' ? '#adf0dc' : 'var(--muted)';
+    }
+
+    function appendListItem(list, text, title = text) {
+      const li = document.createElement('li');
+      li.textContent = text;
+      li.title = title || text;
+      list.append(li);
+    }
+
+    function showDashboardTab(tab = 'all') {
+      activeDashboardTab = tab;
+      for (const button of dashboardTabs) button.classList.toggle('active', button.dataset.dashboardTab === tab);
+      for (const section of dashboardEl.querySelectorAll('[data-dashboard-section]')) {
+        const sectionName = section.dataset.dashboardSection;
+        const permanentlyUnavailable = sectionName === 'plan' && !dashboardPlan?.steps?.length;
+        const terminalUnavailable = sectionName === 'terminal' && !terminalList.children.length && tab !== 'terminal';
+        section.classList.toggle('hidden', permanentlyUnavailable || terminalUnavailable || (tab !== 'all' && sectionName !== tab));
+      }
+      persistWidgetState();
+      notifyHeightSoon();
+    }
+
+    function renderDashboard(dashboard, plan = null) {
+      if (!dashboard?.visible || !dashboard.task) return false;
+      const previousTaskId = dashboardState?.task?.id || null;
+      dashboardState = dashboard;
+      const task = dashboard.task;
+      if (previousTaskId && previousTaskId !== task.id) dashboardPlan = null;
+      if (plan) dashboardPlan = plan;
+      if (!task.planId) dashboardPlan = null;
+      dashboardTitle.textContent = task.title || task.goal || 'Code changes';
+      dashboardMeta.textContent = `${task.accessMode || 'full'} · ${task.workflowMode || 'auto'} · ${task.complexity || 'task'}`;
+      dashboardStatus.textContent = task.status || 'changed';
+
+      changeList.replaceChildren();
+      const changes = Array.isArray(dashboard.changes) ? dashboard.changes : [];
+      changeEmpty.classList.toggle('hidden', changes.length > 0);
+      for (const change of changes.slice(-100)) appendListItem(changeList, change.path || 'changed file', `${change.tool || 'mutation'} · ${change.path || ''}`);
+
+      activityList.replaceChildren();
+      const activity = Array.isArray(dashboard.activity) ? dashboard.activity : [];
+      for (const item of activity.slice(-12).reverse()) appendListItem(activityList, item.message || item.summary || item.type || 'activity');
+      if (!activity.length) appendListItem(activityList, 'Dashboard opened');
+
+      const verification = dashboard.verification || {};
+      document.getElementById('verify-tests').textContent = humanStatus(verification.tests);
+      document.getElementById('verify-lint').textContent = humanStatus(verification.lint);
+      document.getElementById('verify-build').textContent = humanStatus(verification.build);
+      selectTests.checked = verification.tests?.status === 'requested';
+      selectLint.checked = verification.lint?.status === 'requested';
+      selectBuild.checked = verification.build?.status === 'requested';
+      const verificationEditable = task.status === 'planned' || task.status === 'created' || task.status === 'analyzing';
+      selectTests.disabled = !verificationEditable;
+      selectLint.disabled = !verificationEditable;
+      selectBuild.disabled = !verificationEditable;
+
+      contextList.replaceChildren();
+      appendListItem(contextList, `Task: ${task.id}`);
+      appendListItem(contextList, `Goal: ${task.goal || task.title || '—'}`);
+      appendListItem(contextList, `Plan: ${task.planId || 'none'}`);
+      appendListItem(contextList, `Updated: ${task.updatedAt || '—'}`);
+
+      const activePlan = plan || dashboardPlan;
+      const steps = Array.isArray(activePlan?.steps) ? activePlan.steps : [];
+      planCard.classList.toggle('hidden', steps.length === 0);
+      planList.replaceChildren();
+      for (const step of steps) {
+        const enabled = step?.enabled !== false;
+        appendListItem(planList, `${step?.done ? '✓' : enabled ? '○' : '–'} ${step?.text || step}`);
+      }
+      const canImplement = Boolean(activePlan?.id && task.status === 'planned');
+      implementButton.classList.toggle('hidden', !canImplement);
+      editPlanButton.classList.toggle('hidden', !activePlan?.id);
+      undoButton.disabled = !(Array.isArray(dashboard.transactions) && dashboard.transactions.length);
+
+      composer.classList.add('hidden');
+      dashboardEl.classList.remove('hidden');
+      showDashboardTab(activeDashboardTab);
+      persistWidgetState({ taskId: task.id, view: 'dashboard' });
+      return true;
+    }
+
+    async function refreshDashboard(taskId) {
+      const result = await callTool('task_dashboard', taskId ? { task_id: taskId } : {});
+      const normalized = normalizeDashboardOutput(result);
+      if (normalized.dashboard) renderDashboard(normalized.dashboard, normalized.plan);
+      return normalized.dashboard;
+    }
+
+    async function prepareAndImplement() {
+      if (dashboardBusy || !dashboardState?.task?.id || !dashboardPlan?.id) return;
+      dashboardBusy = true;
+      implementButton.disabled = true;
+      setDashboardMessage('Preparing implementation…');
+      try {
+        const result = await callTool('task_prepare_implementation', {
+          task_id: dashboardState.task.id,
+          plan_id: dashboardPlan.id,
+          expected_plan_version: dashboardPlan.version,
+          expected_plan_hash: dashboardPlan.hash
+        });
+        const normalized = normalizeDashboardOutput(result);
+        if (normalized.dashboard) renderDashboard(normalized.dashboard, normalized.plan || dashboardPlan);
+        const prompt = normalized.followUpPrompt || result.follow_up_prompt;
+        if (!prompt || !window.openai?.sendFollowUpMessage) throw new Error('Implementation follow-up unavailable');
+        if (dashboardState?.ui?.autoPipOnImplement && window.openai?.requestDisplayMode) {
+          try { await requestPipMode(); } catch { /* inline dashboard remains available */ }
+        }
+        await window.openai.sendFollowUpMessage({ prompt, scrollToBottom: true });
+        setDashboardMessage('Implementation sent', 'ok');
+      } catch (error) {
+        setDashboardMessage(error instanceof Error ? error.message : String(error), 'error');
+      } finally {
+        dashboardBusy = false;
+        implementButton.disabled = false;
+      }
+    }
+
+    async function runVerification(kind) {
+      if (dashboardBusy) return;
+      dashboardBusy = true;
+      const button = kind === 'tests' ? runTestsButton : kind === 'lint' ? runLintButton : runBuildButton;
+      button.disabled = true;
+      setDashboardMessage(`Running ${kind}…`);
+      try {
+        const tool = kind === 'tests' ? 'run_tests' : kind === 'lint' ? 'run_lint' : 'run_build';
+        const result = await callTool(tool, dashboardState?.task?.id ? { task_id: dashboardState.task.id } : {});
+        const normalized = normalizeDashboardOutput(result);
+        if (normalized.dashboard) renderDashboard(normalized.dashboard, normalized.plan || dashboardPlan);
+        const operation = result?.operation || result;
+        const ok = operation?.ok === true;
+        const target = document.getElementById(`verify-${kind}`);
+        if (target) target.textContent = ok ? 'Passed' : 'Failed';
+        setDashboardMessage(ok ? `${kind} passed` : `${kind} failed`, ok ? 'ok' : 'error');
+      } catch (error) {
+        setDashboardMessage(error instanceof Error ? error.message : String(error), 'error');
+      } finally {
+        dashboardBusy = false;
+        button.disabled = false;
+      }
+    }
+
+    async function saveVerificationSelection() {
+      if (!dashboardState?.task?.id || dashboardBusy) return;
+      dashboardBusy = true;
+      for (const checkbox of [selectTests, selectLint, selectBuild]) checkbox.disabled = true;
+      setDashboardMessage('Saving verification choices…');
+      try {
+        const result = await callTool('task_update', {
+          task_id: dashboardState.task.id,
+          verification: { tests: selectTests.checked, lint: selectLint.checked, build: selectBuild.checked },
+          activity_message: 'Verification choices updated'
+        });
+        const normalized = normalizeDashboardOutput(result);
+        if (normalized.dashboard) renderDashboard(normalized.dashboard, dashboardPlan);
+        setDashboardMessage('Verification choices saved', 'ok');
+      } catch (error) {
+        setDashboardMessage(error instanceof Error ? error.message : String(error), 'error');
+      } finally {
+        dashboardBusy = false;
+      }
+    }
+
+    async function prepareTaskWorkspace() {
+      if (!dashboardState?.task?.id || dashboardBusy) return;
+      dashboardBusy = true;
+      prepareWorkspaceButton.disabled = true;
+      setDashboardMessage('Preparing workspace…');
+      try {
+        const result = await callTool('task_prepare_workspace', { task_id: dashboardState.task.id, mode: 'when-needed', create: true });
+        const worktreePath = result?.worktree?.path || result?.workspace;
+        setDashboardMessage(worktreePath ? `Workspace: ${worktreePath}` : 'Primary workspace selected', 'ok');
+        await refreshDashboard(dashboardState.task.id);
+      } catch (error) {
+        setDashboardMessage(error instanceof Error ? error.message : String(error), 'error');
+      } finally {
+        dashboardBusy = false;
+        prepareWorkspaceButton.disabled = false;
+      }
+    }
+
+    async function loadTerminalSessions() {
+      if (!dashboardState?.task?.id) return;
+      openTerminalButton.disabled = true;
+      setDashboardMessage('Loading terminals…');
+      try {
+        const result = await callTool('exec_list', { task_id: dashboardState.task.id });
+        const sessions = Array.isArray(result?.sessions) ? result.sessions : [];
+        terminalList.replaceChildren();
+        terminalEmpty.classList.toggle('hidden', sessions.length > 0);
+        for (const session of sessions) {
+          appendListItem(terminalList, `${session.status || 'unknown'} · ${session.name || session.command || session.session_id}`, session.command || session.session_id);
+        }
+        terminalCard.classList.remove('hidden');
+        showDashboardTab('terminal');
+        setDashboardMessage(sessions.length ? `${sessions.length} terminal session(s)` : 'No terminal sessions');
+      } catch (error) {
+        setDashboardMessage(error instanceof Error ? error.message : String(error), 'error');
+      } finally {
+        openTerminalButton.disabled = false;
+      }
+    }
+
+    function editCurrentPlan() {
+      if (!dashboardPlan?.id || !dashboardState?.task?.id) return;
+      dashboardEl.classList.add('hidden');
+      composer.classList.remove('hidden');
+      input.value = `/plan Update task ${dashboardState.task.id} plan ${dashboardPlan.id}: `;
+      syncInputUi();
+      input.focus();
+    }
+
+    async function undoLatestTransaction() {
+      const transactionId = dashboardState?.transactions?.at?.(-1);
+      if (!transactionId || dashboardBusy) return;
+      dashboardBusy = true;
+      undoButton.disabled = true;
+      setDashboardMessage('Undoing…');
+      try {
+        const result = await callTool('transaction_undo', { transaction_id: transactionId, task_id: dashboardState?.task?.id });
+        const operation = result?.operation || result;
+        if (operation?.ok !== true) throw new Error(operation?.error || 'Undo failed');
+        setDashboardMessage('Change undone', 'ok');
+        await refreshDashboard(dashboardState?.task?.id);
+      } catch (error) {
+        setDashboardMessage(error instanceof Error ? error.message : String(error), 'error');
+      } finally {
+        dashboardBusy = false;
+        undoButton.disabled = false;
+      }
     }
 
     function notifyHeightSoon() {
@@ -646,6 +1102,40 @@
 
     pipButton.addEventListener('click', requestPipMode);
     sendButton.addEventListener('click', sendCurrentTask);
+    for (const button of dashboardTabs) {
+      button.addEventListener('click', () => {
+        const tab = button.dataset.dashboardTab || 'all';
+        if (tab === 'terminal') loadTerminalSessions();
+        else showDashboardTab(tab);
+      });
+    }
+    implementButton.addEventListener('click', prepareAndImplement);
+    selectTests.addEventListener('change', saveVerificationSelection);
+    selectLint.addEventListener('change', saveVerificationSelection);
+    selectBuild.addEventListener('change', saveVerificationSelection);
+    prepareWorkspaceButton.addEventListener('click', prepareTaskWorkspace);
+    editPlanButton.addEventListener('click', editCurrentPlan);
+    openTerminalButton.addEventListener('click', loadTerminalSessions);
+    openDashboardButton.addEventListener('click', async () => {
+      if (!window.openai?.requestDisplayMode) return setDashboardMessage('Fullscreen unavailable', 'error');
+      try {
+        const result = await window.openai.requestDisplayMode({ mode: 'fullscreen' });
+        syncDisplayMode(result?.mode || window.openai?.displayMode);
+      } catch (error) {
+        setDashboardMessage(error instanceof Error ? error.message : String(error), 'error');
+      }
+    });
+    runTestsButton.addEventListener('click', () => runVerification('tests'));
+    runLintButton.addEventListener('click', () => runVerification('lint'));
+    runBuildButton.addEventListener('click', () => runVerification('build'));
+    undoButton.addEventListener('click', undoLatestTransaction);
+    showComposerButton.addEventListener('click', () => {
+      dashboardEl.classList.add('hidden');
+      composer.classList.remove('hidden');
+      input.focus();
+      persistWidgetState({ view: 'composer' });
+      notifyHeightSoon();
+    });
 
     window.addEventListener('openai:set_globals', () => {
       hydrateFromToolOutput();
@@ -653,11 +1143,20 @@
     }, { passive: true });
 
     function hydrateFromToolOutput() {
+      const savedState = window.openai?.widgetState || {};
+      if (typeof savedState.activeDashboardTab === 'string') activeDashboardTab = savedState.activeDashboardTab;
       const output = window.openai?.toolOutput || {};
       const inputArgs = window.openai?.toolInput || {};
+      const normalized = normalizeDashboardOutput(output);
+      if (normalized.dashboard && renderDashboard(normalized.dashboard, normalized.plan)) return;
       const initial = output.initial_input || inputArgs.initial_input || '';
       if (initial && !input.value) input.value = initial;
+      dashboardEl.classList.add('hidden');
+      composer.classList.remove('hidden');
       syncInputUi();
+      if (savedState.view === 'dashboard' && savedState.taskId) {
+        refreshDashboard(savedState.taskId).catch(() => {});
+      }
     }
 
     hydrateFromToolOutput();

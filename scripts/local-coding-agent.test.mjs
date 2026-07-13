@@ -12,8 +12,12 @@ import {
   tunnelAssetUrl
 } from "./local-coding-agent.mjs";
 
-test("normalizes default CLI port to 8789", () => {
-  assert.equal(normalize({}).port, "8789");
+test("normalizes full access and auto workflow defaults", () => {
+  const options = normalize({});
+  assert.equal(options.port, "8789");
+  assert.equal(options.mode, "full");
+  assert.equal(options.policy, "full");
+  assert.equal(options.workflowMode, "auto");
 });
 
 test("maps tunnel-client release assets for supported platforms", () => {
@@ -52,9 +56,12 @@ test("empty dotenv merge starts with the requested key", () => {
   assert.equal(merged, "CONTROL_PLANE_TUNNEL_ID=tunnel_new\n");
 });
 
-test("setup defaults to full mode and full policy unless flags override", () => {
-  assert.deepEqual(setupSecurityDefaults({}), { mode: "full", policy: "full" });
-  assert.deepEqual(setupSecurityDefaults({ mode: "safe", policy: "balanced" }), { mode: "safe", policy: "balanced" });
+test("setup defaults to full access/full policy/auto workflow unless flags override", () => {
+  assert.deepEqual(setupSecurityDefaults({}), { mode: "full", policy: "full", workflowMode: "auto" });
+  assert.deepEqual(
+    setupSecurityDefaults({ mode: "safe", policy: "balanced", workflowMode: "plan" }),
+    { mode: "safe", policy: "balanced", workflowMode: "plan" }
+  );
 });
 
 test("selects ripgrep install command by platform", () => {

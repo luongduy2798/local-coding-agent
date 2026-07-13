@@ -1,0 +1,21 @@
+{
+  "SessionStart": [],
+  "TaskCreated": [],
+  "PlanCreated": [],
+  "BeforeImplement": [],
+  "BeforeMutation": [],
+  "AfterMutation": [
+    {
+      "file": "node",
+      "args": ["-e", "console.log('AfterMutation hook')"],
+      "blocking": false,
+      "timeout_ms": 30000
+    }
+  ],
+  "BeforeVerification": [],
+  "AfterVerification": [],
+  "BeforeCheckpoint": [],
+  "AfterCheckpoint": [],
+  "TaskCompleted": [],
+  "TaskFailed": []
+}

@@ -1,0 +1,28 @@
+{
+  "accessMode": "full",
+  "mode": "full",
+  "policy": "full",
+  "workflowMode": "auto",
+  "verification": {
+    "tests": "explicit",
+    "lint": "explicit",
+    "build": "explicit"
+  },
+  "dashboard": {
+    "showOnCodeChange": true,
+    "allModes": true,
+    "autoPipOnImplement": true,
+    "autoOpenOnComplete": false,
+    "autoOpenOnFailure": false,
+    "autoOpenOnConflict": false
+  },
+  "worktree": {
+    "mode": "when-needed"
+  },
+  "commandEnv": "inherit",
+  "excludedCommandEnv": [
+    "MCP_AUTH_TOKEN",
+    "AGENT_APPROVAL_TOKEN",
+    "CONTROL_PLANE_API_KEY"
+  ]
+}

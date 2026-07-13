@@ -59,8 +59,9 @@ function defaultOptions() {
     node: process.env.NODE || "node",
     workspace: process.env.AGENT_WORKSPACE || "",
     extraRoots: process.env.AGENT_EXTRA_ROOTS || "",
-    mode: process.env.AGENT_MODE || "safe",
-    policy: process.env.AGENT_POLICY || "balanced",
+    mode: process.env.AGENT_ACCESS_MODE || process.env.AGENT_MODE || "full",
+    policy: process.env.AGENT_POLICY || "full",
+    workflowMode: process.env.AGENT_WORKFLOW_MODE || "auto",
     port: process.env.PORT || DEFAULT_PORT,
     authToken: process.env.MCP_AUTH_TOKEN || "",
     tunnelBin:
@@ -103,7 +104,8 @@ Usage:
 Common options:
   --workspace <path>          Workspace root the agent may access
   --extra-roots <paths>       Extra roots, semicolon-separated
-  --mode <safe|full>          Command guardrail mode
+  --mode <full|balanced|safe> Access/command guardrail mode (default full)
+  --workflow-mode <fast|plan|auto> Coding workflow (default auto)
   --policy <strict|balanced|full>
   --port <port>               MCP server port
   --auth-token <token>        Optional MCP bearer token
@@ -181,6 +183,9 @@ function parseArgs(argv) {
         break;
       case "--mode":
         flags.mode = next();
+        break;
+      case "--workflow-mode":
+        flags.workflowMode = next();
         break;
       case "--policy":
         flags.policy = next();
@@ -275,8 +280,9 @@ function effectiveOptions(flags = {}) {
 export function normalize(opts) {
   const out = { ...opts };
   out.port = String(out.port || DEFAULT_PORT);
-  out.mode = out.mode || "safe";
-  out.policy = out.policy || "balanced";
+  out.mode = out.mode || "full";
+  out.policy = out.policy || "full";
+  out.workflowMode = out.workflowMode || "auto";
   out.runtimeKeyEnv = out.runtimeKeyEnv || "CONTROL_PLANE_API_KEY";
   out.profile = out.profile || "local-coding-agent";
   out.profileDir = out.profileDir || join(REPO_ROOT, "tools", "profiles");
@@ -289,7 +295,8 @@ export function normalize(opts) {
 export function setupSecurityDefaults(flags = {}) {
   return {
     mode: flags.mode || "full",
-    policy: flags.policy || "full"
+    policy: flags.policy || "full",
+    workflowMode: flags.workflowMode || "auto"
   };
 }
 
@@ -455,7 +462,8 @@ function sha256(buffer) {
 }
 
 function validate(opts, { requireWorkspace = false, requireTunnel = false } = {}) {
-  if (!["safe", "full"].includes(opts.mode)) throw new Error("--mode must be safe or full.");
+  if (!["full", "balanced", "safe"].includes(opts.mode)) throw new Error("--mode must be full, balanced, or safe.");
+  if (!["fast", "plan", "auto"].includes(opts.workflowMode)) throw new Error("--workflow-mode must be fast, plan, or auto.");
   if (!["strict", "balanced", "full"].includes(opts.policy)) throw new Error("--policy must be strict, balanced, or full.");
   const port = Number(opts.port);
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("port must be a TCP port.");
@@ -478,6 +486,7 @@ function configId(opts) {
     workspace: resolve(opts.workspace || ""),
     mode: opts.mode,
     policy: opts.policy,
+    workflowMode: opts.workflowMode,
     extraRoots: opts.extraRoots || "",
     authEnabled: Boolean(opts.authToken),
     port: String(opts.port)
@@ -1091,12 +1100,21 @@ async function setup(flags) {
     cfg.node = cfg.node || "node";
     cfg.workspace = await promptLine(rl, "Default workspace root", cfg.workspace || process.cwd());
     const securityDefaults = setupSecurityDefaults(flags);
-    cfg.mode = (await promptChoice(rl, "Mode", [{ id: "full", label: "full" }, { id: "safe", label: "safe" }], securityDefaults.mode)).id;
+    cfg.mode = (await promptChoice(rl, "Mode", [
+      { id: "full", label: "full" },
+      { id: "balanced", label: "balanced" },
+      { id: "safe", label: "safe" }
+    ], securityDefaults.mode)).id;
     cfg.policy = (await promptChoice(rl, "Policy", [
       { id: "full", label: "full" },
       { id: "balanced", label: "balanced" },
       { id: "strict", label: "strict" }
     ], securityDefaults.policy)).id;
+    cfg.workflowMode = (await promptChoice(rl, "Workflow mode", [
+      { id: "auto", label: "auto - fast for simple tasks, plan for complex tasks" },
+      { id: "fast", label: "fast - implement directly" },
+      { id: "plan", label: "plan - wait for Implement button before editing" }
+    ], securityDefaults.workflowMode)).id;
     cfg.port = await promptLine(rl, "MCP port", cfg.port || DEFAULT_PORT);
     cfg.extraRoots = flags.extraRoots ?? cfg.extraRoots ?? "";
     cfg.authToken = flags.authToken ?? cfg.authToken ?? "";
@@ -1256,7 +1274,9 @@ async function start(flags) {
       AGENT_HOST: "127.0.0.1",
       AGENT_WORKSPACE: opts.workspace,
       AGENT_MODE: opts.mode,
+      AGENT_ACCESS_MODE: opts.mode,
       AGENT_POLICY: opts.policy,
+      AGENT_WORKFLOW_MODE: opts.workflowMode || "auto",
       AGENT_CONFIG_ID: id,
       AGENT_EXTRA_ROOTS: opts.extraRoots || "",
       MCP_AUTH_TOKEN: opts.authToken || ""
@@ -1402,7 +1422,7 @@ async function status(flags) {
   else {
     console.log(`Config:    ${data.config_path}`);
     console.log(`MCP URL:   ${data.mcp_url}`);
-    console.log(`Server:    ${health ? `ONLINE ${health.version || ""} (${health.mode || "mode?"}/${health.policy || "policy?"}) pid=${health.pid || "?"}` : "offline"}`);
+    console.log(`Server:    ${health ? `ONLINE ${health.version || ""} (${health.access_mode || health.mode || "mode?"}/${health.workflow_mode || "workflow?"}/${health.policy || "policy?"}) pid=${health.pid || "?"}` : "offline"}`);
     console.log(`Tunnel:    ${data.pids.tunnel_alive ? `running pid=${data.pids.tunnel}` : "unknown/offline"}`);
   }
 }
@@ -1449,12 +1469,14 @@ async function promptConfigWizard() {
       console.log(`  Workspace: ${cfg.workspace || "(not set)"}`);
       console.log(`  Mode:      ${cfg.mode}`);
       console.log(`  Policy:    ${cfg.policy}`);
+      console.log(`  Workflow:  ${cfg.workflowMode}`);
       console.log(`  MCP port:  ${cfg.port}`);
       console.log(`  Tunnel:    ${cfg.noTunnel ? "disabled" : "enabled"}`);
       console.log("");
       const action = await promptChoice(rl, "Choose what to change", [
-        { id: "mode", label: "Mode" },
+        { id: "mode", label: "Access mode" },
         { id: "policy", label: "Policy" },
+        { id: "workflow", label: "Workflow mode" },
         { id: "workspace", label: "Workspace path" },
         { id: "port", label: "MCP port" },
         { id: "tunnel", label: "Tunnel on/off" },
@@ -1463,9 +1485,10 @@ async function promptConfigWizard() {
         { id: "cancel", label: "Cancel" }
       ], "save");
       if (action.id === "mode") {
-        cfg.mode = (await promptChoice(rl, "Mode", [
-          { id: "full", label: "full - fewer command blocks" },
-          { id: "safe", label: "safe - stricter command guardrail" }
+        cfg.mode = (await promptChoice(rl, "Access mode", [
+          { id: "full", label: "full - direct trusted-local execution" },
+          { id: "balanced", label: "balanced - approvals + native sandbox when available" },
+          { id: "safe", label: "safe - strict command/Git guardrails" }
         ], cfg.mode)).id;
       } else if (action.id === "policy") {
         cfg.policy = (await promptChoice(rl, "Policy", [
@@ -1473,6 +1496,12 @@ async function promptConfigWizard() {
           { id: "balanced", label: "balanced - approval for risky actions" },
           { id: "strict", label: "strict - tighter/read-review focused" }
         ], cfg.policy)).id;
+      } else if (action.id === "workflow") {
+        cfg.workflowMode = (await promptChoice(rl, "Workflow mode", [
+          { id: "auto", label: "auto - fast/simple, plan/complex" },
+          { id: "fast", label: "fast - implement directly" },
+          { id: "plan", label: "plan - wait for Implement button" }
+        ], cfg.workflowMode)).id;
       } else if (action.id === "workspace") {
         cfg.workspace = await promptLine(rl, "Workspace path", cfg.workspace || process.cwd());
       } else if (action.id === "port") {

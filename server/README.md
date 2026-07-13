@@ -16,11 +16,13 @@ ChatGPT sessions; it is a normal MCP connector you authorize.
 | Read | `repo_overview`, `list_files`, `find_files`, `read_file`, `read_many` (concurrent + line ranges), `stat_path`, `search_text` (ripgrep/git, with context + glob) |
 | Write | `write_file`, `replace_in_file`, `apply_patch`, `make_dir`, `move_path`, `delete_path` |
 | Execute | `run_command`, `run_commands` (bounded batch; cmd/powershell/bash/sh/zsh) |
-| Processes | `proc_start`, `proc_list`, `proc_output`, `proc_stop` |
-| Git | `git` |
-| Pro | `workspace_snapshot`, `workspace_doctor`, `repo_map`, `repo_symbols`, `review_diff`, `session_report` |
+| Processes / terminal | `proc_*`, `exec_start`, `exec_read`, `exec_write`, `exec_resize`, `exec_signal`, `exec_cancel`, `exec_list` |
+| Git / worktree | `git`, `task_create_worktree`, `task_prepare_workspace`, `task_diff`, `task_apply_to_main`, `task_discard_worktree` |
+| Task / plan / dashboard | `task_*`, `plan_*`, `task_dashboard`, `task_context` |
+| Atomic mutation | `preview_patch`, `validate_patch`, `transaction_list`, `transaction_get`, `transaction_undo`, `transaction_redo` |
+| Intelligence / review | `workspace_snapshot`, `workspace_doctor`, `project_graph`, `instruction_chain`, `repo_map`, `repo_symbols`, `symbol_search`, `go_to_definition`, `find_references`, `dependency_impact`, `parallel_inspect`, `diff_collect`, `review_prepare`, `review_diff`, `session_report` |
 | Manual verification | `detect_test_commands`, `quality_gate`, `run_tests`, `run_build`, `run_lint`, `run_changed_tests` |
-| Notes & session | `save_note`, `list_notes`, `checkpoint`, `resume` |
+| Hooks / session | `hook_status`, `hook_reload`, `hook_run`, `save_note`, `list_notes`, `checkpoint`, `resume` |
 
 ## Run
 
@@ -54,8 +56,10 @@ npm start
 | `AGENT_WORKSPACE` | `../agent-workspace` | Primary root the agent may touch. |
 | `AGENT_EXTRA_ROOTS` | _(empty)_ | Extra roots, `;`-separated. |
 | `AGENT_EXTRA_ROOTS_JSON` | _(empty)_ | Extra roots as a JSON string array. Prefer this for paths that contain separators. |
-| `AGENT_MODE` | `safe` | Command guardrail. `safe` = conservative blocklist; `full` = fewer app-level command blocks. Not an OS sandbox. |
-| `AGENT_POLICY` | `balanced` | Tool policy. `strict` = read-only; `balanced` = local approval for risky actions; `full` = no policy approval gate. |
+| `AGENT_ACCESS_MODE` / `AGENT_MODE` | `full` | Access mode. `full` = trusted direct execution; `balanced` = approvals + native sandbox when available; `safe` = strict guardrails. |
+| `AGENT_POLICY` | `full` | Tool policy. `strict` = read-only; `balanced` = local approval for risky actions; `full` = no policy approval gate. |
+| `AGENT_WORKFLOW_MODE` | `auto` | `fast`, `plan`, or `auto`. Auto implements simple tasks directly and creates a Plan card for complex work. |
+| `AGENT_OS_SANDBOX` | `auto` | `auto`, `required`, or `off`; ignored by `full`, which always runs directly. |
 | `AGENT_ALLOW_DANGEROUS` | _(unset)_ | `1` allows even catastrophic system commands. Leave unset. |
 | `MCP_AUTH_TOKEN` | _(empty)_ | If set, every `/mcp` request must send `Authorization: Bearer <token>`. |
 | `MCP_ALLOWED_ORIGINS` | _(empty)_ | Trusted browser origins for `/mcp`. Empty rejects browser-origin MCP calls. |
@@ -72,9 +76,10 @@ npm start
 manager is available. It is not required, but `search_text`, `find_files`, and
 repo mapping are much faster with it.
 
-Fast workflow note: test/build/lint tools are kept for explicit manual use, but
-`workspace_snapshot` and default guidance do not recommend running them
-automatically.
+Tests/build/lint are explicit-only. They run only when the prompt requests them,
+the Plan card selects them, the dashboard button is pressed, or an explicit hook
+is configured. Every code mutation renders the Apps SDK dashboard in every
+access/workflow mode, including small fast tasks.
 
 ## Test
 
@@ -83,4 +88,5 @@ npm run test:agent       # exercises every tool against a running server
 npm run test:security    # runtime security checks against a running server
 npm run test:hardening   # self-contained policy/origin/body/undo regressions
 npm run test:pro         # Pro snapshot/report/tier regression checks
+npm run test:runtime     # v5 task/plan/transaction/env/boundary unit checks
 ```

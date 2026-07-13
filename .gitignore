@@ -17,6 +17,8 @@ tools/
 node_modules/
 server/data/
 server/*.log
+.agent/state/
+.agent/checkpoints/
 tmp-*/
 *-test-workspace/
 # ---- OS / editor ----

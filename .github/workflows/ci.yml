@@ -32,11 +32,13 @@ jobs:
         run: |
           node -e "const b=require('fs').readFileSync('server.mjs');const n=[...b].filter(x=>x===0).length;if(n)throw new Error('server.mjs contains '+n+' NUL byte(s)')"
           node --check server.mjs
+          Get-ChildItem core -Filter *.mjs | ForEach-Object { node --check $_.FullName; if ($LASTEXITCODE -ne 0) { throw "syntax failed: $($_.FullName)" } }
           node --check test-agent.mjs
           node --check test-security.mjs
           node --check security-test.mjs
           node --check test-pro.mjs
           node --check test-hardening.mjs
+          node --check test-runtime-v5.mjs
           node --check ../evals/run.mjs
           node --check ../scripts/local-coding-agent.mjs
           node --check ../scripts/local-coding-agent.test.mjs
@@ -84,10 +86,20 @@ jobs:
               Get-Content $err -ErrorAction SilentlyContinue
               throw "server did not become healthy"
             }
-            npm run test:agent
-            npm run test:pro
-            npm run test:security
-            npm run test:hardening
+            $failures = @()
+            function Invoke-Suite([string]$name, [string]$script) {
+              Write-Host "::group::$name"
+              npm run $script
+              $code = $LASTEXITCODE
+              Write-Host "::endgroup::"
+              if ($code -ne 0) { $script:failures += "$name (exit $code)" }
+            }
+            Invoke-Suite "Agent MCP" "test:agent"
+            Invoke-Suite "Pro Apps SDK" "test:pro"
+            Invoke-Suite "Security" "test:security"
+            Invoke-Suite "Hardening" "test:hardening"
+            Invoke-Suite "Runtime v5" "test:runtime"
+            if ($failures.Count -gt 0) { throw "Failed suites: $($failures -join ', ')" }
           } finally {
             Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
             Remove-Item -LiteralPath $ws -Recurse -Force -ErrorAction SilentlyContinue

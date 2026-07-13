@@ -8,10 +8,11 @@ on that machine. Read this before using it.
 
 ## Threat model (English)
 
-- **It is not a sandbox.** In `full` mode, `run_command` can run essentially any
-  command with your user privileges. File tools are confined to the configured
-  roots, but commands are not perfectly contained (no OS-level isolation is
-  provided out of the box). For isolation, run it inside a VM, container, or WSL2.
+- **`full` is deliberately not sandboxed.** In `full` mode, `run_command` can run
+  commands with your user privileges. File tools remain root-confined, while
+  command execution is direct. `balanced`/`safe` attempt native command isolation
+  with macOS Seatbelt or Linux bubblewrap when available; check `sandbox_status`
+  because adapter availability varies. Use a VM/container for a stronger boundary.
 - **Prompt injection is real.** If the model reads a malicious file/repo, it can
   be tricked into running harmful commands. Only connect workspaces you trust,
   prefer `safe` mode, and review what the agent does (`data/audit.log` records
@@ -22,10 +23,13 @@ on that machine. Read this before using it.
   remote shell to the internet. The recommended exposure is the official OpenAI
   Secure MCP Tunnel, whose channel is private to your account.
 
-## Safe defaults
+## Defaults and optional safety modes
 
-- `AGENT_MODE=safe` by default (destructive commands and absolute paths blocked).
-- `AGENT_POLICY=balanced` by default. Normal edits/tests can proceed, while
+- Trusted-local default is `AGENT_ACCESS_MODE=full`, `AGENT_POLICY=full`, and
+  `AGENT_WORKFLOW_MODE=auto`. `safe` and `balanced` remain selectable.
+- Verification is explicit-only: tests/build/lint do not run unless requested by
+  the prompt, Plan/dashboard action, or an explicitly configured hook.
+- `AGENT_POLICY=balanced` can be selected when normal edits should proceed while
   deletes, installs/network calls, mutating git, risky commands, risky
   background processes, and destructive patch operations require one-time local
   approval through `request_approval`/`request_approval_batch` plus
@@ -40,8 +44,13 @@ on that machine. Read this before using it.
   `MCP_ALLOWED_ORIGINS`.
 - Bearer tokens are accepted only through `Authorization: Bearer <token>`, not
   query strings.
-- Notes, checkpoints, patch history, backups, and approval records are isolated
-  per workspace.
+- LCA control-plane/MCP/approval credentials are stripped from project child
+  processes. Project-specific environment variables remain inherited in `full`.
+- Notes, checkpoints, task/plan state, transactions, worktrees, backups, and
+  approval records are isolated per workspace.
+- Code mutations use transaction validation, collision/ambiguity checks,
+  stale-file hashes, rollback, and undo/redo. These reliability controls do not
+  reduce `full` access.
 - Catastrophic system commands (disk format, diskpart, shutdown, registry wipes,
   fork bombs) stay blocked even in `full` mode unless `AGENT_ALLOW_DANGEROUS=1`.
 - Server listens on loopback only.
@@ -60,10 +69,10 @@ Công cụ này cho phép một mô hình AI **đọc/ghi file và chạy lệnh
 server**. Hãy coi như bạn đưa cho ai đó một cửa sổ dòng lệnh trên máy đó. Đọc kỹ
 trước khi dùng.
 
-- **Đây không phải sandbox.** Ở chế độ `full`, `run_command` gần như chạy được
-  mọi lệnh với quyền user của bạn. Các tool file bị giới hạn trong thư mục gốc đã
-  cấu hình, nhưng *lệnh* thì không được cô lập tuyệt đối (mặc định không có cô lập
-  ở tầng hệ điều hành). Muốn an toàn thật, chạy trong VM, container hoặc WSL2.
+- **`full` chủ động không dùng sandbox.** Ở chế độ `full`, `run_command` chạy
+  trực tiếp với quyền user. Các tool file vẫn bị giới hạn trong root. `balanced`
+  và `safe` cố gắng dùng macOS Seatbelt hoặc Linux bubblewrap khi có; gọi
+  `sandbox_status` để kiểm tra. Muốn boundary mạnh hơn, chạy trong VM/container.
 - **Prompt injection là rủi ro thật.** Nếu mô hình đọc một file/repo độc hại, nó
   có thể bị "dụ" chạy lệnh nguy hiểm. Chỉ kết nối workspace bạn tin tưởng, ưu tiên
   `safe` mode, và theo dõi hành vi agent (`data/audit.log` ghi lại tool call).
@@ -73,10 +82,13 @@ trước khi dùng.
   Cách expose khuyến nghị là OpenAI Secure MCP Tunnel chính thức (kênh riêng cho
   tài khoản của bạn).
 
-## Mặc định an toàn
+## Mặc định và mode an toàn tùy chọn
 
-- Mặc định `AGENT_MODE=safe`.
-- `AGENT_POLICY=balanced` cho phép sửa/test thông thường; hành động rủi ro vẫn
+- Mặc định trusted-local: `AGENT_ACCESS_MODE=full`, `AGENT_POLICY=full`,
+  `AGENT_WORKFLOW_MODE=auto`; vẫn có thể chọn `balanced` hoặc `safe`.
+- Test/build/lint chỉ chạy khi được yêu cầu rõ ràng qua prompt, Plan/dashboard
+  hoặc hook do người dùng cấu hình.
+- Khi chọn `AGENT_POLICY=balanced`, hành động rủi ro vẫn
   cần duyệt cục bộ bằng `AGENT_APPROVAL_TOKEN` qua `approve_request` hoặc
   `deny_request`. Batch approval chỉ chứa các hành động chính xác, có hạn dùng và
   mỗi hành động chỉ được dùng một lần; đây không phải quyền wildcard.
