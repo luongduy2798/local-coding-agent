@@ -14,6 +14,7 @@ ChatGPT sessions; it is a normal MCP connector you authorize.
 |-------|-------|
 | Info | `workspace_info`, `ping` |
 | Read | `repo_overview`, `list_files`, `find_files`, `read_file`, `read_many` (concurrent + line ranges), `stat_path`, `search_text` (ripgrep/git, with context + glob) |
+| Figma Desktop | `figma_status`, `figma_list_tools`, `figma_call_tool`, `figma_get_design_context`, `figma_get_screenshot`, `figma_get_metadata`, `figma_get_variable_defs`, `figma_get_code_connect_map`, `figma_get_figjam` |
 | Write | `write_file`, `replace_in_file`, `apply_patch`, `make_dir`, `move_path`, `delete_path` |
 | Execute | `run_command`, `run_commands` (bounded batch; cmd/powershell/bash/sh/zsh) |
 | Processes / terminal | `proc_*`, `exec_start`, `exec_read`, `exec_write`, `exec_resize`, `exec_signal`, `exec_cancel`, `exec_list` |
@@ -71,6 +72,9 @@ npm start
 | `AGENT_MAX_BATCH_READ_CHARS` | `500000` | Combined text cap for one `read_many` response. |
 | `AGENT_READ_DEFAULT` | `30000` | Default chars `read_file` returns (raise per-call via `max_chars`). Keeps payloads + context small. |
 | `AGENT_CMD_OUTPUT_DEFAULT` | `20000` | Default chars of command output returned (use `tail_lines`/`head_lines`/`max_output_chars`). |
+| `FIGMA_DESKTOP_MCP_URL` | `http://127.0.0.1:3845/mcp` | Official local MCP endpoint exposed by Figma Desktop after enabling it in Dev Mode. |
+| `FIGMA_DESKTOP_TIMEOUT_MS` | `30000` | Timeout for connecting to or calling the Figma Desktop MCP server. |
+| `FIGMA_DESKTOP_ALLOW_REMOTE` | `0` | Set `1` only to allow a non-loopback override. The official desktop endpoint is loopback. |
 
 `ripgrep` (`rg`) is auto-installed by `lca setup` when a supported package
 manager is available. It is not required, but `search_text`, `find_files`, and
@@ -89,4 +93,5 @@ npm run test:security    # runtime security checks against a running server
 npm run test:hardening   # self-contained policy/origin/body/undo regressions
 npm run test:pro         # Pro snapshot/report/tier regression checks
 npm run test:runtime     # v5 task/plan/transaction/env/boundary unit checks
+npm run test:figma       # mocked Figma Desktop MCP bridge checks
 ```

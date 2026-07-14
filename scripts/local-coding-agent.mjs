@@ -34,6 +34,7 @@ const PID_PATH = join(dirname(CONFIG_PATH), "processes.json");
 const LOG_PATH = join(dirname(CONFIG_PATH), "launcher.log");
 const DEFAULT_PORT = "8789";
 const DEFAULT_TUNNEL_VERSION = process.env.TUNNEL_CLIENT_VERSION || "v0.0.10";
+const DEFAULT_FIGMA_DESKTOP_MCP_URL = "http://127.0.0.1:3845/mcp";
 const TUNNEL_RELEASE_BASE = "https://github.com/openai/tunnel-client/releases/download";
 const KEY_URLS = [
   "https://platform.openai.com/settings/organization/tunnels",
@@ -89,6 +90,7 @@ Usage:
   node scripts/local-coding-agent.mjs stop
   node scripts/local-coding-agent.mjs status
   node scripts/local-coding-agent.mjs workspace
+  node scripts/local-coding-agent.mjs figma [connect|status|tools|open]
   node scripts/local-coding-agent.mjs keys
   node scripts/local-coding-agent.mjs cli
   node scripts/local-coding-agent.mjs doctor
@@ -147,8 +149,8 @@ Usage:
 
 The wizard uses only Node.js built-ins. It auto-detects the current OS, checks
 prerequisites, creates or updates .env.local, installs server dependencies,
-downloads tunnel-client when possible, writes local CLI config, installs the
-global lca command, and prints health/status checks.
+checks the local Figma Desktop MCP bridge, downloads tunnel-client when possible,
+writes local CLI config, installs the global lca command, and prints health/status checks.
 
 Use --choose-os only when you want instruction mode for another OS.
 `);
@@ -482,6 +484,8 @@ function yamlEscape(value) {
 }
 
 function configId(opts) {
+  const serverPath = join(SERVER_DIR, SERVER_SCRIPT);
+  const figmaBridgePath = join(SERVER_DIR, "figma-desktop.mjs");
   const material = JSON.stringify({
     workspace: resolve(opts.workspace || ""),
     mode: opts.mode,
@@ -489,7 +493,12 @@ function configId(opts) {
     workflowMode: opts.workflowMode,
     extraRoots: opts.extraRoots || "",
     authEnabled: Boolean(opts.authToken),
-    port: String(opts.port)
+    port: String(opts.port),
+    serverHash: existsSync(serverPath) ? sha256(readFileSync(serverPath)).slice(0, 16) : "missing",
+    figmaBridgeHash: existsSync(figmaBridgePath) ? sha256(readFileSync(figmaBridgePath)).slice(0, 16) : "missing",
+    figmaDesktopMcpUrl: figmaDesktopEndpoint(),
+    figmaDesktopTimeoutMs: process.env.FIGMA_DESKTOP_TIMEOUT_MS || "30000",
+    figmaDesktopAllowRemote: process.env.FIGMA_DESKTOP_ALLOW_REMOTE === "1"
   });
   return createHash("sha256").update(material).digest("hex").slice(0, 16);
 }
@@ -1066,15 +1075,15 @@ async function setup(flags) {
     console.log(`Config file: ${CONFIG_PATH}`);
     console.log(`Environment file: ${ENV_LOCAL_PATH}`);
 
-    printStep(1, 8, "Check prerequisites");
+    printStep(1, 9, "Check prerequisites");
     await checkPrerequisites(selected);
 
-    printStep(2, 8, "Choose tunnel mode");
+    printStep(2, 9, "Choose tunnel mode");
     const useTunnel = await promptYesNo(rl, "Use ChatGPT Web tunnel", !cfg.noTunnel);
     cfg.noTunnel = !useTunnel;
     if (useTunnel) await openKeyPages(rl);
 
-    printStep(3, 8, "Configure local environment");
+    printStep(3, 9, "Configure local environment");
     const envValues = readRepoEnvFile();
     if (useTunnel) {
       cfg.tunnelId = await promptLine(rl, "Tunnel ID", flags.tunnelId || (!isPlaceholder(envValues.CONTROL_PLANE_TUNNEL_ID) ? envValues.CONTROL_PLANE_TUNNEL_ID : cfg.tunnelId));
@@ -1096,7 +1105,7 @@ async function setup(flags) {
       console.log("Tunnel disabled; .env.local can be filled later.");
     }
 
-    printStep(4, 8, "Configure agent defaults");
+    printStep(4, 9, "Configure agent defaults");
     cfg.node = cfg.node || "node";
     cfg.workspace = await promptLine(rl, "Default workspace root", cfg.workspace || process.cwd());
     const securityDefaults = setupSecurityDefaults(flags);
@@ -1119,14 +1128,22 @@ async function setup(flags) {
     cfg.extraRoots = flags.extraRoots ?? cfg.extraRoots ?? "";
     cfg.authToken = flags.authToken ?? cfg.authToken ?? "";
 
-    printStep(5, 8, "Install server dependencies");
+    printStep(5, 9, "Install server dependencies");
     if (!existsSync(join(SERVER_DIR, "node_modules"))) {
       await installDeps(cfg);
     } else {
       console.log("Server dependencies already installed.");
     }
 
-    printStep(6, 8, "Install tunnel-client");
+    printStep(6, 9, "Connect Figma Desktop MCP");
+    const useFigmaDesktop = await promptYesNo(rl, "Enable Figma Desktop integration", true);
+    if (useFigmaDesktop) {
+      await ensureFigmaDesktopConnected(rl, { interactive: true, failOnMissing: false });
+    } else {
+      console.log("Skipped. Run `lca figma` later.");
+    }
+
+    printStep(7, 9, "Install tunnel-client");
     if (useTunnel) {
       cfg.tunnelBin = cfg.tunnelBin || defaultTunnelBinForPlatform(selected);
       if (!existsSync(cfg.tunnelBin)) {
@@ -1147,13 +1164,13 @@ async function setup(flags) {
       console.log("Tunnel disabled.");
     }
 
-    printStep(7, 8, "Save config and install lca command");
+    printStep(8, 9, "Save config and install lca command");
     cfg.runtimeKey = "";
     validate(cfg);
     await saveConfig(stripRuntimeFields(cfg));
     const cliPath = await installCliCommand();
 
-    printStep(8, 8, "Verify");
+    printStep(9, 9, "Verify");
     await verifyCliShim(cliPath);
     await status({ json: false });
     console.log("\nSetup complete.");
@@ -1587,6 +1604,120 @@ async function keyCommand(rest) {
   throw new Error("Usage: key set|clear");
 }
 
+
+
+function figmaDesktopEndpoint() {
+  return String(process.env.FIGMA_DESKTOP_MCP_URL || DEFAULT_FIGMA_DESKTOP_MCP_URL).trim();
+}
+
+async function loadFigmaDesktopBridge() {
+  if (!existsSync(join(SERVER_DIR, "node_modules"))) {
+    throw new Error("Figma bridge dependencies are missing. Run `lca setup` or `lca install` first.");
+  }
+  return import(pathToFileURL(join(SERVER_DIR, "figma-desktop.mjs")).href);
+}
+
+async function figmaDesktopStatusCli() {
+  const bridge = await loadFigmaDesktopBridge();
+  return bridge.figmaDesktopStatus({ endpoint: figmaDesktopEndpoint() });
+}
+
+async function listFigmaDesktopToolsCli() {
+  const bridge = await loadFigmaDesktopBridge();
+  return bridge.listFigmaDesktopTools({ endpoint: figmaDesktopEndpoint() });
+}
+
+function printFigmaDesktopEnableSteps(statusValue = {}) {
+  console.log(`Figma Desktop MCP: ${statusValue.endpoint || DEFAULT_FIGMA_DESKTOP_MCP_URL}`);
+  console.log("  1. Open the Figma desktop app and sign in.");
+  console.log("  2. Open a Figma Design file.");
+  console.log("  3. Switch to Dev Mode (Shift+D).");
+  console.log('  4. In the MCP server section, click "Enable desktop MCP server".');
+}
+
+function openFigmaDesktop() {
+  try {
+    if (process.platform === "darwin") {
+      const child = spawn("open", ["-a", "Figma"], { stdio: "ignore", detached: true, windowsHide: true });
+      child.unref();
+      return true;
+    }
+    return openUrl("figma://");
+  } catch {
+    return false;
+  }
+}
+
+async function ensureFigmaDesktopConnected(rl, { interactive = false, failOnMissing = false } = {}) {
+  let statusValue = await figmaDesktopStatusCli();
+  if (statusValue.connected) {
+    console.log(`Figma Desktop MCP connected: ${statusValue.endpoint}`);
+    console.log(`Tools: ${statusValue.tools.join(", ") || "none"}`);
+    return statusValue;
+  }
+
+  console.log(statusValue.error || "Figma Desktop MCP is not available.");
+  printFigmaDesktopEnableSteps(statusValue);
+  if (interactive) {
+    if (openFigmaDesktop()) console.log("Opened Figma Desktop.");
+    await rl.question("Enable the MCP server in Figma, then press Enter to retry: ");
+    statusValue = await figmaDesktopStatusCli();
+    if (statusValue.connected) {
+      console.log(`Figma Desktop MCP connected: ${statusValue.endpoint}`);
+      console.log(`Tools: ${statusValue.tools.join(", ") || "none"}`);
+      return statusValue;
+    }
+    console.log(statusValue.error || "Figma Desktop MCP is still unavailable.");
+  }
+
+  if (failOnMissing) throw new Error(statusValue.error || "Figma Desktop MCP is not available.");
+  console.log("You can finish later with: lca figma");
+  return statusValue;
+}
+
+async function figmaCommand(rest, flags = {}) {
+  const [sub = "connect"] = rest;
+  if (sub === "status") {
+    console.log(JSON.stringify(await figmaDesktopStatusCli(), null, 2));
+    return;
+  }
+  if (sub === "tools") {
+    const listed = await listFigmaDesktopToolsCli();
+    console.log(JSON.stringify({ endpoint: figmaDesktopEndpoint(), count: listed.tools.length, tools: listed.tools }, null, 2));
+    return;
+  }
+  if (sub === "open") {
+    if (!openFigmaDesktop()) console.log("Could not open Figma automatically.");
+    printFigmaDesktopEnableSteps({ endpoint: figmaDesktopEndpoint() });
+    return;
+  }
+  if (sub !== "connect" && sub !== "check") {
+    throw new Error("Usage: lca figma [connect|status|tools|open]");
+  }
+
+  if (!input.isTTY || !output.isTTY) {
+    const statusValue = await figmaDesktopStatusCli();
+    console.log(JSON.stringify(statusValue, null, 2));
+    if (!statusValue.connected) process.exitCode = 1;
+    return;
+  }
+
+  const rl = createPromptInterface({ input, output });
+  let statusValue;
+  try {
+    statusValue = await ensureFigmaDesktopConnected(rl, { interactive: true, failOnMissing: false });
+  } finally {
+    rl.close();
+  }
+  if (!statusValue.connected) {
+    process.exitCode = 1;
+    return;
+  }
+
+  const opts = effectiveOptions(flags);
+  await restartIfRunning(opts, opts);
+}
+
 async function detectWorkspaceRoot(cwd = process.cwd()) {
   const git = process.platform === "win32" ? "git.exe" : "git";
   const result = await capture(git, ["-C", cwd, "rev-parse", "--show-toplevel"]);
@@ -1758,6 +1889,7 @@ async function main() {
   if (command === "cli") return cliCommand();
   if (command === "keys") return keysCommand();
   if (command === "workspace") return workspaceCommand(flags);
+  if (command === "figma") return figmaCommand(rest, flags);
   if (command === "start") return start(flags);
   if (command === "stop") return stop(flags);
   if (command === "status") return status(flags);

@@ -135,6 +135,58 @@ Các tool nền phía sau:
 - `slash_commands`: autocomplete cho `/...`.
 - `compose_prompt`: parse input, resolve context đã chọn, và tạo prompt sẵn để gửi vào ChatGPT.
 
+## Figma Desktop MCP
+
+LCA kết nối trực tiếp với **Figma Desktop MCP chính thức**, không gọi REST API và không cần tạo OAuth App, Client ID, Client Secret hay Personal Access Token. Figma Desktop dùng chính phiên đăng nhập hiện tại của bạn.
+
+Endpoint mặc định:
+
+```text
+http://127.0.0.1:3845/mcp
+```
+
+### Bật trong Figma Desktop
+
+1. Mở Figma Desktop và đăng nhập.
+2. Mở một Figma Design file.
+3. Chuyển sang Dev Mode bằng `Shift+D`.
+4. Trong phần **MCP server**, chọn **Enable desktop MCP server**.
+
+Sau đó chạy:
+
+```bash
+lca figma
+```
+
+`lca figma` sẽ kiểm tra kết nối, mở Figma Desktop nếu server chưa chạy, chờ bạn bật MCP rồi thử lại. Các lệnh khác:
+
+```bash
+lca figma status   # trạng thái JSON
+lca figma tools    # tool và schema thật Figma đang cung cấp
+lca figma open     # mở Figma và in hướng dẫn bật MCP
+```
+
+`lca setup` cũng có bước **Connect Figma Desktop MCP** sau khi cài dependency. Bước này không bắt buộc; có thể hoàn tất sau bằng `lca figma`.
+
+Các tool chính trong ChatGPT:
+
+```text
+figma_get_design_context   # code/design context theo URL, node id hoặc selection hiện tại
+figma_get_screenshot       # lấy ảnh selection/node và giữ nguyên image content
+figma_get_metadata         # cây layer gọn để khoanh vùng frame lớn
+figma_get_variable_defs    # variables và styles đang dùng
+figma_list_tools           # đọc tool/schema live từ Figma Desktop
+figma_call_tool            # gọi tool mới của Figma mà không phải cập nhật LCA trước
+```
+
+Ví dụ:
+
+```text
+@Macmini dùng figma_get_design_context và figma_get_screenshot đọc URL Figma này, rồi code màn hình Flutter theo source hiện tại.
+```
+
+Selection-based cũng hoạt động: chọn frame trong Figma Desktop rồi yêu cầu ChatGPT đọc selection mà không cần truyền URL.
+
 ## Config
 
 Secret runtime nằm ở:
