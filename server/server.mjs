@@ -26,6 +26,13 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 import { summarizeArgs } from "./core/redaction.mjs";
+import {
+  DEFAULT_FIGMA_DESKTOP_MCP_URL,
+  callFigmaDesktopTool,
+  figmaDesktopStatus,
+  listFigmaDesktopTools,
+  parseFigmaNodeReference
+} from "./figma-desktop.mjs";
 
 // ----------------------------------------------------------------------------
 // Configuration (all overridable via environment variables)
@@ -82,6 +89,24 @@ const AUDIT_PATH = path.resolve(DATA_DIR, "audit.log");
 const AUDIT_ENABLED = process.env.AGENT_AUDIT !== "0";
 const AUDIT_ARGS = process.env.AGENT_AUDIT_ARGS !== "0";
 const HTTP_LOG = process.env.AGENT_HTTP_LOG === "1";
+
+// Figma Desktop exposes a local MCP server after the user enables it in Dev Mode.
+// LCA acts as an MCP client and forwards results without managing Figma tokens.
+const FIGMA_DESKTOP_MCP_URL = String(process.env.FIGMA_DESKTOP_MCP_URL || DEFAULT_FIGMA_DESKTOP_MCP_URL).trim();
+const FIGMA_DESKTOP_TIMEOUT_MS = boundedNumber(process.env.FIGMA_DESKTOP_TIMEOUT_MS, 30_000, 1_000, 120_000);
+const FIGMA_DESKTOP_READ_ONLY_TOOLS = new Set([
+  "get_code_connect_map",
+  "get_code_connect_suggestions",
+  "get_design_context",
+  "get_figjam",
+  "get_metadata",
+  "get_screenshot",
+  "get_shader_effect",
+  "get_shader_fill",
+  "get_variable_defs",
+  "list_shader_effects",
+  "list_shader_fills"
+]);
 
 // v2.1 Repo index cache
 const INDEX_PATH = path.resolve(WORKSPACE_DATA_DIR, "index.json");
@@ -363,6 +388,7 @@ const SERVER_INSTRUCTIONS = [
   "Local Coding Agent Pro MCP: tool calls cross a tunnel, so start with workspace_snapshot or workspace_doctor, then use read_many/search_text/run_commands to batch work; prefer dedicated tools over run_command. Policy may require token approval via AGENT_APPROVAL_TOKEN for risky delete/install/network/mutating-git actions; exact action batches can use request_approval_batch. File tools are root-confined, but commands are not an OS sandbox.",
   "WORKFLOW: (1) Start with workspace_snapshot for repo/git/policy in one call; use workspace_doctor when you need operational readiness. (2) Use read_many/search_text/repo_symbols to gather context in batches. (3) Use preview_patch/validate_patch before apply_patch for large edits. (4) Before marking 'done', call review_diff and session_report; run tests/build/lint only when the user explicitly asks. (5) For multi-step tasks, use task_plan + decision_log to maintain state across chats.",
   "POLICY: Check policy_status if you are unsure whether an action is allowed. In balanced policy, risky operations (delete, install, network, mutating git, risky processes) require one-time approval with request_approval/request_approval_batch followed by approve_request using AGENT_APPROVAL_TOKEN.",
+  "FIGMA: LCA bridges the official Figma Desktop MCP server at 127.0.0.1:3845. For a Figma URL or current desktop selection, prefer figma_get_design_context; also call figma_get_screenshot when visual fidelity matters. Use figma_status when the bridge is unavailable and figma_list_tools/figma_call_tool for newer upstream tools.",
   "Use the DEDICATED tools instead of run_command for these — they are faster and cheaper:",
   "- Find files by name -> find_files (NOT dir/ls/Get-ChildItem/where).",
   "- Search file contents -> search_text with context= (NOT grep/findstr/Select-String).",
@@ -385,6 +411,7 @@ function createMcpServer() {
   const mcp = new McpServer({ name: "Local Coding Agent", version: VERSION }, { instructions: SERVER_INSTRUCTIONS });
   registerCompanionAppResources(mcp);
   registerBasicTools(mcp);
+  registerFigmaDesktopTools(mcp);
   registerFsReadTools(mcp);
   registerFsWriteTools(mcp);
   registerExecTools(mcp);
@@ -400,6 +427,104 @@ function createMcpServer() {
   registerPolicyTools(mcp);       // v2.6
   registerProfileTools(mcp);      // v2.8
   return mcp;
+}
+
+
+function registerFigmaDesktopTools(mcp) {
+  const readOnly = { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true };
+
+  reg(
+    mcp,
+    "figma_status",
+    {
+      title: "Figma Desktop status",
+      description: "Check whether the official Figma Desktop MCP server is enabled and list its available tools.",
+      annotations: readOnly,
+      inputSchema: {}
+    },
+    async () => jsonResult(await figmaDesktopStatus({ endpoint: FIGMA_DESKTOP_MCP_URL, timeoutMs: FIGMA_DESKTOP_TIMEOUT_MS }))
+  );
+
+  reg(
+    mcp,
+    "figma_list_tools",
+    {
+      title: "List Figma Desktop tools",
+      description: "List the live tools and JSON schemas exposed by the official Figma Desktop MCP server.",
+      annotations: readOnly,
+      inputSchema: {}
+    },
+    async () => {
+      const result = await listFigmaDesktopTools({ endpoint: FIGMA_DESKTOP_MCP_URL, timeoutMs: FIGMA_DESKTOP_TIMEOUT_MS });
+      return jsonResult({ endpoint: FIGMA_DESKTOP_MCP_URL, count: result.tools.length, tools: result.tools });
+    }
+  );
+
+  reg(
+    mcp,
+    "figma_call_tool",
+    {
+      title: "Call Figma Desktop tool",
+      description: "Forward a call to any tool currently exposed by Figma Desktop MCP. Use figma_list_tools first for its exact schema.",
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false, idempotentHint: false },
+      inputSchema: {
+        tool: z.string().min(1).describe("Exact upstream Figma MCP tool name."),
+        arguments: z.record(z.any()).optional().describe("Arguments matching the upstream tool JSON schema.")
+      }
+    },
+    async ({ tool, arguments: args = {} }) => callFigmaDesktopTool(tool, args, { endpoint: FIGMA_DESKTOP_MCP_URL, timeoutMs: FIGMA_DESKTOP_TIMEOUT_MS })
+  );
+
+  registerFigmaReadWrapper(mcp, "figma_get_design_context", "get_design_context", "Get implementation-oriented design context for a Figma URL, node ID, or the current desktop selection.");
+  registerFigmaReadWrapper(mcp, "figma_get_screenshot", "get_screenshot", "Get a screenshot of a Figma URL, node ID, or the current desktop selection.");
+  registerFigmaReadWrapper(mcp, "figma_get_metadata", "get_metadata", "Get sparse layer metadata for a Figma URL, node ID, page, or current selection.");
+  registerFigmaReadWrapper(mcp, "figma_get_variable_defs", "get_variable_defs", "Get variables and styles used by a Figma URL, node ID, or current selection.");
+  registerFigmaReadWrapper(mcp, "figma_get_code_connect_map", "get_code_connect_map", "Get Code Connect mappings for a Figma URL, node ID, or current selection.");
+  registerFigmaReadWrapper(mcp, "figma_get_figjam", "get_figjam", "Get XML context for a FigJam URL, node ID, or current selection.");
+}
+
+function registerFigmaReadWrapper(mcp, lcaName, upstreamName, description) {
+  reg(
+    mcp,
+    lcaName,
+    {
+      title: upstreamName.replaceAll("_", " "),
+      description,
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
+      inputSchema: {
+        url: z.string().url().optional().describe("Optional Figma node/frame URL. The node-id is extracted automatically."),
+        node_id: z.string().optional().describe("Optional node ID such as 123:456 or 123-456. Omit to use the current Figma desktop selection."),
+        client_languages: z.array(z.string()).optional().describe("Languages used by the target codebase, forwarded as clientLanguages."),
+        client_frameworks: z.array(z.string()).optional().describe("Frameworks or Code Connect labels, forwarded as clientFrameworks."),
+        force_code: z.boolean().optional().describe("Forwarded as forceCode when supported by the upstream tool."),
+        enable_base64_response: z.boolean().optional().describe("Forwarded as enableBase64Response when supported, mainly for screenshots."),
+        arguments: z.record(z.any()).optional().describe("Additional or overriding upstream arguments for forward compatibility.")
+      }
+    },
+    async (input) => {
+      const args = buildFigmaDesktopArguments(input);
+      return callFigmaDesktopTool(upstreamName, args, { endpoint: FIGMA_DESKTOP_MCP_URL, timeoutMs: FIGMA_DESKTOP_TIMEOUT_MS });
+    }
+  );
+}
+
+function buildFigmaDesktopArguments({
+  url,
+  node_id,
+  client_languages,
+  client_frameworks,
+  force_code,
+  enable_base64_response,
+  arguments: extra = {}
+} = {}) {
+  const args = { ...(extra || {}) };
+  const reference = parseFigmaNodeReference(url || node_id || "");
+  if (reference.nodeId && args.nodeId === undefined) args.nodeId = reference.nodeId;
+  if (client_languages?.length && args.clientLanguages === undefined) args.clientLanguages = client_languages;
+  if (client_frameworks?.length && args.clientFrameworks === undefined) args.clientFrameworks = client_frameworks;
+  if (force_code !== undefined && args.forceCode === undefined) args.forceCode = force_code;
+  if (enable_base64_response !== undefined && args.enableBase64Response === undefined) args.enableBase64Response = enable_base64_response;
+  return args;
 }
 
 function registerSkillTools(mcp) {
@@ -4697,7 +4822,7 @@ const _origCheckpoint = null; // we'll patch via the registration
 
 const POLICY_RULES = {
   strict: {
-    description: "Read and analyze only. No writes, installs, network, deletes, or git mutations.",
+    description: "Read and analyze only. No writes, installs, external network, deletes, or git mutations. Read-only Figma Desktop loopback tools are allowed.",
     blocked: ["write_file", "replace_in_file", "apply_patch", "make_dir", "move_path", "delete_path",
               "run_command", "proc_start", "git"],
     needs_approval: [],
@@ -4725,12 +4850,19 @@ const POLICY_RULES = {
 };
 
 const STRICT_MUTATION_TOOLS = new Set([
+  "figma_call_tool",
   "save_note", "checkpoint", "write_file", "replace_in_file", "apply_patch", "make_dir", "move_path", "delete_path",
   "run_command", "run_commands", "proc_start", "proc_stop", "git", "create_skill", "delete_skill", "undo_last_patch",
   "quality_gate", "run_tests", "run_build", "run_lint", "run_changed_tests", "task_plan", "task_state", "decision_log"
 ]);
 
 function approvalActionForTool(tool, args) {
+  if (tool === "figma_call_tool") {
+    const upstreamTool = String(args?.tool || "");
+    if (upstreamTool && !FIGMA_DESKTOP_READ_ONLY_TOOLS.has(upstreamTool)) {
+      return `figma:${upstreamTool}:${JSON.stringify(args.arguments || {})}`;
+    }
+  }
   if (tool === "delete_path") return `delete_path:${String(args.path || "")}`;
   if (tool === "delete_skill") return `delete_skill:${String(args.name || "")}`;
   if (tool === "run_command" || tool === "proc_start") {
@@ -4880,11 +5012,11 @@ function registerPolicyTools(mcp) {
         mode: MODE,
         description: rules.description,
         allowed: AGENT_POLICY === "full" ? ["*"] : AGENT_POLICY === "balanced" ? ["read", "write", "edit", "test", "build"] : ["read", "search", "analyze"],
-        needs_approval: AGENT_POLICY === "balanced" ? ["delete_path", "npm/pip install", "curl/wget", "git push/fetch/pull", "risky run_commands batch"] : [],
+        needs_approval: AGENT_POLICY === "balanced" ? ["delete_path", "mutating Figma tools", "npm/pip install", "curl/wget", "git push/fetch/pull", "risky run_commands batch"] : [],
         approval_options: AGENT_POLICY === "balanced" ? ["one exact action", "2-20 exact actions in one expiring batch"] : [],
         approval_method: AGENT_POLICY === "balanced" ? "Use request_approval/request_approval_batch, then approve_request or deny_request with AGENT_APPROVAL_TOKEN." : null,
         approval_ttl_minutes: APPROVAL_TTL_MINUTES,
-        blocked: AGENT_POLICY === "strict" ? ["all writes", "installs", "network", "delete", "git mutations"] : []
+        blocked: AGENT_POLICY === "strict" ? ["all writes", "installs", "external network", "delete", "git mutations", "generic Figma passthrough"] : []
       });
     }
   );
