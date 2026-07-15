@@ -5,7 +5,8 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
-const ENDPOINT = process.env.TEST_ENDPOINT || "http://127.0.0.1:8789/mcp";
+const ENDPOINT = process.env.TEST_ENDPOINT;
+if (!ENDPOINT) throw new Error("agent.test.mjs must run through tests/runners/run-agent-isolated.mjs.");
 const client = new Client({ name: "agent-test-client", version: "1.0.0" });
 const transport = new StreamableHTTPClientTransport(new URL(ENDPOINT));
 await client.connect(transport);

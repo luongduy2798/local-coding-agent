@@ -14,9 +14,6 @@ jobs:
       fail-fast: false
       matrix:
         os: [windows-latest, macos-latest, ubuntu-latest]
-    defaults:
-      run:
-        shell: pwsh
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -27,16 +24,27 @@ jobs:
       - name: Install server dependencies
         run: npm ci
         working-directory: server
-      - name: Guard source and check syntax
+      - name: Check syntax and shipped scripts
         working-directory: server
         run: |
-          node -e "const b=require('fs').readFileSync('server.mjs');const n=[...b].filter(x=>x===0).length;if(n)throw new Error('server.mjs contains '+n+' NUL byte(s)')"
           node --check server.mjs
-          node --check test-agent.mjs
-          node --check test-security.mjs
-          node --check security-test.mjs
-          node --check test-pro.mjs
-          node --check test-hardening.mjs
+          node --check src/server.mjs
+          node --check src/change-journal.mjs
+          node --check src/core/redaction.mjs
+          node --check src/integrations/figma-desktop.mjs
+          node --check scripts/check-test-safety.mjs
+          node --check tests/helpers/test-guard.mjs
+          node --check tests/helpers/test-runtime.mjs
+          node --check tests/test-guard.test.mjs
+          node --check tests/runners/run-agent-isolated.mjs
+          node --check tests/runners/run-security-isolated.mjs
+          node --check tests/integration/change-journal.test.mjs
+          node --check tests/integration/agent.test.mjs
+          node --check tests/integration/pro.test.mjs
+          node --check tests/integration/hardening.test.mjs
+          node --check tests/integration/figma-desktop.test.mjs
+          node --check tests/security/runtime.test.mjs
+          node --check tests/security/baseline.test.mjs
           node --check ../evals/run.mjs
           node --check ../scripts/local-coding-agent.mjs
           node --check ../scripts/local-coding-agent.test.mjs
@@ -53,71 +61,29 @@ jobs:
         if: runner.os != 'Windows'
         shell: bash
         run: bash -n scripts/lca
-      - name: Run MCP and runtime-security tests
+      - name: Test safety gate
+        run: npm run test:safety
         working-directory: server
-        run: |
-          $port = 18987
-          $ws = Join-Path ([System.IO.Path]::GetTempPath()) ("lca-ci-" + [guid]::NewGuid().ToString("N"))
-          New-Item -ItemType Directory -Force -Path $ws | Out-Null
-          $env:PORT = "$port"
-          $env:AGENT_WORKSPACE = $ws
-          $env:AGENT_MODE = "safe"
-          $env:AGENT_POLICY = "full"
-          $env:AGENT_EXTRA_ROOTS_JSON = "[]"
-          $env:TEST_ENDPOINT = "http://127.0.0.1:$port/mcp"
-          $out = Join-Path $PWD "ci-server.out.log"
-          $err = Join-Path $PWD "ci-server.err.log"
-          $server = Start-Process -FilePath "node" -ArgumentList "server.mjs" -WorkingDirectory $PWD -PassThru -RedirectStandardOutput $out -RedirectStandardError $err
-          try {
-            $ready = $false
-            for ($i = 0; $i -lt 40; $i++) {
-              try {
-                Invoke-WebRequest -Uri "http://127.0.0.1:$port/healthz" -UseBasicParsing -TimeoutSec 2 | Out-Null
-                $ready = $true
-                break
-              } catch {
-                Start-Sleep -Milliseconds 500
-              }
-            }
-            if (-not $ready) {
-              Get-Content $out -ErrorAction SilentlyContinue
-              Get-Content $err -ErrorAction SilentlyContinue
-              throw "server did not become healthy"
-            }
-            npm run test:agent
-            npm run test:pro
-            npm run test:security
-            npm run test:hardening
-          } finally {
-            Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
-            Remove-Item -LiteralPath $ws -Recurse -Force -ErrorAction SilentlyContinue
-          }
-
-  security-baseline:
-    name: Security baseline
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: npm
-          cache-dependency-path: server/package-lock.json
-      - run: npm ci
+      - name: Change Journal tests
+        run: npm run test:changes
         working-directory: server
-      - name: Run baseline security suite
+      - name: Agent tool tests
+        run: npm run test:agent
+        working-directory: server
+      - name: Pro tests
+        run: npm run test:pro
+        working-directory: server
+      - name: Hardening tests
+        run: npm run test:hardening
+        working-directory: server
+      - name: Figma bridge tests
+        run: npm run test:figma
+        working-directory: server
+      - name: Isolated security tests
+        run: npm run test:security
         working-directory: server
         env:
-          PORT: "8799"
-          AGENT_MODE: safe
-          AGENT_POLICY: full
-        run: |
-          WORKSPACE="$(mktemp -d)"
-          AGENT_WORKSPACE="$WORKSPACE" node server.mjs > sec.log 2>&1 &
-          SERVER_PID=$!
-          trap 'kill "$SERVER_PID" 2>/dev/null || true; rm -rf "$WORKSPACE"' EXIT
-          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:8799/healthz >/dev/null && break; sleep 1; done
-          TEST_ENDPOINT=http://127.0.0.1:8799/mcp AUDIT_LOG=data/audit.log npm run test:security:baseline
+          LCA_REAL_REPO: ${{ github.workspace }}
 
   eval:
     name: Eval suite
@@ -131,5 +97,9 @@ jobs:
           cache-dependency-path: server/package-lock.json
       - run: npm ci
         working-directory: server
-      - run: npm run eval
+      - name: Test safety gate
+        run: npm run test:safety
+        working-directory: server
+      - name: Run evals
+        run: npm run eval
         working-directory: server

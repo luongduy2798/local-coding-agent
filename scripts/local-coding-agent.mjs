@@ -13,7 +13,8 @@ import {
   readFileSync,
   rmSync,
   statSync,
-  writeFileSync
+  writeFileSync,
+  cpSync
 } from "node:fs";
 import { chmod, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
@@ -27,11 +28,13 @@ const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(SCRIPT_DIR, "..");
 const SERVER_DIR = join(REPO_ROOT, "server");
 const SERVER_SCRIPT = "server.mjs";
+const VSCODE_EXTENSION_DIR = join(REPO_ROOT, "vscode-extension");
 const ENV_LOCAL_PATH = join(REPO_ROOT, ".env.local");
 const ENV_EXAMPLE_PATH = join(REPO_ROOT, ".env.example");
 const CONFIG_PATH = process.env.LCA_CONFIG_PATH || defaultConfigPath();
 const PID_PATH = join(dirname(CONFIG_PATH), "processes.json");
 const LOG_PATH = join(dirname(CONFIG_PATH), "launcher.log");
+const VSCODE_EXTENSION_STATE_PATH = join(dirname(CONFIG_PATH), "vscode-extension.json");
 const DEFAULT_PORT = "8789";
 const DEFAULT_TUNNEL_VERSION = process.env.TUNNEL_CLIENT_VERSION || "v0.0.10";
 const DEFAULT_FIGMA_DESKTOP_MCP_URL = "http://127.0.0.1:3845/mcp";
@@ -84,6 +87,9 @@ Usage:
   lca
   lca run
   node scripts/local-coding-agent.mjs setup [options]
+  node scripts/local-coding-agent.mjs extension setup
+  node scripts/local-coding-agent.mjs extension uninstall
+  node scripts/local-coding-agent.mjs extension [run]
   node scripts/local-coding-agent.mjs install
   node scripts/local-coding-agent.mjs start [options]
   node scripts/local-coding-agent.mjs stop
@@ -130,6 +136,9 @@ Fast path:
   bash scripts/lca setup       # macOS/Linux
   node scripts/local-coding-agent.mjs setup
   lca                         # From any repo, set workspace to git root and run
+  lca extension setup         # Install the optional VS Code Review Changes extension
+  lca extension               # Open Review Changes for the current repo
+  lca extension uninstall     # Remove the VS Code extension
 
 One-shot examples:
   node scripts/local-coding-agent.mjs start --workspace "<path-to-repo>" --no-tunnel
@@ -149,6 +158,9 @@ The wizard uses only Node.js built-ins. It auto-detects the current OS, checks
 prerequisites, creates or updates .env.local, installs server dependencies,
 checks the local Figma Desktop MCP bridge, downloads tunnel-client when possible,
 writes local CLI config, installs the global lca command, and prints health/status checks.
+It does not install editor integrations. Install the optional VS Code integration with:
+
+  lca extension setup
 
 Use --choose-os only when you want instruction mode for another OS.
 `);
@@ -477,7 +489,7 @@ function yamlEscape(value) {
 
 function configId(opts) {
   const serverPath = join(SERVER_DIR, SERVER_SCRIPT);
-  const figmaBridgePath = join(SERVER_DIR, "figma-desktop.mjs");
+  const figmaBridgePath = join(SERVER_DIR, "src", "integrations", "figma-desktop.mjs");
   const material = JSON.stringify({
     workspace: resolve(opts.workspace || ""),
     mode: opts.mode,
@@ -1045,6 +1057,199 @@ async function installCliCommand() {
   return target;
 }
 
+function vscodeExtensionInstallRoot() {
+  const home = process.env.HOME || process.env.USERPROFILE || ".";
+  return join(home, ".vscode", "extensions");
+}
+
+function readVsCodeExtensionManifest() {
+  const manifestPath = join(VSCODE_EXTENSION_DIR, "package.json");
+  if (!existsSync(manifestPath)) throw new Error(`Missing VS Code extension manifest: ${manifestPath}`);
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  if (!manifest.publisher || !manifest.name || !manifest.version) {
+    throw new Error("VS Code extension package.json requires publisher, name, and version.");
+  }
+  return manifest;
+}
+
+function vscodeExtensionTarget(manifest = readVsCodeExtensionManifest()) {
+  return join(vscodeExtensionInstallRoot(), `${manifest.publisher}.${manifest.name}-${manifest.version}`);
+}
+
+function vscodeExtensionFingerprint(baseDir) {
+  const manifestPath = join(baseDir, "package.json");
+  const bundlePath = join(baseDir, "dist", "extension.js");
+  if (!existsSync(manifestPath) || !existsSync(bundlePath)) return "";
+  return sha256(Buffer.concat([readFileSync(manifestPath), readFileSync(bundlePath)]));
+}
+
+function readVsCodeExtensionState() {
+  return readJsonFile(VSCODE_EXTENSION_STATE_PATH, {});
+}
+
+function writeVsCodeExtensionState(value) {
+  ensureConfigDir();
+  writeFileSync(VSCODE_EXTENSION_STATE_PATH, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+}
+
+async function findVsCodeCli() {
+  const configured = process.env.VSCODE_CLI_PATH;
+  if (configured && existsSync(configured)) return configured;
+
+  const commandNames = process.platform === "win32"
+    ? ["code.cmd", "code.exe", "code-insiders.cmd"]
+    : ["code", "code-insiders"];
+  for (const command of commandNames) {
+    const probe = await capture(command, ["--version"]);
+    if (probe.code === 0) return command;
+  }
+
+  const home = process.env.HOME || process.env.USERPROFILE || "";
+  const candidates = process.platform === "darwin"
+    ? [
+        "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code",
+        join(home, "Applications", "Visual Studio Code.app", "Contents", "Resources", "app", "bin", "code"),
+        "/Applications/Visual Studio Code - Insiders.app/Contents/Resources/app/bin/code-insiders"
+      ]
+    : process.platform === "win32"
+      ? [
+          join(process.env.LOCALAPPDATA || "", "Programs", "Microsoft VS Code", "bin", "code.cmd"),
+          join(process.env.PROGRAMFILES || "", "Microsoft VS Code", "bin", "code.cmd")
+        ]
+      : ["/usr/bin/code", "/usr/local/bin/code", "/snap/bin/code"];
+  for (const candidate of candidates) {
+    if (candidate && existsSync(candidate)) return candidate;
+  }
+
+  if (process.platform === "darwin") {
+    const processes = await capture("ps", ["-ax", "-o", "command="]);
+    const match = processes.stdout.match(/([^\n]+Visual Studio Code(?: \d+)?\.app)\/Contents\/MacOS\/Electron/);
+    if (match) {
+      const translocatedCli = join(match[1], "Contents", "Resources", "app", "bin", "code");
+      if (existsSync(translocatedCli)) return translocatedCli;
+    }
+  }
+  return "";
+}
+
+async function setupVsCodeExtension() {
+  if (!existsSync(VSCODE_EXTENSION_DIR)) {
+    throw new Error(`VS Code extension source is missing: ${VSCODE_EXTENSION_DIR}`);
+  }
+  const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+  if (!existsSync(join(VSCODE_EXTENSION_DIR, "node_modules"))) {
+    await runChecked("vscode-extension install", npm, ["install"], { cwd: VSCODE_EXTENSION_DIR });
+  }
+  await runChecked("vscode-extension build", npm, ["run", "build"], { cwd: VSCODE_EXTENSION_DIR });
+
+  const manifest = readVsCodeExtensionManifest();
+  const installRoot = vscodeExtensionInstallRoot();
+  const extensionPrefix = `${manifest.publisher}.${manifest.name}-`;
+  const target = vscodeExtensionTarget(manifest);
+  mkdirSync(installRoot, { recursive: true });
+  for (const entry of readdirSync(installRoot, { withFileTypes: true })) {
+    if (!entry.isDirectory() || !entry.name.startsWith(extensionPrefix)) continue;
+    const previous = join(installRoot, entry.name);
+    if (resolve(previous) !== resolve(target)) rmSync(previous, { recursive: true, force: true });
+  }
+  rmSync(target, { recursive: true, force: true });
+  mkdirSync(target, { recursive: true });
+  for (const name of ["package.json", "README.md", "dist", "media"]) {
+    const source = join(VSCODE_EXTENSION_DIR, name);
+    if (existsSync(source)) cpSync(source, join(target, name), { recursive: true });
+  }
+  const fingerprint = vscodeExtensionFingerprint(target);
+  writeVsCodeExtensionState({
+    version: manifest.version,
+    fingerprint,
+    target,
+    needsFreshWindow: true,
+    installedAt: new Date().toISOString()
+  });
+  console.log(`Installed VS Code extension: ${target}`);
+  console.log("Run: lca extension");
+  return target;
+}
+
+async function uninstallVsCodeExtension() {
+  const manifest = readVsCodeExtensionManifest();
+  const extensionId = `${manifest.publisher}.${manifest.name}`;
+  const extensionPrefix = `${extensionId}-`;
+  const cli = await findVsCodeCli();
+
+  if (cli) {
+    const result = await capture(cli, ["--uninstall-extension", extensionId]);
+    const output = `${result.stdout || ""}\n${result.stderr || ""}`.trim();
+    const notInstalled = /not installed|is not installed|extension.*not found/i.test(output);
+    if (result.code !== 0 && !notInstalled) {
+      console.log(`WARN VS Code CLI could not unregister ${extensionId}: ${output || `exit ${result.code}`}`);
+    }
+  }
+
+  const installRoot = vscodeExtensionInstallRoot();
+  let removed = 0;
+  if (existsSync(installRoot)) {
+    for (const entry of readdirSync(installRoot, { withFileTypes: true })) {
+      if (!entry.isDirectory() || !entry.name.startsWith(extensionPrefix)) continue;
+      rmSync(join(installRoot, entry.name), { recursive: true, force: true });
+      removed += 1;
+    }
+  }
+  rmSync(VSCODE_EXTENSION_STATE_PATH, { force: true });
+
+  if (removed > 0 || cli) {
+    console.log(`Uninstalled VS Code extension: ${extensionId}`);
+  } else {
+    console.log(`VS Code extension is not installed: ${extensionId}`);
+  }
+  console.log("Reload VS Code if the Local Coding Agent view is still visible.");
+}
+
+async function openVsCodeExtension(flags = {}) {
+  const manifest = readVsCodeExtensionManifest();
+  let target = vscodeExtensionTarget(manifest);
+  let state = readVsCodeExtensionState();
+  const sourceFingerprint = vscodeExtensionFingerprint(VSCODE_EXTENSION_DIR);
+  const installedFingerprint = vscodeExtensionFingerprint(target);
+  let updated = false;
+
+  if (!installedFingerprint || installedFingerprint !== sourceFingerprint) {
+    console.log("Updating the VS Code Review Changes extension...");
+    target = await setupVsCodeExtension();
+    state = readVsCodeExtensionState();
+    updated = true;
+  }
+
+  const workspace = resolve(flags.workspace || await detectWorkspaceRoot());
+  const cli = await findVsCodeCli();
+  const freshWindow = updated || state.needsFreshWindow === true;
+  if (cli) {
+    const opened = await capture(cli, [freshWindow ? "--new-window" : "--reuse-window", workspace]);
+    if (opened.code !== 0) throw new Error(opened.stderr || opened.stdout || "Could not open VS Code.");
+  } else if (process.platform === "darwin") {
+    const opened = await capture("open", ["-a", "Visual Studio Code", workspace]);
+    if (opened.code !== 0) throw new Error("Could not find the VS Code CLI or application.");
+  } else {
+    throw new Error("Could not find the VS Code CLI. Set VSCODE_CLI_PATH or install the `code` shell command.");
+  }
+
+  await new Promise((resolveDelay) => setTimeout(resolveDelay, freshWindow ? 1600 : 600));
+  const reviewUri = `vscode://${manifest.publisher}.${manifest.name}/review-changes`;
+  if (!openUrl(reviewUri)) {
+    console.log("Open Activity Bar → Local Coding Agent → Review Changes.");
+    return;
+  }
+  writeVsCodeExtensionState({
+    ...state,
+    version: manifest.version,
+    fingerprint: vscodeExtensionFingerprint(target),
+    target,
+    needsFreshWindow: false,
+    lastOpenedAt: new Date().toISOString()
+  });
+  console.log(`Opened Review Changes for: ${workspace}`);
+}
+
 async function setup(flags) {
   if (flags.help) return setupUsage();
   if (!input.isTTY || !output.isTTY) {
@@ -1585,7 +1790,7 @@ async function loadFigmaDesktopBridge() {
   if (!existsSync(join(SERVER_DIR, "node_modules"))) {
     throw new Error("Figma bridge dependencies are missing. Run `lca setup` or `lca install` first.");
   }
-  return import(pathToFileURL(join(SERVER_DIR, "figma-desktop.mjs")).href);
+  return import(pathToFileURL(join(SERVER_DIR, "src", "integrations", "figma-desktop.mjs")).href);
 }
 
 async function figmaDesktopStatusCli() {
@@ -1855,7 +2060,16 @@ async function main() {
   }
   if (command === "help") return usage();
   if (command === "run" || command === "here") return runCurrentWorkspace(flags);
-  if (command === "setup" || command === "init") return setup(flags);
+  if (command === "setup" || command === "init") {
+    if (rest.length === 0) return setup(flags);
+    throw new Error("Usage: lca setup");
+  }
+  if (command === "extension") {
+    if (rest.length === 0 || (rest.length === 1 && rest[0] === "run")) return openVsCodeExtension(flags);
+    if (rest.length === 1 && rest[0] === "setup") return setupVsCodeExtension();
+    if (rest.length === 1 && ["uninstall", "remove"].includes(rest[0])) return uninstallVsCodeExtension();
+    throw new Error("Usage: lca extension [run] | lca extension setup | lca extension uninstall");
+  }
   if (command === "install") return installDeps(effectiveOptions(flags));
   if (command === "cli") return cliCommand();
   if (command === "keys") return keysCommand();

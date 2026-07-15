@@ -3,13 +3,15 @@
 
 import http from "node:http";
 import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
-import os from "node:os";
+import { mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { createIsolatedTestRoot, safeRemove } from "../helpers/test-guard.mjs";
 
-const SERVER = path.resolve("server.mjs");
+const TEST_DIR = path.dirname(fileURLToPath(import.meta.url));
+const SERVER = path.resolve(TEST_DIR, "../..", "server.mjs");
 let pass = 0;
 let fail = 0;
 
@@ -42,6 +44,8 @@ async function startServer(workspace, { port, policy = "strict", auth = "", appr
       ...process.env,
       PORT: String(port),
       AGENT_WORKSPACE: workspace,
+      AGENT_DATA_DIR: testContext.dataDir,
+      LCA_TEST_RUN_ID: testContext.runId,
       AGENT_MODE: "safe",
       AGENT_POLICY: policy,
       AGENT_EXTRA_ROOTS_JSON: "[]",
@@ -81,6 +85,15 @@ async function call(client, name, args = {}) {
   return { isError: Boolean(result.isError), text: result.content?.[0]?.text || "" };
 }
 
+async function changeApi(port, method, pathname, body) {
+  const response = await fetch(`http://127.0.0.1:${port}${pathname}`, {
+    method,
+    headers: body === undefined ? undefined : { "content-type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body)
+  });
+  return { status: response.status, data: await response.json() };
+}
+
 function chunkedPost(port, body) {
   return new Promise((resolve, reject) => {
     const req = http.request({
@@ -99,7 +112,8 @@ function chunkedPost(port, body) {
   });
 }
 
-const base = await mkdtemp(path.join(os.tmpdir(), "lca-hardening-"));
+const testContext = await createIsolatedTestRoot({ prefix: "lca-hardening-", protectedPaths: [path.resolve("..")] });
+const base = testContext.fixtureDir;
 let server;
 try {
   // Strict policy + browser-origin + body limit + removed legacy UI routes.
@@ -194,7 +208,7 @@ try {
   await tokenClient.close();
   await stopServer(server);
   server = null;
-  const approvalAudit = await readFile(path.resolve("data", "audit.log"), "utf8").catch(() => "");
+  const approvalAudit = await readFile(path.join(testContext.dataDir, "audit.log"), "utf8").catch(() => "");
   check("audit log redacts approval_token", !approvalAudit.includes(approvalSecret));
 
   // Query-string tokens must not authenticate.
@@ -214,15 +228,14 @@ try {
   console.log("\n[phase] transactional undo coverage");
   server = await startServer(workspaceA, { port: 19004, policy: "full" });
   const full = await connect(19004);
-  await call(full, "apply_patch", { operations: [{ op: "create", path: "created.txt", content: "created" }] });
-  await call(full, "undo_last_patch");
-  check("undo removes files created by apply_patch", (await call(full, "stat_path", { path: "created.txt" })).isError);
-  await call(full, "make_dir", { path: "source-dir" });
-  await call(full, "write_file", { path: "source-dir/a.txt", content: "a" });
-  await call(full, "move_path", { from: "source-dir", to: "dest-dir" });
-  await call(full, "undo_last_patch");
-  check("undo restores renamed directory source", !(await call(full, "stat_path", { path: "source-dir/a.txt" })).isError);
-  check("undo removes renamed directory destination", (await call(full, "stat_path", { path: "dest-dir" })).isError);
+  const createdChange = JSON.parse((await call(full, "apply_patch", { operations: [{ op: "create", path: "created.txt", content: "created" }] })).text);
+  await changeApi(19004, "POST", `/changes/${createdChange.change_id}/undo`, {});
+  check("Review Changes undo removes files created by apply_patch", (await call(full, "stat_path", { path: "created.txt" })).isError);
+  await call(full, "write_file", { path: "source.txt", content: "a" });
+  const movedChange = JSON.parse((await call(full, "move_path", { from: "source.txt", to: "dest.txt" })).text);
+  await changeApi(19004, "POST", `/changes/${movedChange.change_id}/undo`, {});
+  check("Review Changes undo restores renamed file source", !(await call(full, "stat_path", { path: "source.txt" })).isError);
+  check("Review Changes undo removes renamed file destination", (await call(full, "stat_path", { path: "dest.txt" })).isError);
   await full.close();
   await stopServer(server);
   server = null;
@@ -231,11 +244,12 @@ try {
   console.log("\n[phase] workspace-scoped history");
   server = await startServer(path.join(base, "workspace-b"), { port: 19005, policy: "full" });
   const other = await connect(19005);
-  check("new workspace cannot undo another workspace history", (await call(other, "undo_last_patch")).isError);
+  const isolatedChanges = await changeApi(19005, "GET", "/changes?limit=10");
+  check("new workspace cannot see another workspace change history", isolatedChanges.status === 200 && isolatedChanges.data.count === 0, JSON.stringify(isolatedChanges.data));
   await other.close();
 } finally {
   if (server) await stopServer(server);
-  await rm(base, { recursive: true, force: true });
+  await safeRemove(base, testContext, { recursive: true, force: true });
 }
 
 console.log(`\n==== HARDENING: ${pass} passed, ${fail} failed ====`);

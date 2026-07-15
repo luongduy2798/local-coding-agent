@@ -18,14 +18,14 @@ const sdkHttpPath = path.join(serverDir, "node_modules", "@modelcontextprotocol"
 const { Client } = await import(pathToFileURL(sdkClientPath).href);
 const { StreamableHTTPClientTransport } = await import(pathToFileURL(sdkHttpPath).href);
 
-import { spawn } from "node:child_process";
-import { mkdir, writeFile, rm, readFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
-import os from "node:os";
+import { readFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
+import { createIsolatedTestRoot, safeRemove } from "../server/tests/helpers/test-guard.mjs";
+import { getFreePort, startTestServer, stopTestProcess } from "../server/tests/helpers/test-runtime.mjs";
 
 const SERVER_MJS = path.resolve(__dirname, "..", "server", "server.mjs");
-const EVAL_PORT = 8898;
+const testContext = await createIsolatedTestRoot({ prefix: "lca-eval-", protectedPaths: [path.resolve(__dirname, "..")] });
+const EVAL_PORT = await getFreePort();
 const EVAL_ENDPOINT = `http://127.0.0.1:${EVAL_PORT}/mcp`;
 
 let pass = 0;
@@ -49,46 +49,20 @@ async function sleep(ms) {
 }
 
 async function startServer(workspace) {
-  await mkdir(workspace, { recursive: true });
-  return new Promise((resolve, reject) => {
-    const child = spawn(
-      process.execPath,
-      [SERVER_MJS],
-      {
-        env: {
-          ...process.env,
-          PORT: String(EVAL_PORT),
-          AGENT_WORKSPACE: workspace,
-          AGENT_MODE: "safe",
-          AGENT_POLICY: "full"
-        },
-        windowsHide: true
-      }
-    );
-    child.stderr?.on("data", () => {});
-    let started = false;
-    child.stdout?.on("data", (d) => {
-      if (!started && d.toString().includes("listening on")) {
-        started = true;
-        resolve(child);
-      }
-    });
-    child.on("error", reject);
-    setTimeout(() => {
-      if (!started) reject(new Error("Server start timeout"));
-    }, 8000);
+  const runtime = await startTestServer({
+    serverPath: SERVER_MJS,
+    workspace,
+    dataDir: testContext.dataDir,
+    runId: testContext.runId,
+    port: EVAL_PORT,
+    mode: "safe",
+    policy: "full"
   });
+  return runtime.child;
 }
 
 async function stopServer(child) {
-  try {
-    if (process.platform === "win32" && child.pid) {
-      spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { windowsHide: true });
-    } else {
-      child.kill("SIGTERM");
-    }
-    await sleep(500);
-  } catch { /* ignore */ }
+  await stopTestProcess(child);
 }
 
 async function connectClient() {
@@ -155,18 +129,22 @@ async function runEvals(workspace) {
       check("edit-multi-file: content correct", da && da.content.includes("10") && !da.content.includes("const a = 1;"));
     }
 
-    // ---- eval 3: undo_last_patch restores ----
-    console.log("EVAL: undo_last_patch");
+    // ---- eval 3: Review Changes undo restores ----
+    console.log("EVAL: Review Changes undo");
     {
       await call(client, "write_file", { path: "src/undo-me.js", content: "const x = 'original';\n" });
-      await call(client, "replace_in_file", { path: "src/undo-me.js", old_text: "original", new_text: "changed" });
+      const changed = await call(client, "replace_in_file", { path: "src/undo-me.js", old_text: "original", new_text: "changed" });
+      const changedData = await parseJSON(changed.text);
       const before = await call(client, "read_file", { path: "src/undo-me.js" });
       const dBefore = await parseJSON(before.text);
       check("undo: file was changed", dBefore && dBefore.content.includes("changed"));
 
-      const undo = await call(client, "undo_last_patch", {});
-      const dUndo = await parseJSON(undo.text);
-      check("undo: undo_last_patch returned ok", dUndo && dUndo.ok);
+      const undoResponse = await fetch(`http://127.0.0.1:${EVAL_PORT}/changes/${changedData.change_id}/undo`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}"
+      });
+      check("undo: Review Changes API returned ok", undoResponse.ok);
 
       const after = await call(client, "read_file", { path: "src/undo-me.js" });
       const dAfter = await parseJSON(after.text);
@@ -211,8 +189,7 @@ async function runEvals(workspace) {
       const sentinel = "EVAL_SECRET_" + randomUUID().replace(/-/g, "").slice(0, 16);
       await call(client, "apply_patch", { operations: [{ op: "create", path: "sec-eval.txt", content: `API_KEY=${sentinel}` }] });
       await call(client, "delete_path", { path: "sec-eval.txt" });
-      // Read the audit log (it lives in server/data/audit.log)
-      const auditPath = path.resolve(__dirname, "..", "server", "data", "audit.log");
+      const auditPath = path.join(testContext.dataDir, "audit.log");
       let auditContent = "";
       try { auditContent = await readFile(auditPath, "utf8"); } catch { /* no audit log */ }
       if (auditContent) {
@@ -297,7 +274,7 @@ async function runEvals(workspace) {
 // Main
 // ============================================================================
 
-const evalWorkspace = path.join(os.tmpdir(), `lca-eval-${Date.now()}`);
+const evalWorkspace = testContext.fixtureDir;
 
 console.log("=".repeat(60));
 console.log("Local Coding Agent — Eval Suite (v2.9)");
@@ -310,8 +287,9 @@ try {
   console.error("\nFATAL eval runner error:", err?.message || err);
   process.exit(1);
 } finally {
-  // Clean up workspace
-  try { await rm(evalWorkspace, { recursive: true, force: true }); } catch { /* ok */ }
+  await safeRemove(evalWorkspace, testContext, { recursive: true, force: true }).catch((error) => {
+    console.error(`Cleanup skipped for safety: ${error?.message || error}`);
+  });
 }
 
 const total = pass + fail;

@@ -15,6 +15,7 @@ tools/
 
 # ---- Node ----
 node_modules/
+vscode-extension/dist/
 server/data/
 server/*.log
 tmp-*/
@@ -23,4 +24,6 @@ tmp-*/
 .DS_Store
 Thumbs.db
 .vscode/
+!vscode-extension/.vscode/
+!vscode-extension/.vscode/launch.json
 .idea/

@@ -3,8 +3,7 @@
 
 import http from "node:http";
 import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
-import os from "node:os";
+import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -12,15 +11,17 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
+import { createIsolatedTestRoot, safeRemove } from "../helpers/test-guard.mjs";
 import {
   callFigmaDesktopTool,
   figmaDesktopStatus,
   listFigmaDesktopTools,
   parseFigmaNodeReference
-} from "./figma-desktop.mjs";
+} from "../../src/integrations/figma-desktop.mjs";
 
-const SERVER_DIR = path.dirname(fileURLToPath(import.meta.url));
-const SERVER = path.join(SERVER_DIR, "server.mjs");
+const TEST_DIR = path.dirname(fileURLToPath(import.meta.url));
+const SERVER_PACKAGE_DIR = path.resolve(TEST_DIR, "../..");
+const SERVER = path.join(SERVER_PACKAGE_DIR, "server.mjs");
 let pass = 0;
 let fail = 0;
 
@@ -151,6 +152,8 @@ async function startLca(workspace, figmaEndpoint, policy = "full") {
       ...process.env,
       PORT: String(port),
       AGENT_WORKSPACE: workspace,
+      AGENT_DATA_DIR: testContext.dataDir,
+      LCA_TEST_RUN_ID: testContext.runId,
       AGENT_MODE: "safe",
       AGENT_POLICY: policy,
       AGENT_EXTRA_ROOTS_JSON: "[]",
@@ -189,7 +192,8 @@ async function call(client, name, args = {}) {
   return result;
 }
 
-const base = await mkdtemp(path.join(os.tmpdir(), "lca-figma-desktop-"));
+const testContext = await createIsolatedTestRoot({ prefix: "lca-figma-desktop-", protectedPaths: [path.resolve("..")] });
+const base = testContext.fixtureDir;
 const mock = await startMockFigma();
 let lca;
 let client;
@@ -274,7 +278,7 @@ try {
   if (client) await client.close().catch(() => {});
   await stopChild(lca?.child);
   await new Promise((resolve) => mock.server.close(resolve));
-  await rm(base, { recursive: true, force: true });
+  await safeRemove(base, testContext, { recursive: true, force: true });
 }
 
 console.log(`\n==== FIGMA DESKTOP RESULT: ${pass} passed, ${fail} failed ====`);

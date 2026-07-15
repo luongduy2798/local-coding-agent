@@ -4,7 +4,7 @@ Nếu user yêu cầu cài hoặc hướng dẫn repo này, dùng flow TUI mới
 
 ## What This Is
 
-Local MCP server (`server/server.mjs`) cho ChatGPT Web connector. User chạy global command `lca` trong repo bất kỳ; workspace tự lấy theo git root hiện tại.
+Local MCP server cho ChatGPT Web connector. `server/server.mjs` là compatibility entrypoint; implementation nằm trong `server/src/server.mjs`. User chạy global command `lca` trong repo bất kỳ; workspace tự lấy theo git root hiện tại.
 
 ## Prerequisites
 
@@ -73,6 +73,26 @@ Chi tiết: [docs/CHATGPT_WEB_CONNECTOR.md](docs/CHATGPT_WEB_CONNECTOR.md).
 - Đây không phải OS sandbox.
 - Chỉ connect workspace tin tưởng.
 - Không expose server public nếu chưa hiểu rủi ro.
+
+## Test Safety Rules
+
+All tests that create, modify, rename, or delete files must use an isolated fixture created with `mkdtemp()` through `server/tests/helpers/test-guard.mjs`.
+
+Tests must never use the active repository, `process.cwd()`, `AGENT_WORKSPACE`, the user's home directory, Desktop, or any Git repository root as a disposable workspace.
+
+Before any recursive delete:
+
+- The target must be inside the test root owned by the current run.
+- The marker and run ID must match.
+- The target must be inside a registered disposable root and must not be the test root.
+- Protected repositories and Git roots must remain intact.
+- A target containing `.git` or resolving through a symlink outside the test root must be rejected.
+
+All destructive cleanup must use `safeRemove()` from `server/tests/helpers/test-guard.mjs`. Direct recursive filesystem removal, shell recursive deletion, destructive Git cleanup, `pkill`, and `killall` are forbidden in tests.
+
+Integration tests must use a dynamic port, a temporary `AGENT_WORKSPACE`, a temporary `AGENT_DATA_DIR`, and stop only the exact child process they spawned. Port `8789` and the real `server/data` directory are not test fixtures.
+
+Read [docs/TEST_SAFETY.md](docs/TEST_SAFETY.md) before adding or changing a destructive test. Run `npm run test:safety` from `server/` before security or integration suites.
 
 ## Low-Level CLI
 

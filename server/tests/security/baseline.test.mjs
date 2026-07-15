@@ -5,7 +5,7 @@
 // Security regression tests. Run against a server started on a NON-git scratch
 // workspace in safe mode:
 //   TEST_ENDPOINT=http://127.0.0.1:8799/mcp AUDIT_LOG=<server>/data/audit.log \
-//     node security-test.mjs
+//     node tests/security/baseline.test.mjs
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { readFileSync } from "node:fs";

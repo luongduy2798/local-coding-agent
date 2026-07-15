@@ -8,12 +8,34 @@ ChatGPT sessions; it is a normal MCP connector you authorize.
 
 > Full documentation, security model, and setup: see the [repository README](../README.md).
 
+## Package layout
+
+```text
+server/
+├── server.mjs                  # stable compatibility entrypoint
+├── src/                        # runtime implementation
+│   ├── server.mjs
+│   ├── change-journal.mjs
+│   ├── core/
+│   └── integrations/
+├── resources/                  # MCP Apps SDK HTML resources
+├── scripts/                    # package maintenance and safety checks
+└── tests/
+    ├── helpers/
+    ├── integration/
+    ├── runners/
+    └── security/
+```
+
+Runtime code must stay under `src/`; test-only helpers must stay under `tests/`.
+The root `server.mjs` remains intentionally small so existing launchers continue to work.
+
 ## Tools
 
 | Group | Tools |
 |-------|-------|
 | Info | `workspace_info`, `ping` |
-| Read | `repo_overview`, `list_files`, `find_files`, `read_file`, `read_many` (concurrent + line ranges), `stat_path`, `search_text` (ripgrep/git, with context + glob) |
+| Read | `repo_overview`, `list_files`, `find_files`, `read_file`, `read_many` (SHA-256 versions, concurrent + line ranges), `stat_path`, `search_text` (ripgrep/git, with context + glob) |
 | Figma Desktop | `figma_status`, `figma_list_tools`, `figma_call_tool`, `figma_get_design_context`, `figma_get_screenshot`, `figma_get_metadata`, `figma_get_variable_defs`, `figma_get_code_connect_map`, `figma_get_figjam` |
 | Write | `write_file`, `replace_in_file`, `apply_patch`, `make_dir`, `move_path`, `delete_path` |
 | Execute | `run_command`, `run_commands` (bounded batch; cmd/powershell/bash/sh/zsh) |
@@ -53,6 +75,7 @@ npm start
 | `PORT` | `8789` | HTTP port for the MCP endpoint. |
 | `AGENT_HOST` | `127.0.0.1` | Bind address. Keep loopback; the tunnel forwards to it. |
 | `AGENT_WORKSPACE` | `../agent-workspace` | Primary root the agent may touch. |
+| `AGENT_DATA_DIR` | `server/data` | Runtime data root. Tests must override this with an isolated temp directory. |
 | `AGENT_EXTRA_ROOTS` | _(empty)_ | Extra roots, `;`-separated. |
 | `AGENT_EXTRA_ROOTS_JSON` | _(empty)_ | Extra roots as a JSON string array. Prefer this for paths that contain separators. |
 | `AGENT_MODE` | `safe` | Command guardrail. `safe` = conservative blocklist; `full` = fewer app-level command blocks. Not an OS sandbox. |
@@ -66,6 +89,7 @@ npm start
 | `AGENT_AUDIT_ARGS` | `1` | Set `0` to keep audit events but skip argument serialization/redaction. |
 | `AGENT_HTTP_LOG` | `0` | Set `1` to print every HTTP request. Disabled by default to keep tunnel traffic quiet. |
 | `AGENT_MAX_BATCH_READ_CHARS` | `500000` | Combined text cap for one `read_many` response. |
+| `AGENT_MAX_SNAPSHOT_BYTES` | `5242880` | Maximum small-text snapshot size for Review Changes. |
 | `AGENT_READ_DEFAULT` | `30000` | Default chars `read_file` returns (raise per-call via `max_chars`). Keeps payloads + context small. |
 | `AGENT_CMD_OUTPUT_DEFAULT` | `20000` | Default chars of command output returned (use `tail_lines`/`head_lines`/`max_output_chars`). |
 | `FIGMA_DESKTOP_MCP_URL` | `http://127.0.0.1:3845/mcp` | Official local MCP endpoint exposed by Figma Desktop after enabling it in Dev Mode. |
@@ -80,12 +104,27 @@ Fast workflow note: test/build/lint tools are kept for explicit manual use, but
 `workspace_snapshot` and default guidance do not recommend running them
 automatically.
 
+## Review Changes
+
+Dedicated filesystem mutations are tracked automatically and return `change_id`.
+`read_file` and `read_many` return whole-file SHA-256 versions; a changed file is
+rejected with `STALE_FILE` until it is reread. The authenticated HTTP API under
+`/changes` provides list, detail, diff, before/after snapshot content, conflict-safe
+Undo, Partial Undo, Reapply, Undo All, and change-history clearing. Large files, binary files, and directories are
+metadata-only. See [docs/REVIEW_CHANGES.md](../docs/REVIEW_CHANGES.md).
+
 ## Test
 
 ```bash
-npm run test:agent       # exercises every tool against a running server
-npm run test:security    # runtime security checks against a running server
-npm run test:hardening   # self-contained policy/origin/body/undo regressions
+npm run test:safety      # scanner + destructive cleanup guard regressions
+npm run test:changes     # Review Changes integration tests
+npm run test:agent       # isolated all-tool exercise
+npm run test:security    # isolated runtime + baseline security suites
+npm run test:hardening   # policy/origin/body/change-history regressions
 npm run test:pro         # Pro snapshot/report/tier regression checks
 npm run test:figma       # mocked Figma Desktop MCP bridge checks
+npm run eval             # isolated eval suite
 ```
+
+Tests that mutate files must use `tests/helpers/test-guard.mjs`; direct recursive cleanup is
+forbidden. See [docs/TEST_SAFETY.md](../docs/TEST_SAFETY.md).

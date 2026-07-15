@@ -184,6 +184,55 @@ Ví dụ:
 
 Selection-based cũng hoạt động: chọn frame trong Figma Desktop rồi yêu cầu ChatGPT đọc selection mà không cần truyền URL.
 
+## Review Changes
+
+Các mutation tool chuyên dụng được backend ghi lịch sử tự động:
+
+```text
+write_file
+replace_in_file
+apply_patch
+make_dir
+move_path
+delete_path
+```
+
+Kết quả mutation có thêm `change_id`. `read_file` và từng file đọc thành công qua `read_many` trả SHA-256 `version`. Nếu file bị sửa bên ngoài sau lần ChatGPT đọc gần nhất, mutation sẽ bị chặn bằng `STALE_FILE`; ChatGPT phải đọc lại rồi thử lại.
+
+Review Changes không phụ thuộc Git. File text nhỏ có before/after snapshot để hỗ trợ Diff, Undo, Partial Undo và Reapply. File lớn, binary và directory chỉ lưu metadata nên không bị backend giả vờ rằng có thể phục hồi an toàn. Rename được quản lý như một atomic group và Undo/Reapply luôn kiểm tra conflict trước khi ghi đè.
+
+HTTP API:
+
+```text
+GET    /changes
+GET    /changes/:id
+GET    /changes/:id/diff
+GET    /changes/:id/content?path=src/file.js&side=before|after
+POST   /changes/:id/undo
+POST   /changes/:id/reapply
+POST   /changes/undo-all
+DELETE /changes
+```
+
+`run_command` và `run_commands` chỉ tạo activity record tối giản; lịch sử thay đổi không lưu command text, stdout, stderr, environment hoặc secret.
+
+VS Code extension là tích hợp tùy chọn. Cài và mở bằng:
+
+```bash
+lca extension setup
+lca extension
+```
+
+Gỡ extension:
+
+```bash
+lca extension uninstall
+```
+
+`lca setup` thông thường không cài extension. View **Local Coding Agent → Review Changes** hỗ trợ native diff, Undo/Reapply từng change hoặc từng file, Undo All và Clear History. Nếu LCA đang chạy cho workspace khác, chọn **Connect LCA to this workspace** để stop instance cũ và start lại theo repo đang mở trong VS Code.
+
+Chi tiết: [docs/REVIEW_CHANGES.md](docs/REVIEW_CHANGES.md).
+
 ## Config
 
 Secret runtime nằm ở:
@@ -254,6 +303,25 @@ lca config
 ```
 
 Chọn `Mode` hoặc `Policy`, lưu lại, và nếu agent đang chạy thì `lca config` sẽ tự restart để áp dụng cấu hình mới.
+
+## Writing Tests Safely
+
+Test có mutation filesystem phải dùng `server/tests/helpers/test-guard.mjs`, workspace tạm, data directory tạm và port động. Không dùng checkout thật, Git root, port `8789` hoặc `server/data` làm fixture disposable.
+
+Chạy safety gate trước integration hoặc security test:
+
+```bash
+cd server
+npm run test:safety
+```
+
+Security suite chỉ chạy qua wrapper cô lập:
+
+```bash
+npm run test:security
+```
+
+Chi tiết: [docs/TEST_SAFETY.md](docs/TEST_SAFETY.md).
 
 ## Troubleshooting
 

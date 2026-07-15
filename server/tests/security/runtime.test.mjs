@@ -3,14 +3,20 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import { spawnSync } from "node:child_process";
-import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
-const ENDPOINT = process.env.TEST_ENDPOINT || "http://127.0.0.1:8789/mcp";
+const ENDPOINT = process.env.TEST_ENDPOINT;
+const TEST_ROOT = process.env.LCA_TEST_ROOT;
+const TEST_FIXTURE = process.env.LCA_TEST_FIXTURE;
+const TEST_DATA_DIR = process.env.LCA_TEST_DATA_DIR;
+const TEST_RUN_ID = process.env.LCA_TEST_RUN_ID;
+if (!ENDPOINT || !TEST_ROOT || !TEST_FIXTURE || !TEST_DATA_DIR || !TEST_RUN_ID) {
+  throw new Error("Security tests must run through tests/runners/run-security-isolated.mjs.");
+}
 const client = new Client({ name: "agent-security-test-client", version: "1.0.0" });
 const transport = new StreamableHTTPClientTransport(new URL(ENDPOINT));
 await client.connect(transport);
@@ -36,6 +42,9 @@ async function call(name, args) {
 
 const info = JSON.parse((await call("workspace_info", {})).text);
 const root = info.primary_root;
+if (path.resolve(root) !== path.resolve(TEST_FIXTURE)) {
+  throw new Error(`Security test workspace mismatch: ${root}`);
+}
 
 // Default macOS volumes are commonly case-insensitive. A differently-cased
 // absolute path to the same root must remain inside the root after canonicalization.
@@ -47,12 +56,8 @@ if (process.platform === "darwin") {
   }
 }
 
-await rm(root, { recursive: true, force: true });
-await mkdir(root, { recursive: true });
-
 // 1) Symlink/junction escape must be blocked.
-const outside = path.join(os.tmpdir(), `lca-security-outside-${Date.now()}`);
-await rm(outside, { recursive: true, force: true });
+const outside = path.join(TEST_ROOT, `outside-${Date.now()}`);
 await mkdir(outside, { recursive: true });
 await writeFile(path.join(outside, "secret.txt"), "outside-secret\n", "utf8");
 const linkPath = path.join(root, "escape-link");
@@ -82,8 +87,7 @@ await writeFile(path.join(root, "tracked.txt"), "one\n", "utf8");
 spawnSync("git", ["add", "tracked.txt"], { cwd: root, stdio: "ignore" });
 spawnSync("git", ["commit", "-m", "init"], { cwd: root, stdio: "ignore" });
 await writeFile(path.join(root, "tracked.txt"), "two\n", "utf8");
-const outsideDiff = path.join(path.dirname(root), "outside.diff");
-await rm(outsideDiff, { force: true });
+const outsideDiff = path.join(TEST_ROOT, `outside-${Date.now()}.diff`);
 const gitOutput = await call("git", { args: ["diff", `--output=${outsideDiff}`] });
 ok(Boolean(gitOutput.result.isError), "git --output is blocked in safe mode", gitOutput.text);
 ok(!existsSync(outsideDiff), "git --output did not create file outside root");
@@ -96,7 +100,7 @@ const secret = `LCA_AUDIT_SECRET_${Date.now()}`;
 await call("apply_patch", {
   operations: [{ op: "create", path: "audit-secret.txt", content: secret }]
 });
-const audit = await readFile(path.resolve("data", "audit.log"), "utf8").catch(() => "");
+const audit = await readFile(path.join(TEST_DATA_DIR, "audit.log"), "utf8").catch(() => "");
 ok(!audit.includes(secret), "audit log redacts nested apply_patch content");
 
 await client.close();
