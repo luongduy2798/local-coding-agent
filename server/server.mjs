@@ -26,6 +26,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 import { summarizeArgs } from "./core/redaction.mjs";
+import { createTaskChangeManager } from "./task-change-manager.mjs";
+import { registerTaskChangeTools } from "./task-change-tools.mjs";
 import {
   DEFAULT_FIGMA_DESKTOP_MCP_URL,
   callFigmaDesktopTool,
@@ -47,8 +49,13 @@ const HOST = process.env.AGENT_HOST || "127.0.0.1";
 const CONFIG_ID = String(process.env.AGENT_CONFIG_ID || "");
 
 const APP_DIR = path.dirname(fileURLToPath(import.meta.url));
-const COMPANION_WIDGET_PATH = path.join(APP_DIR, "lca-compact-input-v2.html");
-const COMPANION_WIDGET_URI = "ui://widget/lca-compact-input-v2.html";
+const COMPANION_WIDGET_PATH = path.join(APP_DIR, "lca-compact-input-v3.html");
+const COMPANION_WIDGET_URI = "ui://widget/lca-compact-input-v3.html";
+const COMPANION_WIDGET_HTML = readFileSync(COMPANION_WIDGET_PATH, "utf8");
+const TASK_WIDGET_PATH = path.join(APP_DIR, "lca-task-card.html");
+const TASK_WIDGET_URI = "ui://widget/lca-task-card-v4.html";
+const TASK_WIDGET_HTML = readFileSync(TASK_WIDGET_PATH, "utf8");
+const TASK_CHANGE_MANAGER = createTaskChangeManager({ validatePath: (candidate) => resolvePath(candidate) });
 const DEFAULT_WORKSPACE = path.resolve(APP_DIR, "..", "agent-workspace");
 const PRIMARY_ROOT = path.resolve(process.env.AGENT_WORKSPACE || DEFAULT_WORKSPACE);
 const STARTUP_PROFILE = (() => {
@@ -403,7 +410,8 @@ const SERVER_INSTRUCTIONS = [
   "Keep the conversation light: do NOT re-read a file you already read; read only the line range you need; never dump a whole large file or large command output unless asked.",
   "When the conversation grows long or feels slow, call checkpoint() with a compact summary + next steps, then tell the user to open a NEW chat; in that fresh chat call resume() first. This resets the heavy context (faster) while keeping your progress.",
   "If a task matches an available skill, call list_skills first, then read_skill(name) to load its instructions before doing the work.",
-  "For ChatGPT UI companion flows, call lca_input to render the Apps SDK widget in ChatGPT; the widget uses workspace_search for @ file/folder/symbol search, slash_commands for / workflow/mode/skill suggestions, and compose_prompt to turn sidebar input into a ready prompt. If the user only says 'lca' in a fresh chat, call the lca tool for workspace_info-style status.",
+  "For ChatGPT UI companion flows, call lca_input to render the Apps SDK widget in ChatGPT; the widget uses workspace_search for @ file/folder/symbol search, slash_commands for / workflow/mode/skill suggestions, Plan mode for plan-first behavior, Task mode for task-scoped change tracking, and compose_prompt to turn sidebar input into a ready prompt. If the user only says 'lca' in a fresh chat, call the lca tool for workspace_info-style status.",
+  "TASK CHANGE SETS ARE OPT-IN: Task Mode is off by default. Do not call task_begin, task_finish, or task_get for normal chat requests or fast direct-edit flows. Use the task-scoped workflow only when the current composed prompt explicitly says 'Task mode is enabled for this request', when the user explicitly asks to create or manage a task change set, or when a task widget/user message asks to inspect, undo, or reapply an existing task. When Task Mode is enabled, complete reads, searches, and planning first, then call task_begin immediately before the first mutation. Pass every known repository-relative mutation path in task_begin.paths; include both source and destination for renames. After completion, call task_finish and then task_get. Use task_diff for that task instead of the whole working-tree diff.",
   "Prefer a few large, well-targeted calls over many tiny ones."
 ].join("\n");
 
@@ -420,6 +428,7 @@ function createMcpServer() {
   registerSkillTools(mcp);
   registerRepoIntelTools(mcp);    // v2.1
   registerCompanionTools(mcp);    // v2.9 — @ context + / workflow UI helpers
+  registerTaskChangeTools({ mcp, z, reg, resolvePath, manager: TASK_CHANGE_MANAGER, widgetUri: TASK_WIDGET_URI });
   registerPatchEngineTools(mcp);  // v2.2
   registerTestRunnerTools(mcp);   // v2.3
   registerReviewTools(mcp);       // v2.4
@@ -739,13 +748,32 @@ function registerCompanionAppResources(mcp) {
       {
         uri: COMPANION_WIDGET_URI,
         mimeType: "text/html;profile=mcp-app",
-        text: await readFile(COMPANION_WIDGET_PATH, "utf8"),
+        text: COMPANION_WIDGET_HTML,
         _meta: {
           ui: {
             prefersBorder: true,
             csp: { connectDomains: [], resourceDomains: [] }
           },
-          "openai/widgetDescription": "Compact LCA input composer for PiP: one low-height prompt box with @ context, / workflow autocomplete, Enter-to-send, and token highlights.",
+          "openai/widgetDescription": "Compact LCA input composer for PiP with @ context, / workflow autocomplete, Plan mode, and optional Task mode for diff/Undo change tracking.",
+          "openai/widgetPrefersBorder": true,
+          "openai/widgetCSP": { connect_domains: [], resource_domains: [] }
+        }
+      }
+    ]
+  }));
+
+  mcp.registerResource("lca-task-widget", TASK_WIDGET_URI, {}, async () => ({
+    contents: [
+      {
+        uri: TASK_WIDGET_URI,
+        mimeType: "text/html;profile=mcp-app",
+        text: TASK_WIDGET_HTML,
+        _meta: {
+          ui: {
+            prefersBorder: true,
+            csp: { connectDomains: [], resourceDomains: [] }
+          },
+          "openai/widgetDescription": "Shows one LCA coding task, its task-scoped changed files and diff, with Undo and Reapply actions routed through the ChatGPT conversation.",
           "openai/widgetPrefersBorder": true,
           "openai/widgetCSP": { connect_domains: [], resource_domains: [] }
         }
@@ -800,24 +828,25 @@ function registerCompanionTools(mcp) {
     "compose_prompt",
     {
       title: "Compose LCA prompt",
-      description: "Parse sidebar-style input containing @ context and / workflow commands, resolve selected paths, and return a ready-to-send prompt for ChatGPT.",
+      description: "Parse sidebar-style input containing @ context and / workflow commands, resolve selected paths, apply Plan/Task mode instructions, and return a ready-to-send prompt for ChatGPT.",
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
       inputSchema: {
         input: z.string().min(1).describe("User task text, may include @mentions and /commands."),
         path: z.string().optional().describe("Workspace root to resolve @mentions against."),
         mode: z.enum(WORKFLOW_COMMANDS.map((c) => c.name)).optional().describe("Workflow/mode override."),
+        task_mode: z.boolean().optional().describe("When true, require ChatGPT to wrap workspace mutations in task_begin, task_finish, and task_get. When false, use the fast direct-edit flow."),
         selected_context: z.array(z.string().min(1)).optional().describe("Already-selected file/folder paths from the UI."),
         include_context_pack: z.boolean().optional().describe("Ask ChatGPT to call workspace_snapshot/context tools first.")
       }
     },
-    async ({ input, path: rel = ".", mode, selected_context = [], include_context_pack = true }) => {
+    async ({ input, path: rel = ".", mode, task_mode = false, selected_context = [], include_context_pack = true }) => {
       const rootDir = resolvePath(rel);
-      const result = await composeLcaPrompt(input, rootDir, { mode, selectedContext: selected_context, includeContextPack: include_context_pack });
+      const result = await composeLcaPrompt(input, rootDir, { mode, taskMode: task_mode, selectedContext: selected_context, includeContextPack: include_context_pack });
       return structuredJsonResult(result);
     }
   );
 
-  registerLcaInputTool(mcp, "lca_input", "LCA input", "Render the LCA Apps SDK input widget inside ChatGPT. The widget lets the user request PiP so the composer can stay visible while the conversation continues.");
+  registerLcaInputTool(mcp, "lca_input", "LCA input", "Render the LCA Apps SDK input widget inside ChatGPT. The widget provides Plan and Task mode toggles and can request PiP so the composer stays visible while the conversation continues.");
 }
 
 function registerLcaInputTool(mcp, name, title, description) {
@@ -849,7 +878,7 @@ function registerLcaInputTool(mcp, name, title, description) {
       };
       return {
         structuredContent: payload,
-        content: [{ type: "text", text: "LCA input is ready. Request PiP to keep it visible when supported, use @ for context, / for workflows or skills, or the Plan quick action." }]
+        content: [{ type: "text", text: "LCA input is ready. Request PiP when supported, use @ for context, / for workflows or skills, Plan for plan-first behavior, or Task to record edits with diff and Undo." }]
       };
     }
   );
@@ -1065,7 +1094,7 @@ function workflowByName(name) {
   return WORKFLOW_COMMANDS.find((cmd) => cmd.name === key || cmd.command.slice(1) === key) || null;
 }
 
-async function composeLcaPrompt(input, rootDir, { mode, selectedContext = [], includeContextPack = true } = {}) {
+async function composeLcaPrompt(input, rootDir, { mode, taskMode = false, selectedContext = [], includeContextPack = true } = {}) {
   const slashTokens = extractSlashTokens(input);
   const mentionTokens = extractMentionTokens(input);
   const explicitMode = slashTokens.map((token) => token.split(":")[0]).find((token) => workflowByName(token)) || mode;
@@ -1112,6 +1141,16 @@ async function composeLcaPrompt(input, rootDir, { mode, selectedContext = [], in
   if (includeContextPack) {
     lines.push("Start by calling workspace_snapshot or workspace_search if more context is needed; do not ask me to copy file paths unless the @ context is ambiguous.");
   }
+  if (taskMode) {
+    lines.push(
+      "Task mode is enabled for this request. ChatGPT must still choose the appropriate LCA read, search, edit, and verification tools itself.",
+      "Complete reads, searches, and planning first. Immediately before the first workspace mutation, call task_begin with every known repository-relative mutation path in paths. Include both source and destination for renames; omit paths only when a command or unknown mutation scope may change files that cannot be determined in advance.",
+      "After all edits and verification are complete, call task_finish with the same task ID and a concise summary, then immediately call task_get with that task ID to render the task card. Do not skip task_finish or task_get.",
+      "If the request requires no workspace mutation, do not create an empty task; report that no files were changed."
+    );
+  } else {
+    lines.push("Task mode is disabled. Use the fast direct-edit flow and do not create a task change set unless the task explicitly asks to manage an existing task.");
+  }
   if (skillTokens.length) {
     lines.push("", "Requested skills:");
     for (const skill of skillTokens) lines.push(`- ${skill}`);
@@ -1136,8 +1175,13 @@ async function composeLcaPrompt(input, rootDir, { mode, selectedContext = [], in
       ? ["workspace_snapshot", "review_diff", "read_many"]
       : ["workspace_snapshot", "workspace_search", "read_many", "apply_patch"];
 
+  if (taskMode && workflow?.name !== "plan") {
+    suggested.push("task_begin", "task_finish", "task_get");
+  }
+
   return {
     mode: workflow?.name || null,
+    task_mode: Boolean(taskMode),
     slash_commands: slashTokens.map((token) => `/${token}`),
     skills: skillTokens,
     mentions: mentionTokens.map((token) => `@${token}`),
@@ -4853,6 +4897,7 @@ const STRICT_MUTATION_TOOLS = new Set([
   "figma_call_tool",
   "save_note", "checkpoint", "write_file", "replace_in_file", "apply_patch", "make_dir", "move_path", "delete_path",
   "run_command", "run_commands", "proc_start", "proc_stop", "git", "create_skill", "delete_skill", "undo_last_patch",
+  "task_begin", "task_finish", "task_undo", "task_reapply",
   "quality_gate", "run_tests", "run_build", "run_lint", "run_changed_tests", "task_plan", "task_state", "decision_log"
 ]);
 

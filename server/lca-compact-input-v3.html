@@ -125,7 +125,7 @@
       flex: 0 0 auto;
     }
     .icon-btn:hover { background: rgba(255,255,255,.06); }
-    .plan-btn {
+    .mode-btn {
       height: 24px;
       border: 1px solid rgba(255,255,255,.08);
       border-radius: 999px;
@@ -137,11 +137,73 @@
       cursor: pointer;
       flex: 0 0 auto;
     }
-    .plan-btn:hover { background: rgba(255,255,255,.06); }
-    .plan-btn.selected {
+    .mode-btn:hover { background: rgba(255,255,255,.06); }
+    .mode-btn[data-tooltip] { position: relative; }
+    .mode-btn[data-tooltip]::before,
+    .mode-btn[data-tooltip]::after {
+      position: absolute;
+      left: 50%;
+      z-index: 40;
+      pointer-events: none;
+      opacity: 0;
+      visibility: hidden;
+      transition: opacity .14s ease, transform .14s ease, visibility .14s ease;
+    }
+    .mode-btn[data-tooltip]::before {
+      content: "";
+      bottom: calc(100% + 4px);
+      border: 5px solid transparent;
+      border-top-color: #18181b;
+      transform: translate(-50%, 4px);
+    }
+    .mode-btn[data-tooltip]::after {
+      content: attr(data-tooltip);
+      bottom: calc(100% + 14px);
+      width: max-content;
+      max-width: min(250px, 72vw);
+      padding: 8px 10px;
+      border: 1px solid rgba(255,255,255,.10);
+      border-radius: 9px;
+      background: #18181b;
+      color: #f4f4f5;
+      box-shadow: 0 8px 24px rgba(0,0,0,.34);
+      font-size: 11px;
+      font-weight: 500;
+      line-height: 1.4;
+      text-align: left;
+      white-space: normal;
+      transform: translate(-20%, 4px);
+    }
+    .mode-btn[data-tooltip]:hover::before,
+    .mode-btn[data-tooltip]:hover::after,
+    .mode-btn[data-tooltip]:focus-visible::before,
+    .mode-btn[data-tooltip]:focus-visible::after {
+      opacity: 1;
+      visibility: visible;
+    }
+    .mode-btn[data-tooltip]:hover::before,
+    .mode-btn[data-tooltip]:focus-visible::before {
+      transform: translate(-50%, 0);
+    }
+    .mode-btn[data-tooltip]:hover::after,
+    .mode-btn[data-tooltip]:focus-visible::after {
+      transform: translate(-20%, 0);
+    }
+    .mode-btn.selected {
       border-color: rgba(16,163,127,.38);
       background: rgba(16,163,127,.16);
       color: #adf0dc;
+    }
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
     }
     .pill {
       display: inline-flex;
@@ -225,7 +287,10 @@
       </div>
       <div class="bottom-row">
         <button class="icon-btn" id="add-context" type="button" aria-label="Add context" title="Add @ context">+</button>
-        <button class="plan-btn" id="plan-toggle" type="button" aria-pressed="false" title="Use Plan mode">Plan</button>
+        <button class="mode-btn" id="plan-toggle" type="button" aria-pressed="false" aria-describedby="plan-tooltip-description" data-tooltip="Inspect context and propose a plan first. No files are changed until you approve.">Plan</button>
+        <span class="sr-only" id="plan-tooltip-description">Inspect context and propose a plan first. No files are changed until you approve.</span>
+        <button class="mode-btn" id="task-toggle" type="button" aria-pressed="false" aria-describedby="task-tooltip-description" data-tooltip="Track this request as a change set with a task card, diff, Undo, and Reapply. Off by default.">Task</button>
+        <span class="sr-only" id="task-tooltip-description">Track this request as a change set with a task card, diff, Undo, and Reapply. Off by default.</span>
         <button class="icon-btn" id="pip" type="button" aria-label="Open PiP" title="Open PiP">▣</button>
         <span class="pill mode hidden" id="mode-pill"></span>
         <span class="pill context hidden" id="context-pill"></span>
@@ -243,11 +308,13 @@
     const pipButton = document.getElementById('pip');
     const addContextButton = document.getElementById('add-context');
     const planButton = document.getElementById('plan-toggle');
+    const taskButton = document.getElementById('task-toggle');
     const statusEl = document.getElementById('status');
     const modePill = document.getElementById('mode-pill');
     const contextPill = document.getElementById('context-pill');
     const selected = [];
     let selectedMode = null;
+    let taskMode = false;
     let active = -1;
     let current = null;
     let pendingTimer = null;
@@ -344,6 +411,10 @@
         const isPlan = selectedMode === 'plan';
         planButton.classList.toggle('selected', isPlan);
         planButton.setAttribute('aria-pressed', String(isPlan));
+      }
+      if (taskButton) {
+        taskButton.classList.toggle('selected', taskMode);
+        taskButton.setAttribute('aria-pressed', String(taskMode));
       }
       if (selected.length) {
         const label = selected.length === 1 ? selected[0] : `${selected.length} context`;
@@ -533,6 +604,7 @@
       input.value = '';
       selected.length = 0;
       selectedMode = null;
+      taskMode = false;
       suggestions.classList.add('hidden');
       shownItems = [];
       current = null;
@@ -551,6 +623,7 @@
       const data = await callTool('compose_prompt', {
         input: task,
         mode: selectedMode || undefined,
+        task_mode: taskMode,
         selected_context: selected,
         include_context_pack: true
       });
@@ -642,6 +715,12 @@
       selectedMode = selectedMode === 'plan' ? null : 'plan';
       updateCompactMeta();
       setStatus(selectedMode === 'plan' ? 'plan' : 'ready');
+    });
+
+    taskButton.addEventListener('click', () => {
+      taskMode = !taskMode;
+      updateCompactMeta();
+      setStatus(taskMode ? 'task' : 'ready');
     });
 
     pipButton.addEventListener('click', requestPipMode);

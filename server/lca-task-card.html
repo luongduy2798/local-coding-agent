@@ -1,0 +1,374 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>LCA Task</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: rgba(127, 127, 127, .06);
+      --line: rgba(127, 127, 127, .24);
+      --text: CanvasText;
+      --muted: color-mix(in srgb, CanvasText 58%, transparent);
+      --good: #15803d;
+      --warn: #d97706;
+      --bad: #dc2626;
+      --info: #2563eb;
+      --review: #7c3aed;
+      --added: #15803d;
+      --deleted: #dc2626;
+      --button: rgba(127, 127, 127, .12);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --good: #4ade80;
+        --bad: #f87171;
+        --info: #60a5fa;
+        --review: #c084fc;
+        --added: #4ade80;
+        --deleted: #f87171;
+      }
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; background: transparent; color: var(--text); }
+    button { font: inherit; }
+    .shell { padding: 4px; }
+    .card { border: 1px solid var(--line); border-radius: 16px; background: var(--bg); overflow: hidden; }
+    .header { display: flex; gap: 12px; align-items: flex-start; padding: 14px 14px 10px; }
+    .icon { width: 28px; height: 28px; border-radius: 999px; display: grid; place-items: center; background: var(--button); flex: 0 0 auto; font-weight: 800; }
+    .icon.applied { color: var(--good); }
+    .icon.undone { color: var(--warn); }
+    .icon.conflict { color: var(--bad); }
+    .heading { min-width: 0; flex: 1; }
+    .title { font-size: 15px; line-height: 1.35; font-weight: 700; overflow-wrap: anywhere; }
+    .meta { margin-top: 3px; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+    .summary { padding: 0 14px 10px 54px; color: var(--muted); font-size: 13px; line-height: 1.45; }
+    .stats { display: flex; flex-wrap: wrap; gap: 8px 14px; padding: 0 14px 12px 54px; color: var(--muted); font-size: 12px; }
+    .stat strong { color: var(--text); font-weight: 650; }
+    .notice { display: none; margin: 0 14px 12px; padding: 10px 12px; border-radius: 10px; font-size: 12px; line-height: 1.45; background: color-mix(in srgb, var(--bad) 10%, transparent); color: var(--bad); }
+    .notice.show { display: block; }
+    .files { border-top: 1px solid var(--line); max-height: 190px; overflow: auto; }
+    .file { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; gap: 7px; align-items: center; padding: 8px 14px; border-bottom: 1px solid color-mix(in srgb, var(--line) 60%, transparent); font-size: 12px; }
+    .file:last-child { border-bottom: 0; }
+    .file-code { font-weight: 800; color: var(--muted); }
+    .file-code.added, .file-code.renamed { color: var(--added); }
+    .file-code.deleted { color: var(--deleted); }
+    .file-path { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .file-stat { display: inline-flex; gap: 6px; color: var(--muted); white-space: nowrap; }
+    .additions { color: var(--added); }
+    .deletions { color: var(--deleted); }
+    .actions { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px 14px; border-top: 1px solid var(--line); }
+    .button { border: 1px solid var(--line); border-radius: 999px; background: var(--button); color: var(--text); padding: 7px 12px; cursor: pointer; font-weight: 650; font-size: 12px; }
+    .button:hover { filter: brightness(1.08); }
+    .button:disabled { opacity: .55; cursor: wait; }
+    .button.info { color: var(--info); border-color: color-mix(in srgb, var(--info) 42%, var(--line)); background: color-mix(in srgb, var(--info) 12%, transparent); }
+    .button.danger { color: var(--deleted); border-color: color-mix(in srgb, var(--deleted) 42%, var(--line)); background: color-mix(in srgb, var(--deleted) 12%, transparent); }
+    .button.success { color: var(--added); border-color: color-mix(in srgb, var(--added) 42%, var(--line)); background: color-mix(in srgb, var(--added) 12%, transparent); }
+    .diff-panel { display: none; border-top: 1px solid var(--line); }
+    .diff-panel.show { display: block; }
+    .diff-toolbar { display: flex; gap: 8px; align-items: center; padding: 10px 14px; font-size: 12px; color: var(--muted); }
+    .diff-toolbar select { min-width: 0; max-width: 72%; border: 1px solid var(--line); border-radius: 8px; padding: 5px 7px; background: Canvas; color: CanvasText; }
+    pre { margin: 0; padding: 10px 0; max-height: 380px; overflow: auto; white-space: pre; font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background: rgba(0, 0, 0, .12); tab-size: 2; }
+    .diff-line { display: block; min-height: 1.5em; padding: 0 14px; }
+    .diff-line.added { color: var(--added); background: color-mix(in srgb, var(--added) 12%, transparent); }
+    .diff-line.deleted { color: var(--deleted); background: color-mix(in srgb, var(--deleted) 12%, transparent); }
+    .diff-line.hunk { color: var(--info); background: color-mix(in srgb, var(--info) 9%, transparent); }
+    .diff-line.file-header { color: var(--review); font-weight: 700; }
+    .diff-line.meta-line { color: var(--muted); }
+    .empty { padding: 12px 14px; color: var(--muted); font-size: 12px; }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <section class="card" aria-label="LCA task change set">
+      <div class="header">
+        <div id="icon" class="icon">…</div>
+        <div class="heading">
+          <div id="title" class="title">LCA task</div>
+          <div id="meta" class="meta">Loading…</div>
+        </div>
+      </div>
+      <div id="summary" class="summary"></div>
+      <div id="stats" class="stats"></div>
+      <div id="notice" class="notice"></div>
+      <div id="files" class="files"></div>
+      <div class="actions">
+        <button id="view-diff" class="button info" type="button">View diff</button>
+        <button id="undo" class="button danger" type="button">Undo</button>
+        <button id="reapply" class="button success" type="button">Reapply</button>
+      </div>
+      <section id="diff-panel" class="diff-panel">
+        <div class="diff-toolbar">
+          <select id="diff-file" aria-label="Diff file"></select>
+          <span id="diff-status">Ready</span>
+        </div>
+        <pre id="diff"></pre>
+      </section>
+    </section>
+  </main>
+
+  <script>
+    const elements = {
+      icon: document.getElementById('icon'),
+      title: document.getElementById('title'),
+      meta: document.getElementById('meta'),
+      summary: document.getElementById('summary'),
+      stats: document.getElementById('stats'),
+      notice: document.getElementById('notice'),
+      files: document.getElementById('files'),
+      viewDiff: document.getElementById('view-diff'),
+      undo: document.getElementById('undo'),
+      reapply: document.getElementById('reapply'),
+      diffPanel: document.getElementById('diff-panel'),
+      diffFile: document.getElementById('diff-file'),
+      diffStatus: document.getElementById('diff-status'),
+      diff: document.getElementById('diff')
+    };
+
+    const pending = new Map();
+    let task = null;
+    let operation = null;
+    let directCallBusy = false;
+
+    function unwrap(result) {
+      if (result?.structuredContent) return result.structuredContent;
+      const text = result?.content?.[0]?.text;
+      if (typeof text === 'string') {
+        try { return JSON.parse(text); } catch {}
+      }
+      return result || {};
+    }
+
+    function rpcRequest(method, params, timeoutMs = 7000) {
+      if (!window.parent || window.parent === window) return Promise.reject(new Error('MCP Apps bridge unavailable'));
+      const id = `lca-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          pending.delete(id);
+          reject(new Error(`${method} timed out`));
+        }, timeoutMs);
+        pending.set(id, { resolve, reject, timer });
+        window.parent.postMessage({ jsonrpc: '2.0', id, method, params }, '*');
+      });
+    }
+
+    async function callTool(name, args) {
+      try {
+        return unwrap(await rpcRequest('tools/call', { name, arguments: args || {} }));
+      } catch (bridgeError) {
+        if (!window.openai?.callTool) throw bridgeError;
+        return unwrap(await window.openai.callTool(name, args || {}));
+      }
+    }
+
+    function sendUserMessage(text) {
+      if (window.parent && window.parent !== window) {
+        window.parent.postMessage({
+          jsonrpc: '2.0',
+          method: 'ui/message',
+          params: { role: 'user', content: [{ type: 'text', text }] }
+        }, '*');
+        return;
+      }
+      if (window.openai?.sendFollowUpMessage) {
+        window.openai.sendFollowUpMessage({ prompt: text, scrollToBottom: true });
+      }
+    }
+
+    function notifyHeight() {
+      window.requestAnimationFrame(() => window.openai?.notifyIntrinsicHeight?.());
+    }
+
+    function taskStatusLabel(status) {
+      if (status === 'applied') return 'Applied';
+      if (status === 'undone') return 'Undone';
+      if (status === 'active') return 'Active';
+      return status || 'Unknown';
+    }
+
+    function fileCode(operationName) {
+      if (operationName === 'added') return 'A';
+      if (operationName === 'deleted') return 'D';
+      if (operationName === 'renamed') return 'R';
+      return 'M';
+    }
+
+    function render(payload) {
+      const nextTask = payload?.task;
+      if (!nextTask) return;
+      task = nextTask;
+      operation = payload?.operation || null;
+      const conflict = task.lastOperation?.status === 'conflict' || payload?.ok === false;
+      const status = task.status;
+
+      elements.icon.textContent = conflict ? '!' : status === 'applied' ? '✓' : status === 'undone' ? '↶' : '…';
+      elements.icon.className = `icon ${conflict ? 'conflict' : status}`;
+      elements.title.textContent = task.title || 'LCA task';
+      elements.meta.textContent = `${task.id} · ${taskStatusLabel(status)}`;
+      elements.summary.textContent = task.summary || task.description || '';
+      elements.summary.hidden = !elements.summary.textContent;
+
+      const stats = task.stats || {};
+      elements.stats.replaceChildren();
+      const statsText = [
+        { text: `${stats.filesChanged || 0} files`, className: 'stat' },
+        { text: `+${stats.additions || 0}`, className: 'stat additions' },
+        { text: `-${stats.deletions || 0}`, className: 'stat deletions' }
+      ];
+      for (const item of statsText) {
+        const span = document.createElement('span');
+        span.className = item.className;
+        span.textContent = item.text;
+        elements.stats.append(span);
+      }
+
+      const errorMessage = payload?.error?.message || (conflict ? task.lastOperation?.message : '');
+      elements.notice.textContent = errorMessage || '';
+      elements.notice.classList.toggle('show', Boolean(errorMessage));
+
+      const files = Array.isArray(task.files) ? task.files : [];
+      elements.files.replaceChildren();
+      elements.diffFile.replaceChildren();
+      const allOption = document.createElement('option');
+      allOption.value = '';
+      allOption.textContent = 'All changed files';
+      elements.diffFile.append(allOption);
+
+      if (!files.length) {
+        const empty = document.createElement('div');
+        empty.className = 'empty';
+        empty.textContent = status === 'active' ? 'Task is still active.' : 'No file changes in this task.';
+        elements.files.append(empty);
+      } else {
+        for (const file of files) {
+          const row = document.createElement('div');
+          row.className = 'file';
+          const code = document.createElement('span');
+          code.className = `file-code ${file.operation || 'modified'}`;
+          code.textContent = fileCode(file.operation);
+          const filePath = document.createElement('span');
+          filePath.className = 'file-path';
+          filePath.title = file.path;
+          filePath.textContent = file.path;
+          const stat = document.createElement('span');
+          stat.className = 'file-stat';
+          if (file.binary) {
+            stat.textContent = 'binary';
+          } else {
+            const added = document.createElement('span');
+            added.className = 'additions';
+            added.textContent = `+${file.additions ?? 0}`;
+            const deleted = document.createElement('span');
+            deleted.className = 'deletions';
+            deleted.textContent = `−${file.deletions ?? 0}`;
+            stat.append(added, deleted);
+          }
+          row.append(code, filePath, stat);
+          elements.files.append(row);
+
+          const option = document.createElement('option');
+          option.value = file.path;
+          option.textContent = file.path;
+          elements.diffFile.append(option);
+        }
+      }
+
+      elements.viewDiff.hidden = status === 'active';
+      elements.undo.hidden = status !== 'applied';
+      elements.reapply.hidden = status !== 'undone';
+      notifyHeight();
+    }
+
+    function diffLineClass(line) {
+      if (line.startsWith('diff --git ') || line.startsWith('index ') || line.startsWith('new file mode ') || line.startsWith('deleted file mode ') || line.startsWith('similarity index ') || line.startsWith('rename from ') || line.startsWith('rename to ')) return 'meta-line';
+      if (line.startsWith('+++ ') || line.startsWith('--- ')) return 'file-header';
+      if (line.startsWith('@@')) return 'hunk';
+      if (line.startsWith('+')) return 'added';
+      if (line.startsWith('-')) return 'deleted';
+      return 'context';
+    }
+
+    function renderDiff(diffText) {
+      elements.diff.replaceChildren();
+      const text = diffText || '(No textual diff)';
+      for (const line of text.split('\n')) {
+        const span = document.createElement('span');
+        span.className = `diff-line ${diffLineClass(line)}`;
+        span.textContent = line || ' ';
+        elements.diff.append(span);
+      }
+    }
+
+    async function loadDiff() {
+      if (!task || directCallBusy) return;
+      directCallBusy = true;
+      elements.viewDiff.disabled = true;
+      elements.diffStatus.textContent = 'Loading…';
+      elements.diffPanel.classList.add('show');
+      try {
+        const result = await callTool('task_diff', {
+          task_id: task.id,
+          path: elements.diffFile.value || undefined,
+          mode: 'unified',
+          max_chars: 500000
+        });
+        renderDiff(result.diff);
+        elements.diffStatus.textContent = result.truncated ? 'Diff truncated' : `${result.totalChars || 0} chars`;
+      } catch (error) {
+        elements.diff.replaceChildren();
+        elements.diffStatus.textContent = error instanceof Error ? error.message : String(error);
+      } finally {
+        directCallBusy = false;
+        elements.viewDiff.disabled = false;
+        notifyHeight();
+      }
+    }
+
+    function setMutationButtonsDisabled(disabled) {
+      elements.undo.disabled = disabled;
+      elements.reapply.disabled = disabled;
+    }
+
+    function requestAction(type) {
+      if (!task) return;
+      setMutationButtonsDisabled(true);
+      const action = type === 'undo' ? 'Undo' : 'Reapply';
+      const instruction = `${action} task ${task.id}: ${task.title}. Use the LCA task_${type} tool and report any conflict without overwriting later changes.`;
+      sendUserMessage(instruction);
+      setTimeout(() => setMutationButtonsDisabled(false), 1500);
+    }
+
+    window.addEventListener('message', (event) => {
+      if (event.source !== window.parent) return;
+      const message = event.data;
+      if (!message || message.jsonrpc !== '2.0') return;
+
+      if (message.id && pending.has(String(message.id))) {
+        const item = pending.get(String(message.id));
+        pending.delete(String(message.id));
+        clearTimeout(item.timer);
+        if (message.error) item.reject(new Error(message.error.message || 'RPC failed'));
+        else item.resolve(message.result);
+        return;
+      }
+
+      if (message.method === 'ui/notifications/tool-result') {
+        render(message.params?.structuredContent || {});
+      }
+    }, { passive: true });
+
+    window.addEventListener('openai:set_globals', () => {
+      render(window.openai?.toolOutput || {});
+    }, { passive: true });
+
+    elements.viewDiff.addEventListener('click', loadDiff);
+    elements.diffFile.addEventListener('change', loadDiff);
+    elements.undo.addEventListener('click', () => requestAction('undo'));
+    elements.reapply.addEventListener('click', () => requestAction('reapply'));
+
+    render(window.openai?.toolOutput || {});
+  </script>
+</body>
+</html>

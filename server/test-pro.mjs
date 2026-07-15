@@ -168,8 +168,13 @@ try {
 
   const composed = await callJson(client, "compose_prompt", { input: "fix setup flow @deepFeature /plan", selected_context: ["src/index.js"] });
   check("compose_prompt detects plan mode", composed.mode === "plan", JSON.stringify(composed));
+  check("compose_prompt defaults Task mode off", composed.task_mode === false && /Task mode is disabled/.test(composed.prompt), composed.prompt);
   check("compose_prompt includes selected context", composed.selected_context?.some((c) => c.path === "src/index.js"), JSON.stringify(composed.selected_context));
   check("compose_prompt emits ready prompt", /Use LCA Plan mode/.test(composed.prompt) && /Selected context/.test(composed.prompt), composed.prompt);
+  const composedTaskMode = await callJson(client, "compose_prompt", { input: "update login UI", task_mode: true, selected_context: ["src/index.js"] });
+  check("compose_prompt enables Task mode workflow", composedTaskMode.task_mode === true && /task_begin/.test(composedTaskMode.prompt) && /task_finish/.test(composedTaskMode.prompt) && /task_get/.test(composedTaskMode.prompt), composedTaskMode.prompt);
+  check("compose_prompt keeps tool choice with ChatGPT", /choose the appropriate LCA read, search, edit, and verification tools itself/.test(composedTaskMode.prompt), composedTaskMode.prompt);
+  check("compose_prompt requests path-scoped task_begin", /every known repository-relative mutation path/.test(composedTaskMode.prompt) && composedTaskMode.suggested_tools?.includes("task_begin"), JSON.stringify(composedTaskMode));
   const composedSkill = await callJson(client, "compose_prompt", { input: "check setup /skill:setup-local-coding-agent", mode: "plan" });
   check("typed slash workflow/skill is preserved in compose", composedSkill.mode === "plan" && composedSkill.skills?.includes("setup-local-coding-agent") && /read_skill/.test(composedSkill.prompt), JSON.stringify(composedSkill));
   const slashOverridesButtonMode = await callJson(client, "compose_prompt", { input: "review it /debug", mode: "plan" });
@@ -185,12 +190,14 @@ try {
   check("lca alias returns workspace info", lcaInfo.primary_root === info.primary_root && lcaInfo.version === info.version, JSON.stringify(lcaInfo));
   const openCompanionTool = tools.tools?.find((t) => t.name === "open_companion");
   const lcaInputTool = tools.tools?.find((t) => t.name === "lca_input");
+  const taskBeginTool = tools.tools?.find((t) => t.name === "task_begin");
   check("Apps SDK lca_input tool is listed", Boolean(lcaInputTool), JSON.stringify(tools.tools?.map((t) => t.name)));
+  check("task_begin description keeps Task mode opt-in", /Task Mode is explicitly enabled/.test(taskBeginTool?.description || "") && /default fast direct-edit flow/.test(taskBeginTool?.description || ""), taskBeginTool?.description || "task_begin missing");
   check("open_companion tool is removed", !openCompanionTool, JSON.stringify(tools.tools?.map((t) => t.name)));
-  check("Apps SDK render tool has output template", lcaInputTool?._meta?.["openai/outputTemplate"] === "ui://widget/lca-compact-input-v2.html", JSON.stringify({ lcaInput: lcaInputTool?._meta }));
+  check("Apps SDK render tool has output template", lcaInputTool?._meta?.["openai/outputTemplate"] === "ui://widget/lca-compact-input-v3.html", JSON.stringify({ lcaInput: lcaInputTool?._meta }));
   const resources = await client.listResources();
-  check("Apps SDK companion widget resource is listed", resources.resources?.some((r) => r.uri === "ui://widget/lca-compact-input-v2.html"), JSON.stringify(resources.resources));
-  const widgetResource = await client.readResource({ uri: "ui://widget/lca-compact-input-v2.html" });
+  check("Apps SDK companion widget resource is listed", resources.resources?.some((r) => r.uri === "ui://widget/lca-compact-input-v3.html"), JSON.stringify(resources.resources));
+  const widgetResource = await client.readResource({ uri: "ui://widget/lca-compact-input-v3.html" });
   const widgetHtml = widgetResource.contents?.[0]?.text || "";
   check("Apps SDK companion widget resource is html", widgetResource.contents?.[0]?.mimeType === "text/html;profile=mcp-app" && widgetHtml.includes("sendFollowUpMessage") && widgetHtml.includes("slash_commands") && widgetHtml.includes("suggestions.scrollTop = 0") && !widgetHtml.includes("Prompt output"), JSON.stringify(widgetResource.contents?.[0]));
   const widgetScript = widgetHtml.match(/<script>([\s\S]*?)<\/script>/)?.[1] || "";
@@ -202,6 +209,8 @@ try {
   }
   check("Apps SDK companion widget script compiles", Boolean(widgetScript) && !widgetScriptError, widgetScriptError || "inline script missing");
   check("Apps SDK companion widget requests PiP from a user action", /id\s*=\s*(['\"])pip\1/.test(widgetHtml) && /pipButton\.addEventListener\(\s*(['\"])click\1\s*,\s*requestPipMode\s*\)/.test(widgetScript) && /requestDisplayMode\(\{\s*mode:\s*(['\"])pip\1\s*\}\)/.test(widgetScript), "PiP button, click handler, or requestDisplayMode({ mode: 'pip' }) missing");
+  check("Apps SDK companion widget has Task mode toggle", /id\s*=\s*(['\"])task-toggle\1/.test(widgetHtml) && /taskButton\.addEventListener\(\s*(['\"])click\1/.test(widgetScript) && /task_mode:\s*taskMode/.test(widgetScript), "Task button, click handler, or compose_prompt task_mode payload missing");
+  check("Apps SDK companion mode buttons have accessible tooltips", /id\s*=\s*(['\"])plan-toggle\1[^>]*data-tooltip=/.test(widgetHtml) && /id\s*=\s*(['\"])task-toggle\1[^>]*data-tooltip=/.test(widgetHtml) && /aria-describedby=\"plan-tooltip-description\"/.test(widgetHtml) && /aria-describedby=\"task-tooltip-description\"/.test(widgetHtml), "Plan or Task tooltip markup missing");
   const lcaInput = await client.callTool({ name: "lca_input", arguments: { initial_input: "fix @deepFeature" } });
   check("lca_input returns structured widget payload", lcaInput.structuredContent?.initial_input === "fix @deepFeature" && lcaInput.structuredContent?.shortcuts?.length === 1 && lcaInput.structuredContent.shortcuts[0]?.name === "plan" && /LCA input is ready/.test(lcaInput.content?.[0]?.text || ""), JSON.stringify(lcaInput));
 
