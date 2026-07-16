@@ -58,7 +58,7 @@ lca doctor
 - Auth: `No auth`.
 - Không dùng OAuth.
 - Không nhập Runtime API key vào connector auth; key này nằm trong `.env.local` cho local tunnel-client.
-- Verify bằng cách hỏi ChatGPT gọi `workspace_info`.
+- Verify bằng cách hỏi ChatGPT gọi `lca`.
 
 Chi tiết: [docs/CHATGPT_WEB_CONNECTOR.md](docs/CHATGPT_WEB_CONNECTOR.md).
 

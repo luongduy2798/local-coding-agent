@@ -34,15 +34,15 @@ The root `server.mjs` remains intentionally small so existing launchers continue
 
 | Group | Tools |
 |-------|-------|
-| Info | `workspace_info`, `ping` |
-| Read | `repo_overview`, `list_files`, `find_files`, `read_file`, `read_many` (SHA-256 versions, concurrent + line ranges), `stat_path`, `search_text` (ripgrep/git, with context + glob) |
+| Info | `lca` |
+| Read | `workspace_snapshot`, `repo_map`, `repo_symbols`, `project_profile`, `important_files`, `index_status`, `list_files`, `find_files`, `read_file`, `read_many` (SHA-256 versions, concurrent + line ranges), `stat_path`, `search_text` (ripgrep/git, with context + glob) |
 | Figma Desktop | `figma_status`, `figma_list_tools`, `figma_call_tool`, `figma_get_design_context`, `figma_get_screenshot`, `figma_get_metadata`, `figma_get_variable_defs`, `figma_get_code_connect_map`, `figma_get_figjam` |
-| Write | `write_file`, `replace_in_file`, `apply_patch`, `make_dir`, `move_path`, `delete_path` |
+| Write | `apply_patch` (create/update/delete/rename batch), `make_dir` |
 | Execute | `run_command`, `run_commands` (bounded batch; cmd/powershell/bash/sh/zsh) |
 | Processes | `proc_start`, `proc_list`, `proc_output`, `proc_stop` |
 | Git | `git` |
 | Pro | `workspace_snapshot`, `workspace_doctor`, `repo_map`, `repo_symbols`, `review_diff`, `session_report` |
-| Manual verification | `detect_test_commands`, `quality_gate`, `run_tests`, `run_build`, `run_lint`, `run_changed_tests` |
+| Manual verification | `quality_gate`, `run_changed_tests` |
 | Notes & session | `save_note`, `list_notes`, `checkpoint`, `resume` |
 
 ## Run
@@ -106,7 +106,9 @@ automatically.
 
 ## Review Changes
 
-Dedicated filesystem mutations are tracked automatically and return `change_id`.
+Dedicated filesystem mutations are tracked automatically. Each mutation returns an operation
+`change_id` and the enclosing user-work `task_id`. Several patches stay in one task change set;
+`task_plan` or `apply_patch.task_title` names it and `session_report` closes it after completion.
 `read_file` and `read_many` return whole-file SHA-256 versions; a changed file is
 rejected with `STALE_FILE` until it is reread. The authenticated HTTP API under
 `/changes` provides list, detail, diff, before/after snapshot content, conflict-safe

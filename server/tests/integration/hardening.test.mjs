@@ -51,7 +51,9 @@ async function startServer(workspace, { port, policy = "strict", auth = "", appr
       AGENT_EXTRA_ROOTS_JSON: "[]",
       MCP_AUTH_TOKEN: auth,
       AGENT_APPROVAL_TOKEN: approvalToken,
-      AGENT_MAX_BODY_BYTES: maxBody
+      AGENT_MAX_BODY_BYTES: maxBody,
+      LCA_TEST_RUN_ID: testContext.runId,
+      LCA_TEST_EXPOSE_REDUNDANT_TOOLS: "1"
     },
     windowsHide: true,
     stdio: ["ignore", "pipe", "pipe"]
@@ -126,7 +128,7 @@ try {
   check("browser Origin is denied by default", evil.status === 403, `status=${evil.status}`);
 
   const client = await connect(19001);
-  check("strict policy blocks write_file", (await call(client, "write_file", { path: "blocked.txt", content: "x" })).isError);
+  check("strict policy blocks apply_patch create", (await call(client, "apply_patch", { operations: [{ op: "create", path: "blocked.txt", content: "x" }] })).isError);
   check("strict policy blocks run_command", (await call(client, "run_command", { command: "node --version" })).isError);
   check("strict policy blocks run_commands", (await call(client, "run_commands", { commands: [{ command: "node --version" }] })).isError);
   await call(client, "workspace_info");
@@ -154,29 +156,31 @@ try {
   server = await startServer(path.join(base, "balanced"), { port: 19006, policy: "balanced", approvalToken: balancedSecret });
   const balanced = await connect(19006);
   await call(balanced, "write_file", { path: "victim.txt", content: "x" });
-  const blockedDelete = await call(balanced, "delete_path", { path: "victim.txt" });
-  check("balanced policy blocks delete before approval", blockedDelete.isError && blockedDelete.text.includes("Approval required"));
+  const victimDelete = { operations: [{ op: "delete", path: "victim.txt" }] };
+  const victimDeleteAction = 'apply_patch:delete:["victim.txt"]';
+  const blockedDelete = await call(balanced, "apply_patch", victimDelete);
+  check("balanced policy blocks delete before approval", blockedDelete.isError && blockedDelete.text.includes("Approval required") && blockedDelete.text.includes("victim.txt"));
   const blockedRiskyBatch = await call(balanced, "run_commands", {
     commands: [{ command: "curl -o downloaded.txt https://example.invalid" }]
   });
   check("balanced policy does not let run_commands bypass risky-command approval", blockedRiskyBatch.isError && blockedRiskyBatch.text.includes("Approval required"));
-  const request = JSON.parse((await call(balanced, "request_approval", { action: "delete_path:victim.txt", reason: "hardening regression" })).text);
+  const request = JSON.parse((await call(balanced, "request_approval", { action: victimDeleteAction, reason: "hardening regression" })).text);
   check("operator token approves pending action", !(await call(balanced, "approve_request", { id: request.id, approval_token: balancedSecret })).isError);
-  check("approved action executes once", !(await call(balanced, "delete_path", { path: "victim.txt" })).isError);
+  check("approved action executes once", !(await call(balanced, "apply_patch", victimDelete)).isError);
   await call(balanced, "write_file", { path: "victim.txt", content: "x" });
-  check("consumed approval cannot be replayed", (await call(balanced, "delete_path", { path: "victim.txt" })).isError);
+  check("consumed approval cannot be replayed", (await call(balanced, "apply_patch", victimDelete)).isError);
 
   await call(balanced, "write_file", { path: "batch-a.txt", content: "a" });
   await call(balanced, "write_file", { path: "batch-b.txt", content: "b" });
   const batchRequest = JSON.parse((await call(balanced, "request_approval_batch", {
-    actions: ["delete_path:batch-a.txt", "delete_path:batch-b.txt"],
+    actions: ['apply_patch:delete:["batch-a.txt"]', 'apply_patch:delete:["batch-b.txt"]'],
     reason: "hardening exact batch regression",
     expires_in_minutes: 5
   })).text);
   check("operator token approves exact action batch", !(await call(balanced, "approve_request", { id: batchRequest.id, approval_token: balancedSecret })).isError);
-  check("batch approval consumes first exact action", !(await call(balanced, "delete_path", { path: "batch-a.txt" })).isError);
-  check("batch approval consumes second exact action", !(await call(balanced, "delete_path", { path: "batch-b.txt" })).isError);
-  check("consumed batch action cannot be replayed", (await call(balanced, "delete_path", { path: "batch-a.txt" })).isError);
+  check("batch approval consumes first exact action", !(await call(balanced, "apply_patch", { operations: [{ op: "delete", path: "batch-a.txt" }] })).isError);
+  check("batch approval consumes second exact action", !(await call(balanced, "apply_patch", { operations: [{ op: "delete", path: "batch-b.txt" }] })).isError);
+  check("consumed batch action cannot be replayed", (await call(balanced, "apply_patch", { operations: [{ op: "delete", path: "batch-a.txt" }] })).isError);
 
   const concurrentAction = "run_command:git fetch --dry-run";
   const concurrentRequest = JSON.parse((await call(balanced, "request_approval", {

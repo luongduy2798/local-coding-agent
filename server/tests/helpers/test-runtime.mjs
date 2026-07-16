@@ -60,6 +60,7 @@ export async function startTestServer({
       AGENT_EXTRA_ROOTS_JSON: "[]",
       MCP_AUTH_TOKEN: "",
       AGENT_AUDIT: "1",
+      LCA_TEST_EXPOSE_REDUNDANT_TOOLS: "1",
       ...env
     },
     windowsHide: true,

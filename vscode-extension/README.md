@@ -22,8 +22,9 @@ The view shows only the newest recorded change, matching the focused review flow
 Available actions:
 
 - Review a before/after diff.
-- Undo or Reapply a complete change.
-- Undo or Reapply one file from a multi-file change.
+- Show one aggregated card for the full user task, even when LCA applies several patches.
+- Undo or Reapply the complete task in operation-safe order.
+- Undo or Reapply one file from a multi-file task.
 - Close stale Review Changes diff tabs automatically after Undo or Reapply.
 - Undo All applicable changes.
 - Clear saved change history without changing workspace files.

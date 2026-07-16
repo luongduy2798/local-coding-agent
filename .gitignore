@@ -18,6 +18,7 @@ node_modules/
 vscode-extension/dist/
 server/data/
 server/*.log
+.agent/state/
 tmp-*/
 *-test-workspace/
 # ---- OS / editor ----

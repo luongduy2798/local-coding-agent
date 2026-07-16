@@ -82,6 +82,9 @@ interface RenameGroup {
 interface ChangeRecord {
   id: string;
   source: string;
+  title?: string;
+  taskStatus?: "active" | "completed";
+  operationCount?: number;
   status: ChangeStatus;
   createdAt: string;
   files: ChangedFile[];
@@ -342,7 +345,6 @@ function ChangeCard({ change, state }: { change: ChangeRecord; state: ViewState 
   const title = useMemo(() => changeTitle(change), [change]);
   const canUndoChange = ["applied", "reapplied", "partially_undone"].includes(change.status);
   const canReapplyChange = ["undone", "partially_undone"].includes(change.status);
-  const firstReviewable = change.files.find((file) => file.undoable);
   const disabled = Boolean(state.busyAction);
 
   return (
@@ -359,7 +361,8 @@ function ChangeCard({ change, state }: { change: ChangeRecord; state: ViewState 
             <div className="change-meta">
               <span>{relativeTime(change.createdAt)}</span>
               <span>•</span>
-              <span>{change.source}</span>
+              <span>{change.operationCount ? `${change.operationCount} operation${change.operationCount === 1 ? "" : "s"}` : change.source}</span>
+              {change.taskStatus === "active" && <><span>•</span><span>In progress</span></>}
             </div>
           </div>
         </div>
@@ -387,17 +390,6 @@ function ChangeCard({ change, state }: { change: ChangeRecord; state: ViewState 
               onClick={() => post("reapplyChange", change.id)}
             >
               Reapply
-            </Button>
-          )}
-          {firstReviewable && (
-            <Button
-              variant="secondary"
-              icon="review"
-              compact
-              disabled={disabled}
-              onClick={() => post("openDiff", change.id, firstReviewable.path)}
-            >
-              Review
             </Button>
           )}
         </div>
@@ -631,6 +623,7 @@ function post(type: string, changeId?: string, path?: string): void {
 }
 
 function changeTitle(change: ChangeRecord): string {
+  if (change.title && change.title !== "LCA task") return change.title;
   if (change.renameGroups.length === 1) {
     const rename = change.renameGroups[0];
     return `Renamed ${rename.from} → ${rename.to}`;

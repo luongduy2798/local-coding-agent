@@ -18,6 +18,7 @@ import {
 import { createWriteStream, readFileSync, existsSync, realpathSync } from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -36,7 +37,7 @@ import {
 // ----------------------------------------------------------------------------
 // Configuration (all overridable via environment variables)
 // ----------------------------------------------------------------------------
-const VERSION = "4.4.0-pro";
+const VERSION = "4.5.0-pro";
 const PRODUCT_TIER = "pro";
 const PORT = Number(process.env.PORT || 8789);
 // Bind to loopback by default. The local OpenAI tunnel-client forwards to this,
@@ -141,14 +142,36 @@ const SKILLS_DIRS = dedupe([
   ...ROOTS.flatMap((r) => [path.join(r, ".claude", "skills"), path.join(r, ".agent", "skills")])
 ]);
 
-const MAX_READ_CHARS = Number(process.env.AGENT_MAX_READ_CHARS || 200_000);
-// Default (not max) chars returned by read_file — keeps payloads small so the
-// ChatGPT UI does not choke on huge file dumps. Callers can raise via max_chars.
-const READ_DEFAULT = Number(process.env.AGENT_READ_DEFAULT || 30_000);
-const CMD_OUTPUT_DEFAULT = Number(process.env.AGENT_CMD_OUTPUT_DEFAULT || 20_000);
-const MAX_COMMAND_OUTPUT = Number(process.env.AGENT_MAX_COMMAND_OUTPUT || 200_000);
-const MAX_BATCH_READ_CHARS = boundedNumber(process.env.AGENT_MAX_BATCH_READ_CHARS, 500_000, 10_000, 2_000_000);
+const MAX_READ_CHARS = boundedNumber(process.env.AGENT_MAX_READ_CHARS, 200_000, 10_000, 2_000_000);
+// Conservative defaults keep tunnel payloads and model context small. Callers
+// can explicitly raise the per-call limits when full output is genuinely needed.
+const READ_DEFAULT = boundedNumber(process.env.AGENT_READ_DEFAULT, 12_000, 1_000, MAX_READ_CHARS);
+const READ_MANY_FILE_DEFAULT = boundedNumber(process.env.AGENT_READ_MANY_FILE_DEFAULT, 16_000, 1_000, MAX_READ_CHARS);
+const CMD_OUTPUT_DEFAULT = boundedNumber(process.env.AGENT_CMD_OUTPUT_DEFAULT, 8_000, 500, 200_000);
+const MAX_COMMAND_OUTPUT = boundedNumber(process.env.AGENT_MAX_COMMAND_OUTPUT, 200_000, 10_000, 2_000_000);
+const MAX_BATCH_READ_CHARS = boundedNumber(process.env.AGENT_MAX_BATCH_READ_CHARS, 100_000, 10_000, 2_000_000);
+const SEARCH_OUTPUT_DEFAULT = boundedNumber(process.env.AGENT_SEARCH_OUTPUT_DEFAULT, 15_000, 2_000, 200_000);
+const GIT_DIFF_OUTPUT_DEFAULT = boundedNumber(process.env.AGENT_GIT_DIFF_OUTPUT_DEFAULT, 25_000, 2_000, 500_000);
+const RUN_COMMANDS_OUTPUT_DEFAULT = boundedNumber(process.env.AGENT_RUN_COMMANDS_OUTPUT_DEFAULT, 40_000, 2_000, 500_000);
 const MAX_BODY_BYTES = Number(process.env.AGENT_MAX_BODY_BYTES || 16 * 1024 * 1024);
+const APP_ONLY_TOOL_NAMES = new Set(["workspace_search", "slash_commands", "compose_prompt"]);
+// One stable production catalog. Keep specialized capabilities, but hide aliases
+// and narrow wrappers that are fully replaced by a stronger aggregate tool.
+const REDUNDANT_TOOL_NAMES = new Set([
+  "ping",                    // lca
+  "workspace_info",          // lca
+  "repo_overview",           // workspace_snapshot + repo_map
+  "write_file",              // apply_patch create/update
+  "replace_in_file",         // apply_patch update
+  "move_path",               // apply_patch rename
+  "delete_path",             // apply_patch delete
+  "validate_patch",          // preview_patch already validates and explains conflicts
+  "detect_test_commands",    // quality_gate dry_run
+  "run_tests",               // quality_gate include=[test]
+  "run_build",               // quality_gate include=[build]
+  "run_lint"                 // quality_gate include=[lint]
+]);
+const TEST_EXPOSE_REDUNDANT_TOOLS = process.env.LCA_TEST_RUN_ID && process.env.LCA_TEST_EXPOSE_REDUNDANT_TOOLS === "1";
 const DEFAULT_CMD_TIMEOUT = 60_000;
 const MAX_PROCS = 24;
 const PROC_BUFFER = 200_000;
@@ -212,6 +235,16 @@ const SAFE_MODE_BLOCKS = [
 const processes = new Map(); // id -> { id, name, command, child, status, exitCode, startedAt, stdout, stderr }
 let approvalLock = Promise.resolve();
 let auditStream = null;
+const MCP_REQUEST_CONTEXT = new AsyncLocalStorage();
+const TOOL_RUNTIME_METRICS = {
+  scope: "process",
+  startedAt: isoNow(),
+  calls: 0,
+  outputChars: 0,
+  largestOutputChars: 0,
+  largestOutputTool: null,
+  errors: 0
+};
 
 const CHANGE_JOURNAL = createChangeJournal({
   root: PRIMARY_ROOT,
@@ -219,7 +252,10 @@ const CHANGE_JOURNAL = createChangeJournal({
   dataDir: path.join(WORKSPACE_DATA_DIR, "changes"),
   validatePath: resolvePath,
   toRelativePath: toRel,
-  maxSnapshotBytes: boundedNumber(process.env.AGENT_MAX_SNAPSHOT_BYTES, 5 * 1024 * 1024, 1, 100 * 1024 * 1024)
+  maxSnapshotBytes: boundedNumber(process.env.AGENT_MAX_SNAPSHOT_BYTES, 5 * 1024 * 1024, 1, 100 * 1024 * 1024),
+  snapshotConcurrency: boundedNumber(process.env.AGENT_JOURNAL_SNAPSHOT_CONCURRENCY, 4, 1, 16),
+  deferLineStats: process.env.AGENT_DEFER_LINE_STATS !== "0",
+  deferLineStatsBytes: boundedNumber(process.env.AGENT_DEFER_LINE_STATS_BYTES, 512_000, 32_000, 100 * 1024 * 1024)
 });
 
 // ----------------------------------------------------------------------------
@@ -277,6 +313,7 @@ const httpServer = http.createServer(async (req, res) => {
         version: VERSION,
         mode: MODE,
         policy: AGENT_POLICY,
+        tool_catalog: "stable",
         roots: ROOTS,
         mcp_endpoint: `http://${HOST}:${PORT}/mcp`
       });
@@ -423,29 +460,70 @@ async function handleMcp(req, res) {
       id: null
     });
   }
+
+  const requestId = randomUUID();
+  const startedAt = isoNow();
+  const startedMs = performance.now();
+  const requestMetrics = {
+    requestId,
+    tool: null,
+    handlerMs: null,
+    outChars: null,
+    success: null
+  };
   const server = createMcpServer();
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
   res.on("close", () => {
     transport.close();
     server.close();
   });
+
   await server.connect(transport);
+  const transportReadyMs = performance.now();
   const body = await readJsonBody(req, MAX_BODY_BYTES);
-  await transport.handleRequest(req, res, body);
+  const bodyParsedMs = performance.now();
+  requestMetrics.tool = body?.method === "tools/call" ? String(body?.params?.name || "") : null;
+
+  let thrown = null;
+  try {
+    await MCP_REQUEST_CONTEXT.run(requestMetrics, () => transport.handleRequest(req, res, body));
+  } catch (error) {
+    thrown = error;
+    throw error;
+  } finally {
+    const finishedMs = performance.now();
+    const responseLength = Number(res.getHeader("content-length") || 0) || undefined;
+    audit({
+      ts: startedAt,
+      kind: "mcp_request",
+      requestId,
+      method: body?.method || null,
+      tool: requestMetrics.tool || undefined,
+      ok: thrown === null && res.statusCode < 400,
+      requestBytes: len || undefined,
+      responseBytes: responseLength,
+      setupMs: roundMs(transportReadyMs - startedMs),
+      bodyParseMs: roundMs(bodyParsedMs - transportReadyMs),
+      transportMs: roundMs(finishedMs - bodyParsedMs),
+      handlerMs: requestMetrics.handlerMs ?? undefined,
+      outChars: requestMetrics.outChars ?? undefined,
+      httpTotalMs: roundMs(finishedMs - startedMs)
+    });
+  }
 }
 
 const SERVER_INSTRUCTIONS = [
-  "Local Coding Agent Pro MCP: tool calls cross a tunnel, so start with workspace_snapshot or workspace_doctor, then use read_many/search_text/run_commands to batch work; prefer dedicated tools over run_command. Policy may require token approval via AGENT_APPROVAL_TOKEN for risky delete/install/network/mutating-git actions; exact action batches can use request_approval_batch. File tools are root-confined, but commands are not an OS sandbox.",
-  "WORKFLOW: (1) Start with workspace_snapshot for repo/git/policy in one call; use workspace_doctor when you need operational readiness. (2) Use read_many/search_text/repo_symbols to gather context in batches. (3) Use preview_patch/validate_patch before apply_patch for large edits. (4) Before marking 'done', call review_diff and session_report; run tests/build/lint only when the user explicitly asks. (5) For multi-step tasks, use task_plan + decision_log to maintain state across chats.",
+  "Local Coding Agent Pro MCP: tool calls cross a tunnel, so start with workspace_snapshot, then use read_many/search_text/run_commands only for missing evidence; prefer dedicated tools over run_command. Use workspace_doctor for operational readiness checks. Policy may require token approval via AGENT_APPROVAL_TOKEN for risky delete/install/network/mutating-git actions; exact action batches can use request_approval_batch. File tools are root-confined, but commands are not an OS sandbox.",
+  "WORKFLOW: (1) Start with workspace_snapshot, optionally with focus/include_matches, to gather one bounded evidence pack. (2) Use search_text/read_many only for missing evidence and keep ranges targeted. (3) Prefer one apply_patch for related edits. (4) All filesystem mutations from one user request belong to one Review Changes task; task_plan names it, the first mutation starts it automatically, and session_report closes it only after the work is complete. (5) Before marking done, call session_report once with review/change summary; enable quality checks only when explicitly requested. (6) For multi-step tasks, use task_plan + decision_log to maintain state across chats.",
   "POLICY: Check policy_status if you are unsure whether an action is allowed. In balanced policy, risky operations (delete, install, network, mutating git, risky processes) require one-time approval with request_approval/request_approval_batch followed by approve_request using AGENT_APPROVAL_TOKEN.",
-  "REVIEW CHANGES: Dedicated filesystem mutations are tracked automatically. If a mutation returns STALE_FILE, reread the file and retry. Do not create a separate change set.",
+  "REVIEW CHANGES: Dedicated filesystem mutations are tracked as operation records inside one active task change set. Do not close the task between patches. If a mutation returns STALE_FILE, reread the file and retry. Call session_report only when the user task is finished so the next mutation starts a new card.",
   "FIGMA: LCA bridges the official Figma Desktop MCP server at 127.0.0.1:3845. For a Figma URL or current desktop selection, prefer figma_get_design_context; also call figma_get_screenshot when visual fidelity matters. Use figma_status when the bridge is unavailable and figma_list_tools/figma_call_tool for newer upstream tools.",
   "Use the DEDICATED tools instead of run_command for these — they are faster and cheaper:",
   "- Find files by name -> find_files (NOT dir/ls/Get-ChildItem/where).",
   "- Search file contents -> search_text with context= (NOT grep/findstr/Select-String).",
   "- Read files -> read_many for several or targeted ranges, read_file for one (NOT type/cat/Get-Content).",
   "- Map a repo -> workspace_snapshot first, repo_map for deeper tree detail; use workspace_doctor for readiness checks.",
-  "- Create/edit files -> write_file / apply_patch (with a unified `diff` for many edits) (NOT echo>/Set-Content).",
+  "- Create/edit/delete/rename files -> apply_patch, preferably one unified diff or one structured operation batch (NOT echo>/Set-Content).",
   "- Symbol search -> repo_symbols for function/class definitions.",
   "Reserve run_command for explicit user-requested builds, tests, installs, running programs, and git. When you do use it:",
   "- Pass the `cwd` argument instead of cd/pushd.",
@@ -454,7 +532,7 @@ const SERVER_INSTRUCTIONS = [
   "Keep the conversation light: do NOT re-read a file you already read; read only the line range you need; never dump a whole large file or large command output unless asked.",
   "When the conversation grows long or feels slow, call checkpoint() with a compact summary + next steps, then tell the user to open a NEW chat; in that fresh chat call resume() first. This resets the heavy context (faster) while keeping your progress.",
   "If a task matches an available skill, call list_skills first, then read_skill(name) to load its instructions before doing the work.",
-  "For ChatGPT UI companion flows, call lca_input to render the Apps SDK widget in ChatGPT; the widget uses workspace_search for @ file/folder/symbol search, slash_commands for / workflow/mode/skill suggestions, and compose_prompt to turn sidebar input into a ready prompt. If the user only says 'lca' in a fresh chat, call the lca tool for workspace_info-style status.",
+  "For ChatGPT UI companion flows, call lca_input to render the Apps SDK widget in ChatGPT; the widget uses workspace_search for @ file/folder/symbol search, slash_commands for / workflow/mode/skill suggestions, and compose_prompt to turn sidebar input into a ready prompt. If the user only says 'lca' in a fresh chat, call the lca tool for workspace status.",
   "Prefer a few large, well-targeted calls over many tiny ones."
 ].join("\n");
 
@@ -813,6 +891,7 @@ function registerCompanionTools(mcp) {
       title: "Workspace @ search",
       description: "Autocomplete backend for @ file/folder/symbol/skill search in a ChatGPT companion UI. Use this when the user mentions @... or wants to pick workspace context without copying paths.",
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
+      _meta: { ui: { visibility: ["app"] } },
       inputSchema: {
         query: z.string().optional().describe("Search text, usually what the user typed after @. @/ or empty returns top-level context."),
         path: z.string().optional().describe("Root dir to search. Defaults to the active workspace root."),
@@ -834,6 +913,7 @@ function registerCompanionTools(mcp) {
       title: "Slash commands",
       description: "Autocomplete backend for / workflow commands, mode tags, and skill shortcuts. Use this for /plan, /debug, /review, /skill:<name>, etc.",
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
+      _meta: { ui: { visibility: ["app"] } },
       inputSchema: {
         query: z.string().optional().describe("Search text, usually what the user typed after /."),
         include: z.array(z.enum(["workflow", "mode", "skill"])).optional(),
@@ -853,6 +933,7 @@ function registerCompanionTools(mcp) {
       title: "Compose LCA prompt",
       description: "Parse sidebar-style input containing @ context and / workflow commands, resolve selected paths, and return a ready-to-send prompt for ChatGPT.",
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
+      _meta: { ui: { visibility: ["app"] } },
       inputSchema: {
         input: z.string().min(1).describe("User task text, may include @mentions and /commands."),
         path: z.string().optional().describe("Workspace root to resolve @mentions against."),
@@ -1204,7 +1285,12 @@ async function composeLcaPrompt(input, rootDir, { mode, selectedContext = [], in
 // ----------------------------------------------------------------------------
 // Tool registration helper: audit + uniform error handling
 // ----------------------------------------------------------------------------
+function shouldRegisterTool(name) {
+  return TEST_EXPOSE_REDUNDANT_TOOLS || !REDUNDANT_TOOL_NAMES.has(name);
+}
+
 function reg(mcp, name, def, handler) {
+  if (!shouldRegisterTool(name)) return;
   mcp.registerTool(name, def, async (args, extra) => {
     const startedAt = isoNow();
     const startedMs = performance.now();
@@ -1228,9 +1314,23 @@ function reg(mcp, name, def, handler) {
     }
     const success = ok && !result?.isError;
     const outChars = resultLen(result);
-    const durationMs = Math.max(0, Math.round((performance.now() - startedMs) * 10) / 10);
+    const durationMs = roundMs(performance.now() - startedMs);
+    const requestMetrics = MCP_REQUEST_CONTEXT.getStore();
+    if (requestMetrics) {
+      requestMetrics.tool = name;
+      requestMetrics.handlerMs = durationMs;
+      requestMetrics.outChars = outChars;
+      requestMetrics.success = success;
+    }
+    TOOL_RUNTIME_METRICS.calls++;
+    TOOL_RUNTIME_METRICS.outputChars += outChars;
+    if (!success) TOOL_RUNTIME_METRICS.errors++;
+    if (outChars > TOOL_RUNTIME_METRICS.largestOutputChars) {
+      TOOL_RUNTIME_METRICS.largestOutputChars = outChars;
+      TOOL_RUNTIME_METRICS.largestOutputTool = name;
+    }
     const errText = success ? null : firstText(result).slice(0, 200);
-    audit({ ts: startedAt, tool: name, ok: success, durationMs, inChars, outChars, error: errText || undefined, args: argSummary || undefined });
+    audit({ ts: startedAt, kind: "tool", requestId: requestMetrics?.requestId, tool: name, ok: success, durationMs, inChars, outChars, error: errText || undefined, args: argSummary || undefined });
     return result;
   });
 }
@@ -1245,6 +1345,7 @@ function workspaceInfoPayload() {
     tier: PRODUCT_TIER,
     mode: MODE,
     policy: AGENT_POLICY,
+    tool_catalog: "stable",
     allow_dangerous: ALLOW_DANGEROUS,
     auth: AUTH_TOKEN ? "bearer" : "none",
     roots: ROOTS,
@@ -1252,8 +1353,13 @@ function workspaceInfoPayload() {
     host: { platform: os.platform(), release: os.release(), hostname: os.hostname(), cwd: process.cwd(), node: process.version },
     limits: {
       max_read_chars: MAX_READ_CHARS,
+      read_default_chars: READ_DEFAULT,
+      read_many_file_default_chars: READ_MANY_FILE_DEFAULT,
       max_batch_read_chars: MAX_BATCH_READ_CHARS,
+      command_output_default_chars: CMD_OUTPUT_DEFAULT,
       max_command_output: MAX_COMMAND_OUTPUT,
+      search_output_default_chars: SEARCH_OUTPUT_DEFAULT,
+      git_diff_output_default_chars: GIT_DIFF_OUTPUT_DEFAULT,
       max_procs: MAX_PROCS
     },
     running_processes: [...processes.values()].filter((p) => p.status === "running").length,
@@ -1292,7 +1398,7 @@ function registerBasicTools(mcp) {
     "lca",
     {
       title: "LCA status",
-      description: "Short alias for workspace_info. Use this when the user says only 'lca' in a fresh chat to check the active LCA workspace.",
+      description: "Return the active LCA workspace, policy, limits, host, and safety status. Use this when the user says only 'lca' or asks which workspace is active.",
       inputSchema: {}
     },
     async () => jsonResult(workspaceInfoPayload())
@@ -1411,13 +1517,18 @@ function registerFsReadTools(mcp) {
         path: z.string().min(1),
         start_line: z.number().int().min(1).optional().describe("1-based first line to return."),
         line_count: z.number().int().min(1).max(20000).optional().describe("Number of lines to return from start_line."),
-        max_chars: z.number().int().min(1).max(MAX_READ_CHARS).optional().describe(`Max chars to return (default ${READ_DEFAULT}).`)
+        max_chars: z.number().int().min(1).max(MAX_READ_CHARS).optional().describe(`Max chars to return (default ${READ_DEFAULT}).`),
+        known_version: z.string().optional().describe("Previously returned SHA-256 version."),
+        skip_if_unchanged: z.boolean().optional().describe("When true and known_version matches, return metadata without repeating content (default false; keep false when requesting a different range).")
       }
     },
-    async ({ path: rel, start_line, line_count, max_chars = READ_DEFAULT }) => {
+    async ({ path: rel, start_line, line_count, max_chars = READ_DEFAULT, known_version, skip_if_unchanged = false }) => {
       const filePath = resolvePath(rel);
       const buffer = await readFile(filePath);
       const version = CHANGE_JOURNAL.rememberRead(filePath, buffer);
+      if (known_version && known_version === version && skip_if_unchanged) {
+        return jsonResult({ path: toRel(filePath), version, unchanged: true, content_omitted: true });
+      }
       const content = buffer.toString("utf8");
       const allLines = content.split(/\r?\n/);
       if (start_line || line_count) {
@@ -1429,7 +1540,9 @@ function registerFsReadTools(mcp) {
           version,
           total_lines: allLines.length,
           start_line: from + 1,
-          returned_lines: Math.min(to, allLines.length) - from,
+          returned_lines: Math.max(0, Math.min(to, allLines.length) - from),
+          chars: slice.length,
+          returned_chars: Math.min(slice.length, max_chars),
           content: slice.length > max_chars ? slice.slice(0, max_chars) : slice,
           truncated: slice.length > max_chars
         });
@@ -1440,6 +1553,7 @@ function registerFsReadTools(mcp) {
         version,
         total_lines: allLines.length,
         chars: content.length,
+        returned_chars: Math.min(content.length, max_chars),
         truncated,
         content: truncated ? content.slice(0, max_chars) : content
       });
@@ -1452,9 +1566,12 @@ function registerFsReadTools(mcp) {
     {
       title: "Stat path",
       description: "Return metadata about a file or directory.",
-      inputSchema: { path: z.string().min(1) }
+      inputSchema: {
+        path: z.string().min(1),
+        task_title: z.string().min(1).max(180).optional().describe("Short title for the user task when this is its first mutation.")
+      }
     },
-    async ({ path: rel }) => {
+    async ({ path: rel, task_title }) => {
       const target = resolvePath(rel);
       const info = await stat(target);
       return jsonResult({
@@ -1479,10 +1596,11 @@ function registerFsReadTools(mcp) {
         regex: z.boolean().optional(),
         glob: z.string().optional().describe('Only search files matching this glob, e.g. "*.ts".'),
         context: z.number().int().min(0).max(10).optional().describe("Lines of context before/after each match."),
-        limit: z.number().int().min(1).max(500).optional()
+        limit: z.number().int().min(1).max(500).optional(),
+        max_output_chars: z.number().int().min(1000).max(200000).optional().describe(`Approximate JSON budget for matches (default ${SEARCH_OUTPUT_DEFAULT}).`)
       }
     },
-    async ({ query, path: rel = ".", regex = false, glob, context = 0, limit = 100 }) => {
+    async ({ query, path: rel = ".", regex = false, glob, context = 0, limit = 100, max_output_chars = SEARCH_OUTPUT_DEFAULT }) => {
       const start = resolvePath(rel);
       // Tolerate a broken regex: fall back to a literal substring search instead
       // of erroring out.
@@ -1510,7 +1628,19 @@ function registerFsReadTools(mcp) {
       }
       if (matches === null) matches = await searchTree(start, query, { regex: useRegex, limit, glob });
       if (context > 0 && matches.length) await attachContext(matches, context);
-      return jsonResult({ query, regex: useRegex, regex_fallback: regexFallback, engine, context, count: matches.length, matches });
+      const limited = fitJsonItems(matches, max_output_chars);
+      return jsonResult({
+        query,
+        regex: useRegex,
+        regex_fallback: regexFallback,
+        engine,
+        context,
+        count: matches.length,
+        returned: limited.items.length,
+        truncated: limited.truncated,
+        output_chars: limited.chars,
+        matches: limited.items
+      });
     }
   );
 
@@ -1523,13 +1653,15 @@ function registerFsReadTools(mcp) {
       inputSchema: {
         glob: z.string().min(1).describe('Name glob, e.g. "*.ts" or "**/Dockerfile".'),
         path: z.string().optional().describe("Directory to search under."),
-        limit: z.number().int().min(1).max(2000).optional()
+        limit: z.number().int().min(1).max(2000).optional(),
+        max_output_chars: z.number().int().min(1000).max(200000).optional().describe(`Approximate JSON budget for paths (default ${SEARCH_OUTPUT_DEFAULT}).`)
       }
     },
-    async ({ glob, path: rel = ".", limit = 300 }) => {
+    async ({ glob, path: rel = ".", limit = 300, max_output_chars = SEARCH_OUTPUT_DEFAULT }) => {
       const start = resolvePath(rel);
       const { files, engine } = await findFiles(start, glob, limit);
-      return jsonResult({ glob, engine, count: files.length, files });
+      const limited = fitJsonItems(files, max_output_chars);
+      return jsonResult({ glob, engine, count: files.length, returned: limited.items.length, truncated: limited.truncated, files: limited.items });
     }
   );
 
@@ -1545,13 +1677,16 @@ function registerFsReadTools(mcp) {
           path: z.string().min(1),
           start_line: z.number().int().min(1).optional(),
           line_count: z.number().int().min(1).max(10000).optional(),
-          max_chars: z.number().int().min(1).max(MAX_READ_CHARS).optional()
+          max_chars: z.number().int().min(1).max(MAX_READ_CHARS).optional(),
+          known_version: z.string().optional().describe("Previously returned SHA-256 version."),
+          skip_if_unchanged: z.boolean().optional().describe("When true, omit content if known_version matches; keep false for a different line range.")
         })).min(1).max(100).optional().describe("Structured reads with optional line ranges. Use either paths or requests."),
         max_chars_per_file: z.number().int().min(1).max(MAX_READ_CHARS).optional(),
+        max_total_chars: z.number().int().min(1000).max(MAX_BATCH_READ_CHARS).optional().describe(`Total content budget (default ${MAX_BATCH_READ_CHARS}).`),
         concurrency: z.number().int().min(1).max(16).optional().describe("Concurrent local reads (default 8).")
       }
     },
-    async ({ paths, requests, max_chars_per_file = 40_000, concurrency = 8 }) => {
+    async ({ paths, requests, max_chars_per_file = READ_MANY_FILE_DEFAULT, max_total_chars = MAX_BATCH_READ_CHARS, concurrency = 8 }) => {
       if (paths?.length && requests?.length) throw new Error("Use either paths or requests, not both.");
       const items = requests?.length ? requests : (paths || []).map((p) => ({ path: p }));
       if (!items.length) throw new Error("Provide at least one path or read request.");
@@ -1567,6 +1702,10 @@ function registerFsReadTools(mcp) {
             const fp = resolvePath(request.path);
             const buffer = await readFile(fp);
             const version = CHANGE_JOURNAL.rememberRead(fp, buffer);
+            if (request.known_version && request.known_version === version && request.skip_if_unchanged === true) {
+              files[index] = { path: toRel(fp), version, unchanged: true, content_omitted: true };
+              continue;
+            }
             const content = buffer.toString("utf8");
             const maxChars = request.max_chars || max_chars_per_file;
             if (request.start_line || request.line_count) {
@@ -1581,6 +1720,7 @@ function registerFsReadTools(mcp) {
                 start_line: start,
                 returned_lines: Math.min(count, Math.max(0, lines.length - start + 1)),
                 chars: selected.length,
+                returned_chars: Math.min(selected.length, maxChars),
                 truncated: selected.length > maxChars,
                 content: selected.slice(0, maxChars)
               };
@@ -1590,6 +1730,7 @@ function registerFsReadTools(mcp) {
               path: toRel(fp),
               version,
               chars: content.length,
+              returned_chars: Math.min(content.length, maxChars),
               truncated: content.length > maxChars,
               content: content.slice(0, maxChars)
             };
@@ -1600,7 +1741,8 @@ function registerFsReadTools(mcp) {
       };
       await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, () => worker()));
 
-      let remaining = MAX_BATCH_READ_CHARS;
+      const batchLimit = Math.min(max_total_chars, MAX_BATCH_READ_CHARS);
+      let remaining = batchLimit;
       let batchTruncated = false;
       for (const file of files) {
         if (typeof file.content !== "string") continue;
@@ -1615,8 +1757,8 @@ function registerFsReadTools(mcp) {
       return jsonResult({
         count: files.length,
         failed: files.filter((f) => f.error).length,
-        chars_returned: MAX_BATCH_READ_CHARS - remaining,
-        max_batch_chars: MAX_BATCH_READ_CHARS,
+        chars_returned: batchLimit - remaining,
+        max_batch_chars: batchLimit,
         batch_truncated: batchTruncated,
         files
       });
@@ -1750,7 +1892,7 @@ function registerFsWriteTools(mcp) {
     },
     async ({ path: rel, content }) => {
       const filePath = resolvePath(rel);
-      const { result, change } = await CHANGE_JOURNAL.runMutation({
+      const { result, change, task } = await CHANGE_JOURNAL.runMutation({
         source: "write_file",
         paths: [filePath],
         mutate: async () => {
@@ -1759,7 +1901,7 @@ function registerFsWriteTools(mcp) {
           return { ok: true, path: toRel(filePath), bytes: Buffer.byteLength(content) };
         }
       });
-      return jsonResult({ ...result, change_id: change?.id || null });
+      return jsonResult({ ...result, change_id: change?.id || null, task_id: task?.id || null });
     }
   );
 
@@ -1778,7 +1920,7 @@ function registerFsWriteTools(mcp) {
     },
     async ({ path: rel, old_text, new_text, replace_all = false }) => {
       const filePath = resolvePath(rel);
-      const { result, change } = await CHANGE_JOURNAL.runMutation({
+      const { result, change, task } = await CHANGE_JOURNAL.runMutation({
         source: "replace_in_file",
         paths: [filePath],
         mutate: async ({ before }) => {
@@ -1794,7 +1936,7 @@ function registerFsWriteTools(mcp) {
           return { ok: true, path: toRel(filePath), replacements };
         }
       });
-      return jsonResult({ ...result, change_id: change?.id || null });
+      return jsonResult({ ...result, change_id: change?.id || null, task_id: task?.id || null });
     }
   );
 
@@ -1803,8 +1945,9 @@ function registerFsWriteTools(mcp) {
     "apply_patch",
     {
       title: "Apply patch",
-      description: "Apply MANY edits in ONE call. Two modes: (a) `diff` = a standard unified diff covering one or more files (preferred for multi-file edits), or (b) `operations` = structured create/update/delete/rename. Use this instead of many replace_in_file calls.",
+      description: "Primary filesystem mutation tool. Apply create/update/delete/rename operations in ONE call using a unified diff or structured operations. Prefer one related batch to many tiny edits.",
       inputSchema: {
+        task_title: z.string().min(1).max(180).optional().describe("Short title for the user task. Send on the first mutation of a new user request; omit on later patches in the same task."),
         diff: z.string().optional().describe("A unified diff (---/+++/@@). Applies by matching context, ignoring line numbers."),
         operations: z
           .array(
@@ -1823,12 +1966,13 @@ function registerFsWriteTools(mcp) {
           .optional()
       }
     },
-    async ({ diff, operations }) => {
+    async ({ task_title, diff, operations }) => {
       if (diff && diff.trim()) {
         const affectedPaths = collectUnifiedDiffPaths(diff);
         if (!affectedPaths.length) throw new Error("No file sections found in diff (need ---/+++ headers).");
-        const { result, change } = await CHANGE_JOURNAL.runMutation({
+        const { result, change, task } = await CHANGE_JOURNAL.runMutation({
           source: "apply_patch",
+          taskTitle: task_title,
           paths: affectedPaths,
           mutate: async ({ before }) => {
             const preview = await dryRunUnifiedDiff(diff, before);
@@ -1839,7 +1983,7 @@ function registerFsWriteTools(mcp) {
             return { ok, mode: "diff", applied: results.filter((item) => item.ok).length, results };
           }
         });
-        return jsonResult({ ...result, change_id: change?.id || null });
+        return jsonResult({ ...result, change_id: change?.id || null, task_id: task?.id || null });
       }
       if (!operations || !operations.length) {
         throw new Error("Provide either `diff` or a non-empty `operations` array.");
@@ -1850,8 +1994,9 @@ function registerFsWriteTools(mcp) {
       const renameGroups = operations
         .filter((op) => op.op === "rename" && op.rename_to)
         .map((op) => ({ from: toRel(resolvePath(op.path)), to: toRel(resolvePath(op.rename_to)) }));
-      const { result, change } = await CHANGE_JOURNAL.runMutation({
+      const { result, change, task } = await CHANGE_JOURNAL.runMutation({
         source: "apply_patch",
+        taskTitle: task_title,
         paths: affectedPaths,
         renameGroups,
         mutate: async ({ before }) => {
@@ -1869,7 +2014,7 @@ function registerFsWriteTools(mcp) {
           return { ok, mode: "operations", applied: results.filter((item) => item.ok).length, results };
         }
       });
-      return jsonResult({ ...result, change_id: change?.id || null });
+      return jsonResult({ ...result, change_id: change?.id || null, task_id: task?.id || null });
     }
   );
 
@@ -1879,19 +2024,23 @@ function registerFsWriteTools(mcp) {
     {
       title: "Make directory",
       description: "Create a directory (recursive).",
-      inputSchema: { path: z.string().min(1) }
+      inputSchema: {
+        path: z.string().min(1),
+        task_title: z.string().min(1).max(180).optional().describe("Short title for the user task when this is its first mutation.")
+      }
     },
-    async ({ path: rel }) => {
+    async ({ path: rel, task_title }) => {
       const dir = resolvePath(rel);
-      const { result, change } = await CHANGE_JOURNAL.runMutation({
+      const { result, change, task } = await CHANGE_JOURNAL.runMutation({
         source: "make_dir",
+        taskTitle: task_title,
         paths: [dir],
         mutate: async () => {
           await mkdir(dir, { recursive: true });
           return { ok: true, path: toRel(dir) };
         }
       });
-      return jsonResult({ ...result, change_id: change?.id || null });
+      return jsonResult({ ...result, change_id: change?.id || null, task_id: task?.id || null });
     }
   );
 
@@ -1907,7 +2056,7 @@ function registerFsWriteTools(mcp) {
       const src = resolvePath(from);
       const dst = resolvePath(to);
       if (existsSync(dst)) throw new Error(`Destination already exists: ${toRel(dst)}`);
-      const { result, change } = await CHANGE_JOURNAL.runMutation({
+      const { result, change, task } = await CHANGE_JOURNAL.runMutation({
         source: "move_path",
         paths: [src, dst],
         renameGroups: [{ from: toRel(src), to: toRel(dst) }],
@@ -1917,7 +2066,7 @@ function registerFsWriteTools(mcp) {
           return { ok: true, from: toRel(src), to: toRel(dst) };
         }
       });
-      return jsonResult({ ...result, change_id: change?.id || null });
+      return jsonResult({ ...result, change_id: change?.id || null, task_id: task?.id || null });
     }
   );
 
@@ -1934,7 +2083,7 @@ function registerFsWriteTools(mcp) {
       if (target === PRIMARY_ROOT || ROOTS.includes(target)) throw new Error("Refusing to delete a configured root.");
       const info = await stat(target);
       if (info.isDirectory() && !recursive) throw new Error("Path is a directory; pass recursive=true to delete it.");
-      const { result, change } = await CHANGE_JOURNAL.runMutation({
+      const { result, change, task } = await CHANGE_JOURNAL.runMutation({
         source: "delete_path",
         paths: [target],
         mutate: async () => {
@@ -1942,7 +2091,7 @@ function registerFsWriteTools(mcp) {
           return { ok: true, deleted: toRel(target) };
         }
       });
-      return jsonResult({ ...result, change_id: change?.id || null });
+      return jsonResult({ ...result, change_id: change?.id || null, task_id: task?.id || null });
     }
   );
 }
@@ -2164,16 +2313,17 @@ function registerExecTools(mcp) {
         timeout_ms: z.number().int().min(1000).max(600000).optional(),
         tail_lines: z.number().int().min(1).max(5000).optional().describe("Return only the last N lines of output."),
         head_lines: z.number().int().min(1).max(5000).optional().describe("Return only the first N lines of output."),
-        max_output_chars: z.number().int().min(500).max(MAX_COMMAND_OUTPUT).optional().describe(`Cap stdout/stderr chars (default ${CMD_OUTPUT_DEFAULT}).`)
+        max_output_chars: z.number().int().min(500).max(MAX_COMMAND_OUTPUT).optional().describe(`Combined stdout/stderr budget (default ${CMD_OUTPUT_DEFAULT}).`),
+        include_request: z.boolean().optional().describe("Echo command/cwd/shell in the response (default false).")
       }
     },
-    async ({ command, cwd = ".", shell, timeout_ms = DEFAULT_CMD_TIMEOUT, tail_lines, head_lines, max_output_chars = CMD_OUTPUT_DEFAULT }) => {
+    async ({ command, cwd = ".", shell, timeout_ms = DEFAULT_CMD_TIMEOUT, tail_lines, head_lines, max_output_chars = CMD_OUTPUT_DEFAULT, include_request = false }) => {
       assertCommandAllowed(command);
       const workdir = resolvePath(cwd);
       const result = await runShellCommand(command, workdir, shell, timeout_ms);
-      const trim = (s) => trimOutput(s, { tail_lines, head_lines, max_chars: max_output_chars });
-      const stdout = trim(result.stdout);
-      const stderr = trim(result.stderr);
+      const trimmed = trimOutputPair(result.stdout, result.stderr, { tail_lines, head_lines, max_chars: max_output_chars });
+      const stdout = trimmed.stdout;
+      const stderr = trimmed.stderr;
       await CHANGE_JOURNAL.recordActivity({
         source: "run_command",
         commandCount: 1,
@@ -2185,11 +2335,11 @@ function registerExecTools(mcp) {
         message: result.exit_code === 0 ? "Command completed." : "Command failed."
       });
       return jsonResult({
-        cwd: workdir,
-        command,
-        shell: shell || defaultShell(),
+        ...(include_request ? { cwd: toRel(workdir), command, shell: shell || defaultShell() } : {}),
+        ok: result.exit_code === 0 && !result.timed_out,
         exit_code: result.exit_code,
         timed_out: result.timed_out,
+        output_chars: stdout.length + stderr.length,
         stdout_truncated: stdout.length < result.stdout.length,
         stderr_truncated: stderr.length < result.stderr.length,
         stdout,
@@ -2214,23 +2364,24 @@ function registerExecTools(mcp) {
         })).min(1).max(12),
         parallel: z.boolean().optional().describe("Run independent commands concurrently (default false)."),
         max_concurrency: z.number().int().min(1).max(4).optional(),
-        stop_on_failure: z.boolean().optional().describe("Sequential mode only; default true.")
+        stop_on_failure: z.boolean().optional().describe("Sequential mode only; default true."),
+        max_total_output_chars: z.number().int().min(1000).max(500000).optional().describe(`Combined batch output budget (default ${RUN_COMMANDS_OUTPUT_DEFAULT}).`),
+        include_request: z.boolean().optional().describe("Echo each command/cwd/shell in results (default false).")
       }
     },
-    async ({ commands, parallel = false, max_concurrency = 4, stop_on_failure = true }) => {
+    async ({ commands, parallel = false, max_concurrency = 4, stop_on_failure = true, max_total_output_chars = RUN_COMMANDS_OUTPUT_DEFAULT, include_request = false }) => {
       const results = new Array(commands.length);
       const runOne = async (item, index) => {
         assertCommandAllowed(item.command);
         const workdir = resolvePath(item.cwd || ".");
         const result = await runShellCommand(item.command, workdir, item.shell, item.timeout_ms || DEFAULT_CMD_TIMEOUT);
-        const maxChars = item.max_output_chars || 10_000;
-        const stdout = trimOutput(result.stdout, { max_chars: maxChars });
-        const stderr = trimOutput(result.stderr, { max_chars: maxChars });
+        const maxChars = item.max_output_chars || 6_000;
+        const trimmed = trimOutputPair(result.stdout, result.stderr, { max_chars: maxChars });
+        const stdout = trimmed.stdout;
+        const stderr = trimmed.stderr;
         results[index] = {
           index,
-          cwd: workdir,
-          command: item.command,
-          shell: item.shell || defaultShell(),
+          ...(include_request ? { cwd: toRel(workdir), command: item.command, shell: item.shell || defaultShell() } : {}),
           exit_code: result.exit_code,
           timed_out: result.timed_out,
           stdout_truncated: stdout.length < result.stdout.length,
@@ -2258,6 +2409,19 @@ function registerExecTools(mcp) {
       }
 
       const completed = results.filter(Boolean);
+      let remainingOutput = Math.min(max_total_output_chars, 500_000);
+      let batchOutputTruncated = false;
+      for (const item of completed) {
+        for (const key of ["stderr", "stdout"]) {
+          const value = String(item[key] || "");
+          if (value.length > remainingOutput) {
+            item[key] = value.slice(0, Math.max(0, remainingOutput));
+            item[`${key}_truncated`] = true;
+            batchOutputTruncated = true;
+          }
+          remainingOutput = Math.max(0, remainingOutput - String(item[key] || "").length);
+        }
+      }
       await CHANGE_JOURNAL.recordActivity({
         source: "run_commands",
         commandCount: commands.length,
@@ -2274,6 +2438,8 @@ function registerExecTools(mcp) {
         requested: commands.length,
         completed: completed.length,
         stopped_early: completed.length < commands.length,
+        output_chars: Math.min(max_total_output_chars, 500_000) - remainingOutput,
+        output_truncated: batchOutputTruncated,
         results: completed
       });
     }
@@ -2462,10 +2628,11 @@ function registerGitTool(mcp) {
       inputSchema: {
         path: z.string().optional().describe("Limit the diff to this file or directory."),
         staged: z.boolean().optional().describe("Diff staged changes (--staged) instead of the working tree."),
-        cwd: z.string().optional().describe("Repository directory inside a root (default the primary root).")
+        cwd: z.string().optional().describe("Repository directory inside a root (default the primary root)."),
+        max_chars: z.number().int().min(1000).max(500000).optional().describe(`Diff output budget (default ${GIT_DIFF_OUTPUT_DEFAULT}).`)
       }
     },
-    async ({ path: rel, staged = false, cwd = "." }) => {
+    async ({ path: rel, staged = false, cwd = ".", max_chars = GIT_DIFF_OUTPUT_DEFAULT }) => {
       const workdir = resolvePath(cwd);
       const args = ["diff"];
       if (staged) args.push("--staged");
@@ -2482,13 +2649,17 @@ function registerGitTool(mcp) {
           error: (result.stderr || "git error").split(/\r?\n/)[0]
         });
       }
+      const diff = result.stdout || "";
       return jsonResult({
-        cwd: workdir,
+        cwd: toRel(workdir),
         is_git_repo: true,
         staged,
         path: rel || null,
-        diff: result.stdout || "",
-        empty: !(result.stdout || "").trim()
+        chars: diff.length,
+        returned_chars: Math.min(diff.length, max_chars),
+        truncated: diff.length > max_chars,
+        diff: diff.slice(0, max_chars),
+        empty: !diff.trim()
       });
     }
   );
@@ -2537,7 +2708,7 @@ const REAL_ROOTS = ROOTS.map((r) => {
 
 // Resolve the longest existing ancestor with realpath, then re-append the
 // not-yet-existing tail. This canonicalizes symlinks/junctions even for files
-// that don't exist yet (e.g. write_file targets).
+// that don't exist yet (e.g. apply_patch create targets).
 function canonicalize(p) {
   let cur = path.resolve(p);
   const tail = [];
@@ -3169,6 +3340,19 @@ function appendLimited(current, next, max) {
 }
 
 // Trim command output for display: prefer line slicing (head/tail), else cap chars.
+function trimOutputPair(rawStdout, rawStderr, { tail_lines, head_lines, max_chars }) {
+  let stdout = trimOutput(rawStdout, { tail_lines, head_lines, max_chars });
+  let stderr = trimOutput(rawStderr, { tail_lines, head_lines, max_chars });
+  const budget = Math.max(0, max_chars || 0);
+  if (stdout.length + stderr.length > budget) {
+    const stderrBudget = Math.min(stderr.length, Math.max(Math.floor(budget * 0.4), Math.min(stderr.length, budget)));
+    const stdoutBudget = Math.max(0, budget - stderrBudget);
+    stdout = stdout.slice(0, stdoutBudget);
+    stderr = stderr.slice(0, Math.max(0, budget - stdout.length));
+  }
+  return { stdout, stderr };
+}
+
 function trimOutput(s, { tail_lines, head_lines, max_chars }) {
   if (!s) return s;
   if (head_lines || tail_lines) {
@@ -3205,8 +3389,38 @@ function jsonResult(value) {
   return textResult(JSON.stringify(value));
 }
 
-function structuredJsonResult(value) {
-  return { structuredContent: value, content: [{ type: "text", text: JSON.stringify(value) }] };
+function structuredJsonResult(value, summary = "Structured app result ready.") {
+  return { structuredContent: value, content: [{ type: "text", text: summary }] };
+}
+
+function fitJsonItems(items, maxChars) {
+  const source = Array.isArray(items) ? items : [];
+  const budget = Math.max(100, Number(maxChars) || 100);
+  const selected = [];
+  let chars = 2;
+  for (const item of source) {
+    const serialized = JSON.stringify(item);
+    const cost = serialized.length + (selected.length ? 1 : 0);
+    if (selected.length && chars + cost > budget) break;
+    if (!selected.length && chars + cost > budget) {
+      if (item && typeof item === "object" && !Array.isArray(item)) {
+        const compact = { ...item };
+        for (const key of ["snippet", "content", "text"]) {
+          if (typeof compact[key] === "string") compact[key] = compact[key].slice(0, Math.max(100, budget - 500));
+        }
+        selected.push(compact);
+        chars += JSON.stringify(compact).length;
+      }
+      break;
+    }
+    selected.push(item);
+    chars += cost;
+  }
+  return { items: selected, chars, truncated: selected.length < source.length };
+}
+
+function roundMs(value) {
+  return Math.max(0, Math.round(Number(value || 0) * 10) / 10);
 }
 
 function localBrowserOrigins() {
@@ -3790,12 +4004,62 @@ async function runQualityGate({ cwd = ".", include, timeout_ms = 120_000, stop_o
   };
 }
 
-async function buildSessionReport(rootDir) {
-  const [doctor, git] = await Promise.all([
-    collectWorkspaceDoctor(rootDir),
-    compactGitStatus(rootDir)
-  ]);
+async function collectFocusedEvidence(rootDir, focus, { includeSnippets = true, maxChars = SEARCH_OUTPUT_DEFAULT } = {}) {
+  const normalized = String(focus || "").trim();
+  if (!normalized) return null;
+  const terms = dedupe([
+    normalized,
+    ...tokenizeSearch(normalized).filter((term) => term.length >= 3)
+  ]).slice(0, 6);
+  const resultSets = await Promise.all(terms.map(async (term) => {
+    let matches = null;
+    if (RG_BIN) matches = await ripgrepGrep(rootDir, term, { regex: false, limit: 24, glob: null });
+    if (matches === null) matches = await gitGrep(rootDir, term, { regex: false, limit: 24, glob: null });
+    if (matches === null) matches = await searchTree(rootDir, term, { regex: false, limit: 24, glob: null });
+    return matches || [];
+  }));
+  const merged = new Map();
+  for (const matches of resultSets) {
+    for (const match of matches) {
+      const key = `${match.path}:${match.line}`;
+      if (!merged.has(key)) merged.set(key, { ...match, score: 0 });
+      const current = merged.get(key);
+      const haystack = `${current.path || ""} ${current.text || ""}`.toLowerCase();
+      current.score += terms.reduce((score, term) => score + (haystack.includes(term.toLowerCase()) ? (term === normalized ? 8 : 2) : 0), 0);
+    }
+  }
+  const ranked = [...merged.values()]
+    .sort((a, b) => b.score - a.score || String(a.path).localeCompare(String(b.path)) || Number(a.line || 0) - Number(b.line || 0))
+    .slice(0, 40);
+  if (includeSnippets && ranked.length) await attachContext(ranked, 2);
+  const limited = fitJsonItems(ranked, maxChars);
   return {
+    focus: normalized,
+    terms,
+    count: ranked.length,
+    returned: limited.items.length,
+    truncated: limited.truncated,
+    matches: limited.items
+  };
+}
+
+async function buildSessionReport(rootDir, {
+  staged = false,
+  includeReview = true,
+  includeChangeSummary = true,
+  includeQuality = false,
+  qualityInclude,
+  timeoutMs = 120_000
+} = {}) {
+  const diffArgs = ["diff"];
+  if (staged) diffArgs.push("--staged");
+  const needsDiff = includeReview || includeChangeSummary;
+  const [doctor, git, diffResult] = await Promise.all([
+    collectWorkspaceDoctor(rootDir),
+    compactGitStatus(rootDir),
+    needsDiff ? spawnCapture("git", diffArgs, rootDir, DEFAULT_CMD_TIMEOUT) : Promise.resolve(null)
+  ]);
+  const report = {
     kind: "session_report",
     version: VERSION,
     tier: PRODUCT_TIER,
@@ -3803,14 +4067,52 @@ async function buildSessionReport(rootDir) {
     root: toRel(rootDir),
     mode: MODE,
     policy: AGENT_POLICY,
+    tool_catalog: "stable",
     git,
     doctor: {
       status: doctor.status,
       score: doctor.score,
       summary: doctor.summary,
       recommendations: doctor.recommendations
-    }
+    },
+    tool_runtime: { ...TOOL_RUNTIME_METRICS }
   };
+
+  if (diffResult) {
+    if (diffResult.exit_code !== 0) {
+      report.diff_error = (diffResult.stderr || "git error").split(/\r?\n/)[0];
+    } else {
+      const diff = diffResult.stdout || "";
+      const analyzed = diff.trim()
+        ? analyzeDiff(diff)
+        : { summary: { changed_files: 0, source_files: 0, test_files: 0, config_files: 0, added_lines: 0, deleted_lines: 0, files: [] }, findings: [] };
+      if (includeChangeSummary) report.change_summary = analyzed.summary;
+      if (includeReview) {
+        const p1 = analyzed.findings.filter((finding) => finding.priority === "P1").length;
+        const verdict = p1 > 0 ? "BLOCK" : analyzed.findings.length > 0 ? "WARN" : diff.trim() ? "PASS" : "CLEAN";
+        report.review = {
+          ok: verdict !== "BLOCK",
+          verdict,
+          findings_count: analyzed.findings.length,
+          findings: analyzed.findings.slice(0, 100),
+          p1,
+          p2: analyzed.findings.filter((finding) => finding.priority === "P2").length,
+          p3: analyzed.findings.filter((finding) => finding.priority === "P3").length
+        };
+      }
+    }
+  }
+
+  if (includeQuality) {
+    report.quality = await runQualityGate({
+      cwd: rootDir,
+      include: qualityInclude,
+      timeout_ms: timeoutMs,
+      stop_on_failure: true,
+      dry_run: false
+    });
+  }
+  return report;
 }
 
 function recommendedReads({ importantFiles = [], treeEntries = [] }) {
@@ -3977,16 +4279,30 @@ function registerRepoIntelTools(mcp) {
     "workspace_snapshot",
     {
       title: "Workspace snapshot Pro",
-      description: "PRO one-call briefing: roots, mode/policy, project profile, important files, compact tree, git status, ripgrep/cache status, recommended reads, and next actions. Use this FIRST to reduce MCP round-trips.",
+      description: "PRO one-call briefing with optional focused code evidence. Use focus/include_matches to replace separate search + read discovery calls.",
       inputSchema: {
         path: z.string().optional().describe("Root dir to inspect (default: primary root)."),
         depth: z.number().int().min(1).max(5).optional().describe("Tree depth (default 3)."),
-        max_entries: z.number().int().min(20).max(1200).optional().describe("Max tree entries (default 350)."),
+        max_entries: z.number().int().min(20).max(1200).optional().describe("Max tree entries (default 180)."),
         include_symbols: z.boolean().optional().describe("Include compact symbol sample (default false)."),
+        focus: z.string().optional().describe("Task/topic to search locally and return as a bounded evidence pack."),
+        include_matches: z.boolean().optional().describe("Include focused content matches; defaults true when focus is provided."),
+        include_snippets: z.boolean().optional().describe("Attach two context lines to focused matches (default true)."),
+        max_output_chars: z.number().int().min(2000).max(100000).optional().describe(`Focused evidence budget (default ${SEARCH_OUTPUT_DEFAULT}).`),
         refresh: z.boolean().optional().describe("Refresh cached profile/index.")
       }
     },
-    async ({ path: rel = ".", depth = 3, max_entries = 350, include_symbols = false, refresh = false }) => {
+    async ({
+      path: rel = ".",
+      depth = 3,
+      max_entries = 180,
+      include_symbols = false,
+      focus,
+      include_matches = Boolean(focus),
+      include_snippets = true,
+      max_output_chars = SEARCH_OUTPUT_DEFAULT,
+      refresh = false
+    }) => {
       const rootDir = resolvePath(rel);
       const idx = await buildRepoIndex(rootDir, { depth, maxEntries: max_entries, includeSymbols: include_symbols, refresh });
       const profile = idx.profile || {};
@@ -3994,6 +4310,9 @@ function registerRepoIntelTools(mcp) {
       const importantFiles = idx.important_files || [];
       const git = idx.git || {};
       const next = recommendNextActions({ profile, git, truncated: tree.truncated });
+      const evidence = focus && include_matches
+        ? await collectFocusedEvidence(rootDir, focus, { includeSnippets: include_snippets, maxChars: max_output_chars })
+        : null;
 
       return jsonResult({
         kind: "workspace_snapshot",
@@ -4005,6 +4324,7 @@ function registerRepoIntelTools(mcp) {
         roots: ROOTS,
         mode: MODE,
         policy: AGENT_POLICY,
+        tool_catalog: "stable",
         auth: AUTH_TOKEN ? "bearer" : "none",
         safety: {
           file_tools_root_confined: true,
@@ -4028,8 +4348,9 @@ function registerRepoIntelTools(mcp) {
           truncated: Boolean(tree.truncated),
           entries: (tree.entries || []).slice(0, max_entries)
         },
-        important_files: importantFiles.slice(0, 80),
-        symbols: include_symbols ? (idx.symbols || []).slice(0, 80) : undefined,
+        important_files: importantFiles.slice(0, 40),
+        symbols: include_symbols ? (idx.symbols || []).slice(0, 40) : undefined,
+        evidence: evidence || undefined,
         ripgrep: idx.ripgrep_status || { available: Boolean(RG_BIN), bin: RG_BIN || null },
         cache: { hit: Boolean(idx.cached), generated_at: idx.generated_at || idx.ts, ttl_seconds: Math.floor(REPO_INDEX_TTL_MS / 1000) },
         recommended_reads: recommendedReads({ importantFiles, treeEntries: tree.entries || [] }),
@@ -4676,14 +4997,38 @@ function registerReviewTools(mcp) {
     "session_report",
     {
       title: "Session report Pro",
-      description: "PRO end-of-session report: git state, doctor summary, mode, policy, root, and version.",
+      description: "One-call end-of-session report. Can combine git state, change summary, heuristic review, and explicitly requested quality gates.",
       inputSchema: {
-        cwd: z.string().optional().describe("Repository directory inside a root (default primary root).")
+        cwd: z.string().optional().describe("Repository directory inside a root (default primary root)."),
+        staged: z.boolean().optional().describe("Review staged changes instead of the working tree."),
+        include_review: z.boolean().optional().describe("Include heuristic diff review (default true)."),
+        include_change_summary: z.boolean().optional().describe("Include parsed diff summary (default true)."),
+        include_quality: z.boolean().optional().describe("Run quality gates; only set true when explicitly requested."),
+        quality_include: z.array(z.enum(["lint", "typecheck", "test", "build"])).optional(),
+        timeout_ms: z.number().int().min(1000).max(600000).optional()
       }
     },
-    async ({ cwd = "." }) => {
+    async ({ cwd = ".", staged = false, include_review = true, include_change_summary = true, include_quality = false, quality_include, timeout_ms = 120_000 }) => {
       const rootDir = resolvePath(cwd);
-      return jsonResult(await buildSessionReport(rootDir));
+      const report = await buildSessionReport(rootDir, {
+        staged,
+        includeReview: include_review,
+        includeChangeSummary: include_change_summary,
+        includeQuality: include_quality,
+        qualityInclude: quality_include,
+        timeoutMs: timeout_ms
+      });
+      const completedTask = await CHANGE_JOURNAL.completeTask();
+      if (completedTask) {
+        report.review_changes_task = {
+          id: completedTask.id,
+          title: completedTask.title,
+          operation_count: completedTask.operationCount,
+          files_changed: completedTask.files?.length || 0,
+          status: completedTask.taskStatus
+        };
+      }
+      return jsonResult(report);
     }
   );
 
@@ -4855,6 +5200,7 @@ function registerPlannerTools(mcp) {
       }
     },
     async ({ goal, steps }) => {
+      await CHANGE_JOURNAL.beginTask({ title: goal });
       await mkdir(AGENT_STATE_DIR, { recursive: true });
       const plan = {
         goal,
@@ -4903,6 +5249,9 @@ function registerPlannerTools(mcp) {
         plan.updated = isoNow();
         await writeFile(TASK_PLAN_PATH, JSON.stringify(plan, null, 2), "utf8");
       }
+      if (status !== undefined && /^(done|completed|complete|finished|success)$/i.test(String(status).trim())) {
+        await CHANGE_JOURNAL.completeTask({ title: plan.goal });
+      }
 
       const done = plan.steps.filter((s) => s.done).length;
       const total = plan.steps.length;
@@ -4940,8 +5289,7 @@ const _origCheckpoint = null; // we'll patch via the registration
 const POLICY_RULES = {
   strict: {
     description: "Read and analyze only. No writes, installs, external network, deletes, or git mutations. Read-only Figma Desktop loopback tools are allowed.",
-    blocked: ["write_file", "replace_in_file", "apply_patch", "make_dir", "move_path", "delete_path",
-              "run_command", "proc_start", "git"],
+    blocked: ["apply_patch", "make_dir", "run_command", "proc_start", "git"],
     needs_approval: [],
     allowed_patterns: []
   },
@@ -4956,7 +5304,7 @@ const POLICY_RULES = {
       /\bgit\s+(push|fetch|pull|clone)\b/i,
       /\bdocker\s+(push|pull|run|build)\b/i
     ],
-    allowed: ["read_file", "write_file", "replace_in_file", "apply_patch", "search_text", "find_files"]
+    allowed: ["read_file", "apply_patch", "search_text", "find_files"]
   },
   full: {
     description: "Full access (same as before, catastrophic commands still blocked).",
@@ -4968,10 +5316,35 @@ const POLICY_RULES = {
 
 const STRICT_MUTATION_TOOLS = new Set([
   "figma_call_tool",
-  "save_note", "checkpoint", "write_file", "replace_in_file", "apply_patch", "make_dir", "move_path", "delete_path",
+  "save_note", "checkpoint", "apply_patch", "make_dir",
   "run_command", "run_commands", "proc_start", "proc_stop", "git", "create_skill", "delete_skill",
-  "quality_gate", "run_tests", "run_build", "run_lint", "run_changed_tests", "task_plan", "task_state", "decision_log"
+  "quality_gate", "run_changed_tests", "task_plan", "task_state", "decision_log"
 ]);
+
+function applyPatchDeletePaths(args = {}) {
+  const paths = [];
+  for (const operation of Array.isArray(args.operations) ? args.operations : []) {
+    if (operation?.op === "delete" && operation.path) paths.push(String(operation.path));
+  }
+
+  if (typeof args.diff === "string") {
+    let previousPath = null;
+    for (const line of args.diff.split(/\r?\n/)) {
+      if (line.startsWith("--- ")) {
+        previousPath = normalizePatchHeaderPath(line.slice(4));
+      } else if (line.startsWith("+++ ")) {
+        const nextPath = normalizePatchHeaderPath(line.slice(4));
+        if (nextPath === "/dev/null" && previousPath && previousPath !== "/dev/null") paths.push(previousPath);
+      }
+    }
+  }
+
+  return dedupe(paths.map((value) => value.replace(/^a\//, "")).filter(Boolean)).sort();
+}
+
+function normalizePatchHeaderPath(value) {
+  return String(value || "").trim().split("\t")[0];
+}
 
 function approvalActionForTool(tool, args) {
   if (tool === "figma_call_tool") {
@@ -4980,7 +5353,6 @@ function approvalActionForTool(tool, args) {
       return `figma:${upstreamTool}:${JSON.stringify(args.arguments || {})}`;
     }
   }
-  if (tool === "delete_path") return `delete_path:${String(args.path || "")}`;
   if (tool === "delete_skill") return `delete_skill:${String(args.name || "")}`;
   if (tool === "run_command" || tool === "proc_start") {
     const command = String(args.command || "");
@@ -5000,9 +5372,8 @@ function approvalActionForTool(tool, args) {
       : `git:${JSON.stringify(argv)}`;
   }
   if (tool === "apply_patch") {
-    const deletes = Array.isArray(args.operations) && args.operations.some((op) => op?.op === "delete");
-    const diffDeletes = typeof args.diff === "string" && /^\+\+\+\s+\/dev\/null$/m.test(args.diff);
-    if (deletes || diffDeletes) return `apply_patch:delete`;
+    const deletePaths = applyPatchDeletePaths(args);
+    if (deletePaths.length) return `apply_patch:delete:${JSON.stringify(deletePaths)}`;
   }
   return null;
 }
@@ -5052,7 +5423,7 @@ function classifyAction(action) {
   const patterns = {
     install: /\b(npm|pip|pip3|yarn|pnpm|cargo|apt|brew|gem|composer)\s+install\b/i,
     network: /\b(curl|wget|fetch|git\s+push|git\s+fetch|git\s+pull|git\s+clone)\b/i,
-    delete: /\b(delete_path|rm\s+-rf|remove-item)\b/i,
+    delete: /\b(apply_patch:delete|rm\s+-rf|remove-item)\b/i,
     git_mutation: /\bgit\s+(push|reset|clean|restore|checkout)\b/i,
     catastrophic: CATASTROPHIC
   };
@@ -5129,7 +5500,7 @@ function registerPolicyTools(mcp) {
         mode: MODE,
         description: rules.description,
         allowed: AGENT_POLICY === "full" ? ["*"] : AGENT_POLICY === "balanced" ? ["read", "write", "edit", "test", "build"] : ["read", "search", "analyze"],
-        needs_approval: AGENT_POLICY === "balanced" ? ["delete_path", "mutating Figma tools", "npm/pip install", "curl/wget", "git push/fetch/pull", "risky run_commands batch"] : [],
+        needs_approval: AGENT_POLICY === "balanced" ? ["apply_patch delete operations", "mutating Figma tools", "npm/pip install", "curl/wget", "git push/fetch/pull", "risky run_commands batch"] : [],
         approval_options: AGENT_POLICY === "balanced" ? ["one exact action", "2-20 exact actions in one expiring batch"] : [],
         approval_method: AGENT_POLICY === "balanced" ? "Use request_approval/request_approval_batch, then approve_request or deny_request with AGENT_APPROVAL_TOKEN." : null,
         approval_ttl_minutes: APPROVAL_TTL_MINUTES,

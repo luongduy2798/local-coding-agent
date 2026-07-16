@@ -33,7 +33,7 @@
 
   <text x="44" y="120" class="title">Local Coding Agent</text>
   <text x="46" y="152" class="sub">ChatGPT Web &#8594; your own machine, via MCP</text>
-  <text x="46" y="188" class="mono">$ call workspace_info<tspan class="cursor"> &#9613;</tspan></text>
+  <text x="46" y="188" class="mono">$ call lca<tspan class="cursor"> &#9613;</tspan></text>
 
   <rect class="sweep" x="586" y="70" width="238" height="6" rx="3" fill="url(#accent)" opacity="0.85"/>
   <g class="ring">

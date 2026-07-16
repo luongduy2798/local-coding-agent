@@ -93,7 +93,7 @@ Tóm tắt:
 5. Chọn tunnel đã tạo.
 6. Auth: chọn `No auth`.
 7. Lưu connector.
-8. Trong ChatGPT, gọi tool `lca` hoặc `workspace_info` để kiểm tra workspace thật.
+8. Trong ChatGPT, gọi tool `lca` để kiểm tra workspace thật.
 
 Runtime API key nằm ở `.env.local` và chỉ dùng cho local tunnel-client. Không nhập Runtime API key vào phần auth của ChatGPT connector.
 
@@ -102,11 +102,11 @@ Runtime API key nằm ở `.env.local` và chỉ dùng cho local tunnel-client. 
 Sau khi connector hoạt động, bạn thường chỉ cần gọi 2 tool này trong ChatGPT:
 
 ```text
-lca        # alias ngắn của workspace_info, kiểm tra workspace thật
+lca        # kiểm tra workspace thật, policy và output limits
 lca_input  # mở Apps SDK widget, có thể ghim PiP để nhập task trong lúc chat
 ```
 
-`workspace_info` vẫn tồn tại cho tên rõ nghĩa hơn. `lca` là alias ngắn, tiện dùng khi mở chat mới hoặc muốn kiểm tra nhanh connector đang trỏ vào workspace nào.
+`lca` là tool trạng thái duy nhất, dùng khi mở chat mới hoặc muốn kiểm tra nhanh connector đang trỏ vào workspace nào.
 
 ## LCA Input: `@` Context và `/` Workflow
 
@@ -189,17 +189,17 @@ Selection-based cũng hoạt động: chọn frame trong Figma Desktop rồi yê
 Các mutation tool chuyên dụng được backend ghi lịch sử tự động:
 
 ```text
-write_file
-replace_in_file
-apply_patch
-make_dir
-move_path
-delete_path
+apply_patch   # create/update/delete/rename, hỗ trợ batch nhiều file
+make_dir      # tạo directory rỗng khi cần
 ```
 
-Kết quả mutation có thêm `change_id`. `read_file` và từng file đọc thành công qua `read_many` trả SHA-256 `version`. Nếu file bị sửa bên ngoài sau lần ChatGPT đọc gần nhất, mutation sẽ bị chặn bằng `STALE_FILE`; ChatGPT phải đọc lại rồi thử lại.
+Kết quả mutation có `change_id` cho operation và `task_id` cho toàn bộ công việc. Nhiều lần `apply_patch` trong cùng yêu cầu của người dùng được gom vào một task change set, nên extension chỉ hiện một card. Có thể đặt tên task bằng `task_plan` hoặc `apply_patch.task_title`; `session_report` đóng task sau khi hoàn thành. `read_file` và từng file đọc thành công qua `read_many` trả SHA-256 `version`. Nếu file bị sửa bên ngoài sau lần ChatGPT đọc gần nhất, mutation sẽ bị chặn bằng `STALE_FILE`; ChatGPT phải đọc lại rồi thử lại. Khi cần kiểm tra lại đúng nội dung/range cũ, truyền `known_version` cùng `skip_if_unchanged=true` để LCA trả metadata `unchanged` thay vì gửi lặp nội dung qua tunnel. Không bật cờ này khi đang yêu cầu một range mới.
 
-Review Changes không phụ thuộc Git. File text nhỏ có before/after snapshot để hỗ trợ Diff, Undo, Partial Undo và Reapply. File lớn, binary và directory chỉ lưu metadata nên không bị backend giả vờ rằng có thể phục hồi an toàn. Rename được quản lý như một atomic group và Undo/Reapply luôn kiểm tra conflict trước khi ghi đè.
+LCA dùng một tool catalog cố định để ChatGPT không phải Refresh connector khi đổi chế độ. Các alias và wrapper bị thay thế hoàn toàn được ẩn; những capability chuyên biệt như `workspace_doctor`, `preview_patch`, `run_changed_tests`, `security_scan`, profile, Figma, skill và notes vẫn được giữ. Backend autocomplete của Apps SDK được đánh dấu app-only.
+
+`workspace_snapshot` hỗ trợ `focus` để gom repo context và các match liên quan trong một evidence pack. `session_report` có thể gom git state, change summary và heuristic review trong một call; quality gate chỉ chạy khi được yêu cầu rõ ràng.
+
+Review Changes không phụ thuộc Git. Mỗi task giữ các operation riêng, nhưng card được tổng hợp từ trạng thái trước operation đầu tiên đến trạng thái sau operation cuối cùng. Undo task chạy operation theo thứ tự mới → cũ; Reapply chạy cũ → mới. File text nhỏ có before/after snapshot để hỗ trợ Diff, Undo, Partial Undo và Reapply. File lớn, binary và directory chỉ lưu metadata nên không bị backend giả vờ rằng có thể phục hồi an toàn. Rename được quản lý như atomic group và Undo/Reapply luôn kiểm tra conflict trước khi ghi đè.
 
 HTTP API:
 
@@ -229,7 +229,7 @@ Gỡ extension:
 lca extension uninstall
 ```
 
-`lca setup` thông thường không cài extension. View **Local Coding Agent → Review Changes** hỗ trợ native diff, Undo/Reapply từng change hoặc từng file, Undo All và Clear History. Nếu LCA đang chạy cho workspace khác, chọn **Connect LCA to this workspace** để stop instance cũ và start lại theo repo đang mở trong VS Code.
+`lca setup` thông thường không cài extension. View **Local Coding Agent → Review Changes** hiển thị một card cho toàn bộ task, hỗ trợ native diff, Undo/Reapply cả task hoặc từng file, Undo All và Clear History. Nếu LCA đang chạy cho workspace khác, chọn **Connect LCA to this workspace** để stop instance cũ và start lại theo repo đang mở trong VS Code.
 
 Chi tiết: [docs/REVIEW_CHANGES.md](docs/REVIEW_CHANGES.md).
 
@@ -274,7 +274,7 @@ Nguyên tắc an toàn:
 - Không commit `.env.local`.
 - Không in API key, Tunnel ID, token hoặc local config có secret.
 - Chỉ mở workspace bạn tin tưởng.
-- Luôn gọi `lca` hoặc `workspace_info` trong ChatGPT để kiểm tra root trước khi yêu cầu sửa file.
+- Luôn gọi `lca` trong ChatGPT để kiểm tra root trước khi yêu cầu sửa file.
 
 ### Mode Và Policy
 
@@ -332,7 +332,7 @@ Chi tiết: [docs/TEST_SAFETY.md](docs/TEST_SAFETY.md).
 | Port `8789` bận                                      | Chạy `lca setup` và đổi MCP port, hoặc set `PORT` trước khi chạy.                                                                                                    |
 | Server không health                                  | Kiểm tra `lca status` và `http://127.0.0.1:8789/healthz`.                                                                                                            |
 | Connector không thấy tool                            | Đảm bảo `lca` đang chạy, tunnel connected, connector dùng `No auth`.                                                                                                 |
-| Sửa nhầm repo                                        | Trong ChatGPT gọi `lca` hoặc `workspace_info` để xem root thật.                                                                                                      |
+| Sửa nhầm repo                                        | Trong ChatGPT gọi `lca` để xem root thật.                                                                                                                             |
 
 ## Low-Level CLI
 

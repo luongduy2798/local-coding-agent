@@ -1,18 +1,19 @@
 # Review Changes
 
-Local Coding Agent tracks dedicated workspace mutations automatically. Review Changes is
-backend-managed and does not require a task lifecycle or a separate change set.
+Local Coding Agent groups dedicated workspace mutations into a backend-managed **task change
+set**. One user request produces one Review Changes card even when the agent needs several
+`apply_patch` calls. Each low-level mutation remains an operation record inside the task so
+Undo, Reapply, conflict checks, and rename handling stay exact.
+
+A task starts on the first mutation. `task_plan` or `apply_patch.task_title` can name it.
+`session_report` closes it when the work is complete; the next mutation then starts a new task.
 
 ## Tracked operations
 
-Filesystem change records are created for:
+Operation records inside the active task are created for:
 
-- `write_file`
-- `replace_in_file`
-- `apply_patch`
-- `make_dir`
-- `move_path`
-- `delete_path`
+- `apply_patch` for create/update/delete/rename operations
+- `make_dir` for an intentionally empty directory
 
 `run_command` and `run_commands` create privacy-preserving activity records. Activity
 records contain counts, relative working directory, exit status, timeout status, and a
@@ -28,13 +29,15 @@ capture before
 → verify the last read version
 → perform the mutation
 → capture after
-→ write an atomic change record
+→ write an atomic operation record
+→ append the operation to the active task change set
 → update the known version
-→ return the normal tool result with change_id
+→ return the normal tool result with change_id and task_id
 ```
 
-Change-record writes are serialized in-process so concurrent mutations cannot overwrite each
-other's index entries. JSON files are written to a temporary file and renamed atomically.
+Operation and task-index writes are serialized in-process so concurrent mutations cannot
+overwrite each other's entries. JSON files are written to a temporary file and renamed
+atomically.
 
 ## Storage
 
@@ -43,7 +46,8 @@ Change history is scoped by workspace ID:
 ```text
 <AGENT_DATA_DIR>/workspaces/<workspace-id>/changes/
 ├── index.json
-├── records/
+├── records/       # individual mutation operations
+├── tasks/         # one task change set per user request
 ├── snapshots/
 └── activities/
 ```
@@ -97,11 +101,16 @@ tree and is not automatically undoable.
 A missing before state is undoable. Undoing a newly created small text file removes it;
 Reapply recreates it from the after snapshot.
 
-## Rename groups
+## Task aggregation and rename groups
 
-`move_path` and structured patch rename operations store source and destination as one
-atomic group. Undo or Reapply preflights both ends. Selecting either path for Partial Undo
-expands the request to the whole rename group.
+The task card derives each file's **before** state from its first operation and its **after**
+state from its last operation. Undo executes operation records newest to oldest; Reapply uses
+oldest to newest. This preserves correctness when the same file is edited several times.
+
+Structured `apply_patch` rename operations store source and destination as one atomic group.
+Rename chains remain associated at task level, including a rename followed by later edits to
+the destination. Selecting either path for Partial Undo expands the request to the whole
+rename component.
 
 The backend does not overwrite a source that was recreated or a destination that changed.
 
@@ -130,7 +139,7 @@ A conflict returns HTTP 409:
 
 ## Partial Undo
 
-For a multi-file record:
+For a multi-file task change set:
 
 ```json
 {
@@ -159,8 +168,10 @@ POST   /changes/undo-all
 DELETE /changes
 ```
 
-Limits are clamped to 1–200. `DELETE /changes` removes records, snapshots, and activities
-without changing workspace files.
+The list returns task-level records (`task_...`) for new work and remains backward compatible
+with legacy operation records (`change_...`). Limits are clamped to 1–200. `DELETE /changes`
+removes task records, operation records, snapshots, and activities without changing workspace
+files.
 
 Undo All processes changes newest to oldest and preflights a projected filesystem state
 before applying anything.
@@ -170,9 +181,9 @@ before applying anything.
 The extension in `vscode-extension/` exposes **Review Changes** in the Activity Bar. It:
 
 - verifies `GET /healthz` against every open VS Code workspace folder;
-- lists changes from `GET /changes`;
+- lists one aggregated card per task from `GET /changes`;
 - opens before/after snapshots in the native VS Code diff editor;
-- supports Undo, Partial Undo, Reapply, Undo All, and Clear History;
+- supports task-level Undo/Reapply, per-file Partial Undo/Reapply, Undo All, and Clear History;
 - stores an optional bearer token with VS Code SecretStorage;
 - disables filesystem mutations in untrusted workspaces;
 - polls only while the Review Changes view is visible.
@@ -198,10 +209,15 @@ File operations are `created`, `modified`, `deleted`, `renamed`, or `metadata_on
 ```env
 AGENT_DATA_DIR=/temporary/or/custom/data
 AGENT_MAX_SNAPSHOT_BYTES=5242880
+AGENT_JOURNAL_SNAPSHOT_CONCURRENCY=4
+AGENT_DEFER_LINE_STATS=1
+AGENT_DEFER_LINE_STATS_BYTES=512000
 ```
 
 `AGENT_DATA_DIR` is especially important for tests so test change histories and audit logs never
-write into the real runtime data directory.
+write into the real runtime data directory. Snapshot capture uses bounded concurrency while the
+mutation remains transactionally serialized. Larger or multi-file changes may persist with pending
+line statistics and calculate additions/deletions after the mutation response has returned.
 
 ## Verification
 

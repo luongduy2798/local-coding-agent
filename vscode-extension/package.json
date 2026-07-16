@@ -2,7 +2,7 @@
   "name": "local-coding-agent-vscode",
   "displayName": "Local Coding Agent",
   "description": "Review and undo changes made by Local Coding Agent.",
-  "version": "0.2.3",
+  "version": "0.3.0",
   "publisher": "luongduy",
   "private": true,
   "license": "AGPL-3.0-or-later",

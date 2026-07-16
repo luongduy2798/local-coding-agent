@@ -70,7 +70,8 @@ async function startServer(workspace) {
       AGENT_POLICY: "full",
       AGENT_EXTRA_ROOTS_JSON: "[]",
       MCP_AUTH_TOKEN: "",
-      AGENT_AUDIT: "0"
+      AGENT_AUDIT: "0",
+      LCA_TEST_EXPOSE_REDUNDANT_TOOLS: "1"
     },
     windowsHide: true,
     stdio: ["ignore", "pipe", "pipe"]
@@ -113,6 +114,7 @@ async function callJson(client, name, args = {}) {
   const result = await client.callTool({ name, arguments: args });
   const text = result.content?.[0]?.text ?? "";
   if (result.isError) throw new Error(`${name} failed: ${text}`);
+  if (result.structuredContent && typeof result.structuredContent === "object") return result.structuredContent;
   return JSON.parse(text);
 }
 
@@ -138,7 +140,7 @@ try {
   const snap = await callJson(client, "workspace_snapshot", { depth: 3, max_entries: 120, include_symbols: true, refresh: true });
   check("snapshot kind is workspace_snapshot", snap.kind === "workspace_snapshot");
   check("snapshot is pro", snap.pro === true && snap.tier === "pro");
-  check("snapshot version is 4.4.0-pro", snap.version === "4.4.0-pro", `version=${snap.version}`);
+  check("snapshot version is 4.5.0-pro", snap.version === "4.5.0-pro", `version=${snap.version}`);
   check("snapshot includes safety model", snap.safety?.file_tools_root_confined === true && snap.safety?.command_os_sandbox === false);
   check("snapshot detects javascript", snap.profile?.languages?.includes("javascript"), JSON.stringify(snap.profile));
   check("snapshot omits fast-workflow commands", snap.commands === undefined, JSON.stringify(snap.commands));
@@ -152,6 +154,8 @@ try {
   check("snapshot omits metrics", snap.metrics === undefined && snap.health === undefined);
   check("snapshot includes next actions", Array.isArray(snap.next_best_actions) && snap.next_best_actions.length > 0);
   check("snapshot next actions avoid quality gates", !snap.next_best_actions.join("\n").match(/quality_gate|run_tests|run_changed_tests|build|lint/), JSON.stringify(snap.next_best_actions));
+  const focusedSnap = await callJson(client, "workspace_snapshot", { focus: "hello function", include_matches: true, max_output_chars: 5000 });
+  check("snapshot supports focused evidence", focusedSnap.evidence?.returned > 0, JSON.stringify(focusedSnap.evidence));
   await callJson(client, "write_file", { path: "src/deep/a/b/c/feature.js", content: "export function deepFeature(){ return true; }\n" });
   await callJson(client, "workspace_snapshot", { depth: 2, max_entries: 20, refresh: true });
   const deepMap = await callJson(client, "repo_map", { depth: 6, max_entries: 400 });
@@ -204,6 +208,8 @@ try {
   const lcaInputTool = tools.tools?.find((t) => t.name === "lca_input");
   check("planner tools remain available", ["task_plan", "task_state", "decision_log"].every((name) => tools.tools?.some((tool) => tool.name === name)), JSON.stringify(tools.tools?.map((tool) => tool.name)));
   check("Apps SDK lca_input tool is listed", Boolean(lcaInputTool), JSON.stringify(tools.tools?.map((t) => t.name)));
+  const workspaceSearchListed = tools.tools?.find((tool) => tool.name === "workspace_search");
+  check("companion backend tools are app-only", workspaceSearchListed?._meta?.ui?.visibility?.[0] === "app", JSON.stringify(workspaceSearchListed?._meta));
   check("open_companion tool is removed", !openCompanionTool, JSON.stringify(tools.tools?.map((t) => t.name)));
   check("Apps SDK render tool has output template", lcaInputTool?._meta?.["openai/outputTemplate"] === "ui://widget/lca-compact-input-v2.html", JSON.stringify({ lcaInput: lcaInputTool?._meta }));
   const resources = await client.listResources();
@@ -255,7 +261,9 @@ try {
   const report = await callJson(client, "session_report", {});
   check("session_report kind", report.kind === "session_report");
   check("session_report exposes doctor summary", report.doctor?.summary && Number.isInteger(report.doctor.score));
-  check("session_report omits metrics", report.metrics === undefined && report.health === undefined && report.recent_errors === undefined);
+  check("session_report consolidates review and change summary", report.change_summary?.changed_files === 1 && report.review?.findings_count >= 1, JSON.stringify({ change_summary: report.change_summary, review: report.review }));
+  check("session_report exposes process-scoped tool runtime metrics", report.tool_runtime?.scope === "process" && Number.isInteger(report.tool_runtime?.calls) && report.tool_runtime.calls > 0, JSON.stringify(report.tool_runtime));
+  check("session_report omits legacy metrics", report.metrics === undefined && report.health === undefined && report.recent_errors === undefined);
 } finally {
   if (client) await client.close().catch(() => {});
   if (server) await stopServer(server.child);

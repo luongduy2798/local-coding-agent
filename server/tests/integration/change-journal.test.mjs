@@ -179,7 +179,13 @@ try {
     callJson(client, "write_file", { path: "concurrent-c.txt", content: "c\n" })
   ]);
   const listed = await api(runtime.port, "GET", "/changes?limit=200");
-  check("serialized writes retain concurrent records", concurrent.every((item) => listed.data.changes.some((change) => change.id === item.change_id)), JSON.stringify(concurrent));
+  const concurrentTask = listed.data.changes.find((change) => change.id === concurrent[0].task_id);
+  check(
+    "serialized writes retain concurrent operations in one task change set",
+    concurrent.every((item) => item.task_id === concurrent[0].task_id && concurrentTask?.operationIds?.includes(item.change_id))
+      && concurrentTask?.operationCount >= concurrent.length,
+    JSON.stringify({ concurrent, concurrentTask })
+  );
 
   const unknown = await api(runtime.port, "GET", "/changes/change_missing");
   check("unknown change id returns 404", unknown.status === 404 && unknown.data.code === "change_not_found", JSON.stringify(unknown.data));
@@ -219,6 +225,96 @@ try {
   const clear = await api(runtime.port, "DELETE", "/changes");
   const afterClear = await api(runtime.port, "GET", "/changes?limit=200");
   check("clear deletes change records but preserves workspace", clear.status === 200 && clear.data.deleted === beforeClear.data.count && afterClear.data.count === 0 && existsSync(path.join(workspace, "multi-b.txt")), JSON.stringify({ clear: clear.data, after: afterClear.data }));
+
+  await writeFile(path.join(workspace, "task-source.txt"), "original\n", "utf8");
+  await callJson(client, "task_plan", {
+    goal: "Rename and refine the task file",
+    steps: ["Rename the file", "Update its content"]
+  });
+  const taskRename = await callJson(client, "apply_patch", {
+    operations: [{ op: "rename", path: "task-source.txt", rename_to: "task-target.txt" }]
+  });
+  const taskEdit = await callJson(client, "apply_patch", {
+    operations: [{ op: "update", path: "task-target.txt", edits: [{ old_text: "original", new_text: "final" }] }]
+  });
+  const activeTaskList = await api(runtime.port, "GET", "/changes?limit=10");
+  const activeTask = activeTaskList.data.changes[0];
+  check(
+    "multiple patches from one user task produce one active Review Changes card",
+    activeTaskList.data.count === 1
+      && taskRename.task_id === taskEdit.task_id
+      && activeTask.id === taskRename.task_id
+      && activeTask.taskStatus === "active"
+      && activeTask.title === "Rename and refine the task file"
+      && activeTask.operationCount === 2,
+    JSON.stringify(activeTaskList.data)
+  );
+  const taskAfterContent = await api(runtime.port, "GET", `/changes/${taskRename.task_id}/content?path=task-target.txt&side=after`);
+  check("task aggregate exposes the final content after all patches", taskAfterContent.status === 200 && taskAfterContent.data.content === "final\n", JSON.stringify(taskAfterContent.data));
+
+  const taskReport = await callJson(client, "session_report", { include_review: false, include_change_summary: false });
+  const completedTaskList = await api(runtime.port, "GET", "/changes?limit=10");
+  const completedTask = completedTaskList.data.changes[0];
+  check(
+    "session_report closes the active task change set",
+    taskReport.review_changes_task?.id === taskRename.task_id
+      && completedTask.taskStatus === "completed"
+      && completedTask.operationCount === 2,
+    JSON.stringify({ taskReport, completedTask })
+  );
+
+  const undoTask = await api(runtime.port, "POST", `/changes/${taskRename.task_id}/undo`, {});
+  check(
+    "task undo replays operations newest to oldest across rename plus edit",
+    undoTask.status === 200
+      && existsSync(path.join(workspace, "task-source.txt"))
+      && !existsSync(path.join(workspace, "task-target.txt"))
+      && (await readFile(path.join(workspace, "task-source.txt"), "utf8")) === "original\n",
+    JSON.stringify(undoTask.data)
+  );
+  const reapplyTask = await api(runtime.port, "POST", `/changes/${taskRename.task_id}/reapply`, {});
+  check(
+    "task reapply replays operations oldest to newest and restores final content",
+    reapplyTask.status === 200
+      && !existsSync(path.join(workspace, "task-source.txt"))
+      && (await readFile(path.join(workspace, "task-target.txt"), "utf8")) === "final\n",
+    JSON.stringify(reapplyTask.data)
+  );
+
+  const nextTask = await callJson(client, "apply_patch", {
+    operations: [{ op: "create", path: "next-task.txt", content: "next\n" }]
+  });
+  const nextTaskList = await api(runtime.port, "GET", "/changes?limit=10");
+  check(
+    "the first mutation after completion starts a new Review Changes task",
+    nextTask.task_id !== taskRename.task_id
+      && nextTaskList.data.changes[0]?.id === nextTask.task_id
+      && nextTaskList.data.changes[1]?.id === taskRename.task_id,
+    JSON.stringify(nextTaskList.data)
+  );
+  await api(runtime.port, "DELETE", "/changes");
+
+  const titledFirst = await callJson(client, "apply_patch", {
+    task_title: "First explicit task",
+    operations: [{ op: "create", path: "first-explicit-task.txt", content: "first\n" }]
+  });
+  const titledSecond = await callJson(client, "apply_patch", {
+    task_title: "Second explicit task",
+    operations: [{ op: "create", path: "second-explicit-task.txt", content: "second\n" }]
+  });
+  const titledTasks = await api(runtime.port, "GET", "/changes?limit=10");
+  check(
+    "a different task_title closes the previous task before the new mutation",
+    titledFirst.task_id !== titledSecond.task_id
+      && titledTasks.data.changes[0]?.id === titledSecond.task_id
+      && titledTasks.data.changes[0]?.title === "Second explicit task"
+      && titledTasks.data.changes[0]?.taskStatus === "active"
+      && titledTasks.data.changes[1]?.id === titledFirst.task_id
+      && titledTasks.data.changes[1]?.title === "First explicit task"
+      && titledTasks.data.changes[1]?.taskStatus === "completed",
+    JSON.stringify(titledTasks.data)
+  );
+  await api(runtime.port, "DELETE", "/changes");
 
   const authWorkspace = path.join(context.repoDir, "auth-workspace");
   const authDataDir = path.join(context.dataDir, "auth-runtime");

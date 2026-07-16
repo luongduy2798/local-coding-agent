@@ -77,8 +77,7 @@ Không dùng URL local `http://127.0.0.1:8789/mcp` cho ChatGPT Web.
 Trong ChatGPT, hỏi:
 
 ```text
-call workspace_info
-# or call lca
+call lca
 ```
 
 Kết quả phải trả về root đúng với repo bạn vừa chạy `lca`.

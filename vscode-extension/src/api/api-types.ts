@@ -56,9 +56,22 @@ export interface RenameGroup {
   to: string;
 }
 
+export interface ChangeOperationRecord {
+  id: string;
+  source: string;
+  createdAt: string;
+  paths: string[];
+}
+
 export interface ChangeRecord {
   id: string;
   source: string;
+  title?: string;
+  taskStatus?: "active" | "completed";
+  completedAt?: string | null;
+  operationCount?: number;
+  operationIds?: string[];
+  operations?: ChangeOperationRecord[];
   status: ChangeStatus;
   createdAt: string;
   updatedAt: string;

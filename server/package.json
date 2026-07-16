@@ -1,6 +1,6 @@
 {
   "name": "local-coding-agent",
-  "version": "4.4.0-pro",
+  "version": "4.5.0-pro",
   "private": true,
   "type": "module",
   "main": "server.mjs",
@@ -13,7 +13,7 @@
   },
   "scripts": {
     "start": "node server.mjs",
-    "test": "npm run test:safety && npm run test:changes && npm run test:agent && npm run test:pro && npm run test:hardening && npm run test:figma && npm run test:security",
+    "test": "npm run test:safety && npm run test:changes && npm run test:agent && npm run test:pro && npm run test:performance && npm run test:hardening && npm run test:figma && npm run test:security",
     "test:safety:scan": "node scripts/check-test-safety.mjs",
     "test:guard": "node tests/test-guard.test.mjs",
     "test:safety": "npm run test:safety:scan && npm run test:guard",
@@ -25,6 +25,7 @@
     "test:security": "node tests/runners/run-security-isolated.mjs",
     "test:hardening": "node tests/integration/hardening.test.mjs",
     "test:pro": "node tests/integration/pro.test.mjs",
+    "test:performance": "node tests/integration/performance.test.mjs",
     "eval": "node ../evals/run.mjs",
     "test:figma": "node tests/integration/figma-desktop.test.mjs"
   },
