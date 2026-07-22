@@ -293,7 +293,7 @@ export class ReviewChangesWebviewProvider implements vscode.WebviewViewProvider,
         current.connection,
         current.workspaceOptions.filter(
           (workspace) => workspace.registered && workspace.available,
-        ).filter((workspace) => workspace.workspaceId !== "all").length,
+        ).length,
       ),
       changes: current.changes,
       control: this.controlStore.current,

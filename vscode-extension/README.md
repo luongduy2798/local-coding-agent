@@ -28,10 +28,10 @@ The Control Center has four tabs:
 - **Tasks** shows real open/closed/failed state, running tools with elapsed time, completed/failed tools, verification, read-only process state and observed change/file counts.
 - **Changes** provides the existing review, native diff and safe replay workflow.
 
-The Changes workspace filter contains **All available workspaces** plus every active/available
-registry workspace. `All` is a persistent sentinel rather than an alias for one repo. It uses the
-aggregate SSE stream; if SSE fails, the view temporarily polls and then reconnects to return to
-Live.
+The Changes workspace filter selects the repository open in the current VS Code window by default
+and places it first. Every other active/available registry workspace remains selectable below it.
+Each selection uses its workspace-scoped SSE stream; if SSE fails, the view temporarily polls and
+then reconnects to return to Live.
 
 Available actions:
 

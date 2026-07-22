@@ -8,7 +8,7 @@ import { readLcaInstanceNonce } from "./lca-cli.js";
 
 const TOKEN_KEY = "lca.authToken";
 const SELECTED_FOLDER_KEY = "lca.selectedWorkspaceFolder";
-export const ALL_AVAILABLE_WORKSPACES_KEY = "__all_available_workspaces__";
+const LEGACY_ALL_AVAILABLE_WORKSPACES_KEY = "__all_available_workspaces__";
 
 export type ConnectionState =
   | {
@@ -38,11 +38,14 @@ export interface WorkspaceFolderChoice {
 
 export class ConnectionManager {
   private lastHealth: HealthResponse | undefined;
-  private selectedWorkspaceFolderUri: string | undefined;
+  private selectedWorkspaceKey: string | undefined;
   private instanceNonce: string | undefined;
 
   constructor(private readonly context: vscode.ExtensionContext) {
-    this.selectedWorkspaceFolderUri = context.workspaceState.get<string>(SELECTED_FOLDER_KEY);
+    const saved = context.workspaceState.get<string>(SELECTED_FOLDER_KEY);
+    this.selectedWorkspaceKey = saved === LEGACY_ALL_AVAILABLE_WORKSPACES_KEY
+      ? undefined
+      : saved;
   }
 
   get client(): LcaClient {
@@ -68,8 +71,8 @@ export class ConnectionManager {
     return this.lastHealth;
   }
 
-  get selectedReviewWorkspaceKey(): string {
-    return this.selectedWorkspaceFolderUri || ALL_AVAILABLE_WORKSPACES_KEY;
+  get selectedReviewWorkspaceKey(): string | undefined {
+    return this.selectedWorkspaceKey;
   }
 
   get preferredWorkspaceFolder(): vscode.WorkspaceFolder | undefined {
@@ -81,10 +84,9 @@ export class ConnectionManager {
     return vscode.workspace.workspaceFolders?.[0];
   }
 
-  async selectWorkspaceFolder(folderUri: string | undefined): Promise<void> {
-    const key = folderUri || ALL_AVAILABLE_WORKSPACES_KEY;
-    this.selectedWorkspaceFolderUri = key;
-    await this.context.workspaceState.update(SELECTED_FOLDER_KEY, key);
+  async selectWorkspaceFolder(workspaceKey: string | undefined): Promise<void> {
+    this.selectedWorkspaceKey = workspaceKey;
+    await this.context.workspaceState.update(SELECTED_FOLDER_KEY, workspaceKey);
   }
 
   async workspaceChoices(health = this.lastHealth): Promise<WorkspaceFolderChoice[]> {
@@ -100,21 +102,14 @@ export class ConnectionManager {
       folder,
       root: await canonicalPath(folder.uri.fsPath),
     })));
-    const choices: WorkspaceFolderChoice[] = [{
-      key: ALL_AVAILABLE_WORKSPACES_KEY,
-      label: "All available workspaces",
-      root: "",
-      workspaceId: "all",
-      available: true,
-      registered: true,
-      trusted: true,
-      opened: false,
-      registrationState: "active",
-    }];
-    for (const descriptor of descriptorRoots) {
+    const preferred = this.preferredWorkspaceFolder;
+    const preferredRoot = preferred ? await canonicalPath(preferred.uri.fsPath) : undefined;
+    const openOrder = new Map(folderRoots.map((item, index) => [item.root, index]));
+    const rankedChoices: Array<WorkspaceFolderChoice & { rank: number }> = [];
+    for (const [index, descriptor] of descriptorRoots.entries()) {
       if (!descriptor.workspaceId) continue;
       const opened = folderRoots.find((item) => item.root === descriptor.normalizedRoot)?.folder;
-      choices.push({
+      rankedChoices.push({
         key: `workspace:${descriptor.workspaceId}`,
         label: descriptor.label || opened?.name || path.basename(descriptor.root),
         root: descriptor.root,
@@ -125,9 +120,32 @@ export class ConnectionManager {
         trusted: descriptor.trusted,
         opened: Boolean(opened),
         registrationState: descriptor.registrationState,
+        rank: descriptor.normalizedRoot === preferredRoot
+          ? 0
+          : openOrder.has(descriptor.normalizedRoot)
+            ? 1 + (openOrder.get(descriptor.normalizedRoot) || 0)
+            : 1_000 + index,
       });
     }
-    return choices;
+    const registeredRoots = new Set(descriptorRoots.map((descriptor) => descriptor.normalizedRoot));
+    for (const [index, item] of folderRoots.entries()) {
+      if (registeredRoots.has(item.root)) continue;
+      rankedChoices.push({
+        key: `folder:${item.folder.uri.toString()}`,
+        label: item.folder.name || path.basename(item.folder.uri.fsPath),
+        root: item.folder.uri.fsPath,
+        folderUri: item.folder.uri.toString(),
+        available: true,
+        registered: false,
+        trusted: vscode.workspace.isTrusted,
+        opened: true,
+        registrationState: "active",
+        rank: item.root === preferredRoot ? 0 : 1 + index,
+      });
+    }
+    return rankedChoices
+      .sort((left, right) => left.rank - right.rank)
+      .map(({ rank: _rank, ...choice }) => choice);
   }
 
   workspaceRootFor(health: HealthResponse, workspaceId?: string): string {

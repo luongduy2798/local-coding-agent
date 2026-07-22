@@ -14,10 +14,7 @@ import type {
   ConnectionState,
   WorkspaceFolderChoice,
 } from "../connection/connection-manager.js";
-import {
-  ALL_AVAILABLE_WORKSPACES_KEY,
-  ConnectionManager,
-} from "../connection/connection-manager.js";
+import { ConnectionManager } from "../connection/connection-manager.js";
 
 export interface TaskFilterOption {
   taskId: string;
@@ -81,7 +78,7 @@ export class ReviewChangesStore implements vscode.Disposable {
       (item) => item.key === this.state.selectedWorkspaceKey,
     );
     return {
-      workspaceId: workspace?.workspaceId === "all" ? undefined : workspace?.workspaceId,
+      workspaceId: workspace?.workspaceId,
       taskId: this.state.taskOptions.find(
         (task) => task.taskId === this.state.selectedTaskId,
       )?.apiTaskId,
@@ -93,7 +90,7 @@ export class ReviewChangesStore implements vscode.Disposable {
       (item) => item.key === this.state.selectedWorkspaceKey,
     );
     return {
-      workspaceId: workspace?.workspaceId || "all",
+      workspaceId: workspace?.workspaceId,
       taskId: this.state.taskOptions.find(
         (task) => task.taskId === this.state.selectedTaskId,
       )?.apiTaskId,
@@ -129,7 +126,8 @@ export class ReviewChangesStore implements vscode.Disposable {
   }
 
   async selectWorkspace(workspaceKey: string | undefined): Promise<void> {
-    const selectedKey = workspaceKey || ALL_AVAILABLE_WORKSPACES_KEY;
+    const selectedKey = workspaceKey;
+    if (!selectedKey) throw new Error("Select a workspace to review.");
     if (!this.state.workspaceOptions.some((item) => item.key === selectedKey)) {
       throw new Error("The selected workspace is no longer available.");
     }
@@ -204,8 +202,11 @@ export class ReviewChangesStore implements vscode.Disposable {
   }
 
   async workspaceFoldersChanged(): Promise<void> {
+    await this.connection.selectWorkspaceFolder(undefined);
     this.state = {
       ...this.state,
+      selectedWorkspaceKey: undefined,
+      selectedTaskId: undefined,
       changes: [],
       serverRevision: undefined,
       scopeError: undefined,
@@ -275,106 +276,81 @@ export class ReviewChangesStore implements vscode.Disposable {
       selectedWorkspaceKey &&
       !workspaceOptions.some((item) => item.key === selectedWorkspaceKey)
     ) {
-      selectedWorkspaceKey = ALL_AVAILABLE_WORKSPACES_KEY;
+      selectedWorkspaceKey = undefined;
       selectedTaskId = undefined;
     }
-    selectedWorkspaceKey ||= ALL_AVAILABLE_WORKSPACES_KEY;
+    selectedWorkspaceKey ||= workspaceOptions[0]?.key;
+    if (selectedWorkspaceKey !== this.state.selectedWorkspaceKey) {
+      await this.connection.selectWorkspaceFolder(selectedWorkspaceKey);
+    }
 
     if (connectionState.kind === "connected") {
       const health = connectionState.health;
       try {
-        let selected = workspaceOptions.find((item) => item.key === selectedWorkspaceKey);
+        const selected = workspaceOptions.find((item) => item.key === selectedWorkspaceKey);
         const selectedTask = taskOptions.find((item) => item.taskId === selectedTaskId) ||
           this.state.taskOptions.find((item) => item.taskId === selectedTaskId);
-        const selectedIsHealthPrimary = selected &&
-          comparablePath(selected.root) === comparablePath(health.workspace);
-        const requestWorkspaceId = selected?.workspaceId ||
-          (!selectedIsHealthPrimary ? "all" : undefined);
-        if (
-          requestWorkspaceId === "all" &&
-          !workspaceOptions.some((workspace) => (
-            workspace.workspaceId &&
-            comparablePath(workspace.root) === comparablePath(health.workspace)
-          ))
-        ) {
-          const primary = await this.connection.client.listChanges(
-            1,
-            {},
-            { signal },
-          );
-          if (signal.aborted || revision !== this.requestRevision) return;
-          workspaceOptions = mergeWorkspaceOptions(
-            workspaceOptions,
-            health,
-            primary,
-            { flatWorkspaceRoot: health.workspace },
-          );
-          selected = workspaceOptions.find((item) => item.key === selectedWorkspaceKey);
-        }
-        const response = await this.connection.client.listChanges(
-          20,
-          {
-            workspaceId: requestWorkspaceId,
-            taskId: selectedTask?.apiTaskId,
-          },
-          {
-            signal,
-            sinceRevision: this.state.serverRevision,
-          },
-        );
-        if (signal.aborted || revision !== this.requestRevision) return;
-        if (
-          requestWorkspaceId &&
-          requestWorkspaceId !== "all" &&
-          response.workspace_id &&
-          response.workspace_id !== requestWorkspaceId
-        ) {
-          throw new LcaApiError(409, {
-            code: "WORKSPACE_ID_MISMATCH",
-            message: "LCA returned changes for a different workspace than requested.",
-          });
-        }
-        if (response.notModified) {
-          changes = this.state.changes;
-          taskOptions = this.state.taskOptions;
+        if (!selected?.registered || !selected.workspaceId) {
+          changes = [];
+          taskOptions = [];
+          serverRevision = undefined;
         } else {
-          workspaceOptions = mergeWorkspaceOptions(
-            workspaceOptions,
-            health,
-            response,
+          const requestWorkspaceId = selected.workspaceId;
+          const response = await this.connection.client.listChanges(
+            20,
             {
-              flatWorkspaceRoot: response.workspace_id
-                ? selected?.root || health.workspace
-                : undefined,
+              workspaceId: requestWorkspaceId,
+              taskId: selectedTask?.apiTaskId,
+            },
+            {
+              signal,
+              sinceRevision: this.state.serverRevision,
             },
           );
-          changes = normalizeChanges(response, health, workspaceOptions);
-          taskOptions = normalizeTasks(
-            response,
-            health,
-            changes,
-            workspaceOptions.find((item) => item.key === selectedWorkspaceKey)?.workspaceId === "all"
-              ? undefined
-              : workspaceOptions.find((item) => item.key === selectedWorkspaceKey)?.workspaceId,
-          );
-          if (selectedTaskId && !taskOptions.some((item) => item.taskId === selectedTaskId)) {
-            const previousTask = this.state.taskOptions.find(
-              (item) => item.taskId === selectedTaskId,
-            );
-            taskOptions.push(previousTask || {
-              taskId: selectedTaskId,
-              title: `Task ${shortId(selectedTaskId)}`,
+          if (signal.aborted || revision !== this.requestRevision) return;
+          if (
+            response.workspace_id &&
+            response.workspace_id !== requestWorkspaceId
+          ) {
+            throw new LcaApiError(409, {
+              code: "WORKSPACE_ID_MISMATCH",
+              message: "LCA returned changes for a different workspace than requested.",
             });
           }
-          changes = filterChanges(changes, {
-            workspaceKey: selectedWorkspaceKey,
-            workspaceId: workspaceOptions.find(
-              (item) => item.key === selectedWorkspaceKey,
-            )?.workspaceId,
-            taskId: selectedTaskId,
-          });
+          if (response.notModified) {
+            changes = this.state.changes;
+            taskOptions = this.state.taskOptions;
+          } else {
+            workspaceOptions = mergeWorkspaceOptions(
+              workspaceOptions,
+              health,
+              response,
+              { flatWorkspaceRoot: selected.root },
+            );
+            changes = normalizeChanges(response, health, workspaceOptions);
+            taskOptions = normalizeTasks(
+              response,
+              health,
+              changes,
+              requestWorkspaceId,
+            );
+            if (selectedTaskId && !taskOptions.some((item) => item.taskId === selectedTaskId)) {
+              const previousTask = this.state.taskOptions.find(
+                (item) => item.taskId === selectedTaskId,
+              );
+              taskOptions.push(previousTask || {
+                taskId: selectedTaskId,
+                title: `Task ${shortId(selectedTaskId)}`,
+              });
+            }
+            changes = filterChanges(changes, {
+              workspaceKey: selectedWorkspaceKey,
+              workspaceId: requestWorkspaceId,
+              taskId: selectedTaskId,
+            });
+          }
+          serverRevision = response.revision ?? serverRevision;
         }
-        serverRevision = response.revision ?? serverRevision;
       } catch (error) {
         if (signal.aborted || revision !== this.requestRevision) return;
         if (
@@ -436,6 +412,14 @@ export class ReviewChangesStore implements vscode.Disposable {
     const connection = this.state.connection;
     if (connection?.kind !== "connected") {
       this.startPolling("offline");
+      return;
+    }
+
+    const selectedWorkspace = this.state.workspaceOptions.find(
+      (workspace) => workspace.key === this.state.selectedWorkspaceKey,
+    );
+    if (!selectedWorkspace?.registered || !selectedWorkspace.workspaceId) {
+      this.stopLiveUpdates();
       return;
     }
 
@@ -693,7 +677,7 @@ function filterChanges(
 ): ChangeRecord[] {
   return changes.filter((change) => {
     if (taskId && changeTaskKey(change) !== taskId) return false;
-    if (workspaceId && workspaceId !== "all") return change.workspace_id === workspaceId;
+    if (workspaceId) return change.workspace_id === workspaceId;
     if (workspaceKey) return change.workspace_key === workspaceKey;
     return true;
   });

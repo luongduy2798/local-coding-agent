@@ -20,14 +20,17 @@ const result = await build({
             dispose() { this.listeners.clear(); }
           }
           const settings = { autoRefresh: true, refreshInterval: 1000 };
+          const workspace = {
+            workspaceFolders: [],
+            isTrusted: true,
+            getConfiguration: () => ({ get: (key, fallback) => key in settings ? settings[key] : fallback }),
+            getWorkspaceFolder: (uri) => workspace.workspaceFolders.find(
+              (folder) => folder.uri.toString() === uri.toString()
+            ),
+          };
           module.exports = {
             EventEmitter,
-            workspace: {
-              workspaceFolders: [],
-              isTrusted: true,
-              getConfiguration: () => ({ get: (key, fallback) => key in settings ? settings[key] : fallback }),
-              getWorkspaceFolder: () => undefined,
-            },
+            workspace,
             window: { activeTextEditor: undefined },
           };
         `,

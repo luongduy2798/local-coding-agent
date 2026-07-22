@@ -252,7 +252,7 @@ lca extension uninstall
 - **Overview** quản lý Start/Stop/Pause monitoring và trạng thái supervisor/server/tunnel/session.
 - **Workspaces** hiển thị toàn bộ registry, đặt default cho task mới, Archive, Restore hoặc Remove permanently.
 - **Tasks** chỉ hiển thị sự kiện vận hành thật: tool đang chạy/duration, kết quả, verification, process và số change/file quan sát được. Nó không hiển thị `task_plan`, prompt hay thinking của model.
-- **Changes** giữ review/diff/Undo/Reapply hiện tại; filter `All available workspaces` dùng SSE thật và tự quay lại Live sau polling fallback.
+- **Changes** giữ review/diff/Undo/Reapply hiện tại; workspace của repo đang mở trong cửa sổ VS Code được chọn và xếp đầu mặc định, các repo registry khác nằm bên dưới. Mỗi lựa chọn dùng SSE riêng và tự quay lại Live sau polling fallback.
 
 Activity được đọc từ audit log xoay vòng tại `<config-root>/data/runtime/audit.log` (hoặc `<AGENT_DATA_DIR>/runtime/audit.log`), không tạo activity database riêng. Log dành cho UI chỉ chiếu metadata whitelist; không đưa args, command, output, prompt, token hoặc error content vào webview. **Connect current folder** đăng ký repo, đặt nó làm global default cho task mới và start LCA khi cần; nó không đổi primary của task đang chạy.
 

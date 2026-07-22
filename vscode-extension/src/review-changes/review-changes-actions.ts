@@ -275,8 +275,7 @@ export class ReviewChangesActions {
     if (!selected) {
       throw new Error(`Select one workspace before using ${action}.`);
     }
-    if (!selected.registered || !selected.available || !selected.opened || !selected.workspaceId ||
-      selected.workspaceId === "all") {
+    if (!selected.registered || !selected.available || !selected.opened || !selected.workspaceId) {
       throw new Error(
         `${action} requires an available workspace with a verified workspace ID.`,
       );

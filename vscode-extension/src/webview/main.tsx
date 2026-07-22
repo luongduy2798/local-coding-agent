@@ -326,10 +326,13 @@ function ContextFilters({
         <label className="context-filter">
           <span>Workspace</span>
           <select
-            value={state.selectedWorkspaceKey || "__all_available_workspaces__"}
+            value={state.selectedWorkspaceKey || ""}
             disabled={Boolean(state.busyAction)}
             onChange={(event) => onWorkspace(event.target.value || undefined)}
           >
+            {state.workspaceOptions.length === 0 && (
+              <option value="" disabled>No workspace available</option>
+            )}
             {state.workspaceOptions.map((workspace) => (
               <option
                 key={workspace.key}
