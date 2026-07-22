@@ -145,10 +145,10 @@ try {
       AGENT_READ_MANY_FILE_DEFAULT: "16000",
       AGENT_MAX_BATCH_READ_CHARS: "100000",
       AGENT_SEARCH_OUTPUT_DEFAULT: "15000",
-      // Keep the complete measured sample while still forcing at least one
-      // rotation. The runtime retains five generations, so a tiny 8 KiB file
-      // would legitimately evict the beginning of this benchmark.
-      AGENT_AUDIT_ROTATE_BYTES: "32768"
+      // Tool lifecycle auditing records both start and completion events. Keep
+      // the complete measured sample while still forcing at least one rotation;
+      // otherwise five 32 KiB generations can evict the early status calls.
+      AGENT_AUDIT_ROTATE_BYTES: "131072"
     }
   });
   rpcClient = await createRpcClient(runtime.port);

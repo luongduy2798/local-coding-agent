@@ -62,6 +62,29 @@ test("ambiguous legacy and runtime directories fail closed", async () => {
   });
 });
 
+test("an activated runtime tolerates mount device drift but rejects stable identity changes", async () => {
+  await withFixture("activation-device-drift", async ({ dataRoot }) => {
+    const paths = await createLegacyData(dataRoot);
+    const migrated = await prepareRuntimeDataDirectory({ agentDataDir: dataRoot });
+    assert.equal(migrated.state, "migrated");
+
+    const markerPath = path.join(paths.runtimeDir, ".runtime-activation.json");
+    const marker = JSON.parse(await readFile(markerPath, "utf8"));
+    marker.source.device = `remounted-${marker.source.device}`;
+    await writeFile(markerPath, `${JSON.stringify(marker, null, 2)}\n`, { mode: 0o600 });
+
+    const active = await prepareRuntimeDataDirectory({ agentDataDir: dataRoot });
+    assert.equal(active.state, "active");
+
+    marker.source.inode = `replaced-${marker.source.inode}`;
+    await writeFile(markerPath, `${JSON.stringify(marker, null, 2)}\n`, { mode: 0o600 });
+    await assert.rejects(
+      prepareRuntimeDataDirectory({ agentDataDir: dataRoot }),
+      (error) => error instanceof RuntimeDataMigrationError && error.code === "RUNTIME_DATA_CONFLICT"
+    );
+  });
+});
+
 for (const stage of ["after_intent", "after_copy", "during_validation", "after_validate", "after_rename", "after_activation"]) {
   test(`migration recovers idempotently after ${stage}`, async () => {
     await withFixture(`fault-${stage}`, async ({ dataRoot }) => {

@@ -337,7 +337,19 @@ async function entryIdentity(candidate) {
 }
 
 function activationMatchesSource(marker, source) {
-  return marker?.migration_version === MIGRATION_VERSION && sameIdentity(marker.source, source);
+  return marker?.migration_version === MIGRATION_VERSION && sameActivationIdentity(marker.source, source);
+}
+
+// st_dev is assigned by the mounted filesystem and can legitimately change
+// across a reboot/remount on macOS. The remaining fields identify the same
+// directory persistently; migration intents still use the stricter identity
+// check below because they only span one live migration attempt.
+function sameActivationIdentity(left, right) {
+  return Boolean(left && right) &&
+    left.canonical_path === right.canonical_path &&
+    String(left.inode) === String(right.inode) &&
+    Number(left.mode) === Number(right.mode) &&
+    Number(left.modified_ms) === Number(right.modified_ms);
 }
 
 async function intentExplainsRenamedTarget(intent, paths, source) {

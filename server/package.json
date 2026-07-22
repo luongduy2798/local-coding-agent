@@ -34,7 +34,7 @@
     "test:runtime:catalog": "node tests/integration/runtime-catalog.test.mjs",
     "test:runtime:audit": "node tests/unit/audit-activity.test.mjs && node tests/unit/audit-rotation.test.mjs",
     "test:runtime:policy": "node tests/integration/policy-contract.test.mjs",
-    "test:runtime:storage": "node tests/integration/storage-registry.test.mjs",
+    "test:runtime:storage": "node tests/integration/storage-registry.test.mjs && node --test tests/unit/runtime-data-migration.test.mjs",
     "test:runtime:lifecycle": "node tests/integration/workspace-lifecycle.test.mjs && node tests/integration/archived-change-routes.test.mjs && node ../scripts/workspace-lifecycle-cli.test.mjs",
     "test:runtime:multiworkspace": "node --test tests/integration/multi-workspace.test.mjs",
     "test:runtime:patch": "node tests/integration/patch-transaction.test.mjs",

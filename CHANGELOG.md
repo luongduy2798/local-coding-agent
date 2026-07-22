@@ -14,6 +14,7 @@ All notable changes to Local Coding Agent are documented in this file.
 - Added MCP, handler, serialization, storage, index, payload, event-loop, and memory telemetry plus bounded response budgets.
 - Added explicit stateful-dispatch and server-total performance gates. Cached control-plane health/workspace reads keep warm status calls off the SQLite worker path for one second; in-process register/select invalidates the cache immediately.
 - Activated stable `data/runtime` storage with WAL/foreign-key/busy-timeout initialization, transactional migration from legacy `data/v5`, integrity checks, audit rotation, and recoverable transaction metadata. Migration now refuses to start while the configured runtime port is active; the legacy source is retained as a backup.
+- Made activation survive legitimate filesystem device-ID changes after a macOS reboot/remount while still requiring the canonical path, inode, mode, and modification identity to match. Migration intents retain the stricter same-mount identity check.
 
 ### Multi-workspace tasks
 
@@ -89,16 +90,18 @@ All notable changes to Local Coding Agent are documented in this file.
 - Added a real server restart/reconnect test: a new MCP session must fail closed before binding, reject a stale token, resume the original persisted task by `task_token`, restore its plan, and access only the original workspace.
 - Expanded performance/evaluation coverage for warm dispatch, snapshots, code queries, retrieval, tool selection, impacted tests, and response budgets.
 - Promoted stateful dispatch p95 `<0.5 ms` and warm trivial server-total p95 `<5 ms` from telemetry-only measurements to failing regression gates.
+- Sized the forced audit-rotation performance fixture for paired tool start/completion events so all latency samples remain available across retained generations.
 - Expanded the retrieval golden from one definition to eight independent definitions and eight imported-reference expectations. Added an eight-package monorepo gate that requires seeded impacted-test recall `>=95%` while selecting no more than 25% of the full test set.
 - Moved the eval and Pro runners onto guarded Git-fixture cleanup flows so generated workspaces/data are removed through `safeRemove()` instead of being retained or hitting a rejected cleanup.
 - Configured CI for Node.js 22.13 and 24 on Linux, macOS, and Windows, with separate VS Code extension typecheck, audit/control behavior tests, and build coverage.
 - Added a scheduled/manual runtime reliability workflow that shards 10,000 verified supervisor/server/fake-tunnel lifecycle cycles across ten jobs, measures 1,000 reconnects, and stores canonical JSON plus raw cold-builder 10k/100k benchmark logs. No scale SLA failure is allow-listed.
 - Scoped benchmark event-loop SLA measurement to runtime work after synthetic fixture generation; per-phase fixture metrics remain available separately.
 - Continued to require isolated guarded fixtures, dynamic ports/data directories, and ownership-safe child cleanup for destructive and integration tests. The detached process-group fixture now self-terminates if its owning test process exits unexpectedly, preventing an interrupted test run from leaving the fixture alive.
+- Anchored generated `tools`, config, temporary-workspace, runtime-data, and extension-build ignore rules to their intended repository-root locations. The architecture gate now fails if Git ignores any file under a source, test, documentation, evaluation, resource, skill, or CI tree.
 
 ### Measured release status and operational limits
 
-- The fixed catalog measures 35 tools, 24,617 bytes raw, 4,109 bytes compressed-equivalent, and hash `96a7ec1d5fdf41d7`. The latest performance fixture measured stateful dispatch p95 0.006 ms and warm `lca_status` server-total p95 1.6 ms.
+- The fixed catalog measures 35 tools, 24,617 bytes raw, 4,109 bytes compressed-equivalent, and hash `96a7ec1d5fdf41d7`. The latest performance fixture measured stateful dispatch p95 0.005 ms and warm `lca_status` server-total p95 1.8 ms.
 - The latest cold-builder 100k-file run on Node.js 23.11 measured index 10.03 seconds, warm snapshot 0.05 ms, warm-query p95 0.04 ms, freshness 243.77 ms, post-GC RSS 120.95 MB, two-hot-workspace cache 23.46 MB, forced-GC heap growth 2.90%, and event-loop p99 12.17 ms. Every measured 10k/100k SLA passed.
 - The required 250k characterization measured index 24.11 seconds, warm snapshot/query p95 0.04/0.04 ms, freshness 547.79 ms, post-GC RSS 149.70 MB, cache 58.95 MB, heap growth 2.51%, and event-loop p99 11.96 ms. It is not represented as the 100k release target: freshness and live RSS identify the present 250k boundary, while closed-runtime RSS returned to 120.57 MB.
 - Patch fault hooks, partial commit recovery, simulated `ENOSPC`, `SQLITE_BUSY`, corruption recovery, transaction-state fencing, and every durable migration stage have guarded tests. The scheduled 10,000-cycle lifecycle and hosted OS/Node matrix remain external workflow evidence that must be green before publishing.

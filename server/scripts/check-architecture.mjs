@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import { readFile, readdir } from "node:fs/promises";
+import { spawn } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -13,6 +14,22 @@ const CLI_ENTRY = path.join(REPOSITORY_DIR, "scripts", "local-coding-agent.mjs")
 const CLI_DIR = path.join(REPOSITORY_DIR, "scripts", "cli");
 const ROOT_LINE_LIMIT = 300;
 const MODULE_LINE_LIMIT = 1_000;
+const IGNORE_GUARD_DIRECTORIES = [
+  path.join(REPOSITORY_DIR, ".github"),
+  path.join(REPOSITORY_DIR, "docs"),
+  path.join(REPOSITORY_DIR, "evals"),
+  path.join(REPOSITORY_DIR, "scripts"),
+  path.join(REPOSITORY_DIR, "skills"),
+  path.join(SERVER_DIR, "benchmarks"),
+  path.join(SERVER_DIR, "resources"),
+  path.join(SERVER_DIR, "scripts"),
+  path.join(SERVER_DIR, "src"),
+  path.join(SERVER_DIR, "tests"),
+  path.join(REPOSITORY_DIR, "vscode-extension", ".vscode"),
+  path.join(REPOSITORY_DIR, "vscode-extension", "media"),
+  path.join(REPOSITORY_DIR, "vscode-extension", "src"),
+  path.join(REPOSITORY_DIR, "vscode-extension", "tests")
+];
 
 const failures = [];
 const productionFiles = [
@@ -20,6 +37,7 @@ const productionFiles = [
   ...(await collectModules(CLI_DIR, { optional: true }))
 ];
 
+await assertNoIgnoredFiles(IGNORE_GUARD_DIRECTORIES);
 await assertLineLimit(path.join(SOURCE_DIR, "server.mjs"), ROOT_LINE_LIMIT, "server bootstrap");
 await assertLineLimit(CLI_ENTRY, ROOT_LINE_LIMIT, "CLI entrypoint");
 for (const file of productionFiles) await assertLineLimit(file, MODULE_LINE_LIMIT, "production module");
@@ -87,6 +105,58 @@ async function collectDirectories(directory, { optional = false } = {}) {
     directories.push(absolute, ...await collectDirectories(absolute));
   }
   return directories;
+}
+
+async function collectFiles(directory, { optional = false } = {}) {
+  const files = [];
+  let entries;
+  try {
+    entries = await readdir(directory, { withFileTypes: true });
+  } catch (error) {
+    if (optional && error?.code === "ENOENT") return files;
+    throw error;
+  }
+  for (const entry of entries) {
+    const absolute = path.join(directory, entry.name);
+    if (entry.isDirectory()) files.push(...await collectFiles(absolute));
+    else if (entry.isFile()) files.push(absolute);
+  }
+  return files;
+}
+
+async function assertNoIgnoredFiles(directories) {
+  const files = [];
+  for (const directory of directories) files.push(...await collectFiles(directory, { optional: true }));
+  if (files.length === 0) return;
+
+  const candidates = files.map(relative);
+  const result = await runGitCheckIgnore(candidates);
+  if (result.code === 1) return;
+  if (result.code !== 0) {
+    failures.push(`Unable to audit ignored source paths with git check-ignore: ${result.stderr.trim() || `exit ${result.code}`}`);
+    return;
+  }
+  for (const ignored of result.stdout.split("\0").filter(Boolean)) {
+    failures.push(`Source-controlled tree contains an ignored file: ${ignored}`);
+  }
+}
+
+async function runGitCheckIgnore(candidates) {
+  return new Promise((resolve, reject) => {
+    const child = spawn("git", ["check-ignore", "--no-index", "--stdin", "-z"], {
+      cwd: REPOSITORY_DIR,
+      stdio: ["pipe", "pipe", "pipe"]
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.once("error", reject);
+    child.once("close", (code) => resolve({ code, stdout, stderr }));
+    child.stdin.end(`${candidates.join("\0")}\0`);
+  });
 }
 
 async function importCycles(files) {
