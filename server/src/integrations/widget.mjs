@@ -42,8 +42,8 @@ export function registerWidgetIntegration(mcp, {
     mcp,
     "lca_input",
     {
-      title: "LCA input",
-      description: "Render the LCA Apps SDK input widget inside ChatGPT. The widget can stay visible in PiP while the conversation continues.",
+      title: "Open task composer widget",
+      description: "Open the Apps SDK task composer for explicit widget, composer, PiP, @ context or / workflow requests.",
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
       inputSchema: {
         initial_input: z.string().optional().describe("Optional text to prefill in the companion composer.")

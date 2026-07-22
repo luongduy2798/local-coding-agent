@@ -102,7 +102,7 @@ Tóm tắt:
 5. Chọn tunnel đã tạo.
 6. Auth: chọn `No auth`.
 7. Lưu connector.
-8. Trong ChatGPT, gọi tool `lca_status` để kiểm tra runtime, task và workspace.
+8. Trong ChatGPT, hỏi `call lca`; prompt ngắn này được định tuyến tới `lca_status` để kiểm tra runtime, task và workspace.
 
 Runtime API key nằm ở `.env.local` và chỉ dùng cho local tunnel-client. Không nhập Runtime API key vào phần auth của ChatGPT connector.
 
@@ -111,8 +111,8 @@ Runtime API key nằm ở `.env.local` và chỉ dùng cho local tunnel-client. 
 runtime có catalog cố định 35 tool. Sau khi connector hoạt động, hai entry point thường dùng là:
 
 ```text
-lca_status # kiểm tra runtime, catalog, workspace/task và output limits
-lca_input  # mở Apps SDK widget, có thể ghim PiP để nhập task trong lúc chat
+lca_status # mặc định cho `lca` / `call lca`; kiểm tra runtime, catalog, workspace/task và output limits
+lca_input  # chỉ mở Apps SDK widget khi yêu cầu rõ widget/composer/PiP
 ```
 
 `lca_status` trả `catalog_version=5` và `catalog_hash`. Khi catalog thay đổi, hãy refresh connector một lần và mở chat mới; tên tool cũ không còn callable và client stale sẽ nhận lỗi kèm hướng dẫn refresh.

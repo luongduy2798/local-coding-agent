@@ -82,10 +82,10 @@ Không dùng URL local `http://127.0.0.1:8789/mcp` cho ChatGPT Web.
 Trong ChatGPT, hỏi:
 
 ```text
-call lca_status
+call lca
 ```
 
-Kết quả phải trả `catalog_version=5`, `catalog_hash`, workspace/task và trạng thái session. Dùng `workspace_list`, sau đó `workspace_select` và `task_open` để bind task mới vào repo trước khi gọi các coding/mutation tool. Task đang mở không tự đổi theo lần `workspace_select` sau đó.
+Prompt ngắn `call lca` phải chọn `lca_status`. Kết quả phải trả `catalog_version=5`, `catalog_hash`, workspace/task và trạng thái session. Dùng `workspace_list`, sau đó `workspace_select` và `task_open` để bind task mới vào repo trước khi gọi các coding/mutation tool. Task đang mở không tự đổi theo lần `workspace_select` sau đó.
 
 Để kiểm tra Apps SDK và PiP, gọi:
 

@@ -374,6 +374,7 @@ export function createMcpCatalogFactory(config) {
 function serverInstructions(policy) {
   return [
     "Local Coding Agent is task-scoped and may operate across explicitly attached workspaces. File tools are root-confined; command execution is audited but is not an OS sandbox.",
+    "ENTRYPOINT: a bare `lca` or `call lca` request means lca_status. Use lca_input only when the user explicitly asks for the input widget, composer or PiP.",
     "START: call workspace_list, optionally workspace_select for future tasks, then task_open. workspace_select never reroutes an existing task. A task has one primary workspace and at most eight attached workspaces.",
     "ISOLATION: every context, mutation, execution and review call belongs to the current task. Attach or detach workspaces before the first mutation; the workspace set freezes afterwards. Never infer another repository. If context is missing or ambiguous, stop on TASK_CONTEXT_REQUIRED.",
     "PATHS: results use {workspace_id,path}; paths are relative to that workspace. Always pass workspace_id when a task contains more than one workspace.",

@@ -47,10 +47,32 @@ export function createStatusService({
     return controlCache.loading;
   }
 
-  async function workspaceInfoPayload() {
+  async function resolveSelectedWorkspace(registry, sessionId) {
+    if (!registry) return null;
+    let selected = await registry.getSelectedWorkspace({
+      scope: sessionId ? `session:${sessionId}` : "default",
+      fallback: false
+    }).catch(() => null);
+    if (!selected && sessionId) {
+      selected = await registry.getSelectedWorkspace({
+        scope: "default",
+        fallback: false
+      }).catch(() => null);
+    }
+    return selected;
+  }
+
+  async function workspaceInfoPayload({ sessionId = null } = {}) {
     const memory = process.memoryUsage();
     const state = getState();
     const controlPlane = await statusControlPlane();
+    const selected = await resolveSelectedWorkspace(state.registry, sessionId);
+    const selectedWorkspaceId = selected?.workspace?.id || null;
+    const selectedWorkspaceScope = selected?.scope || null;
+    const effectivePrimaryWorkspaceId = selectedWorkspaceId || state.primaryWorkspaceId;
+    const effectivePrimaryWorkspace = selected?.workspace || controlPlane.workspaces?.find(
+      (workspace) => workspace.id === effectivePrimaryWorkspaceId
+    ) || null;
     const indexMetrics = [...state.runtimes.values()].map((runtime) => ({
       workspace_id: runtime.workspace.id,
       generation: runtime.graph.generation,
@@ -98,10 +120,14 @@ export function createStatusService({
         ? settings.roots
         : workspaceDescriptors.map((workspace) => workspace.root),
       primary_root: settings.testRuntimeDiagnostics
-        ? settings.primaryRoot
-        : { workspace_id: state.primaryWorkspaceId, path: "." },
-      primary_workspace: { workspace_id: state.primaryWorkspaceId, path: "." },
-      primary_workspace_id: state.primaryWorkspaceId,
+        ? (effectivePrimaryWorkspace?.canonicalRoot || settings.primaryRoot)
+        : { workspace_id: effectivePrimaryWorkspaceId, path: "." },
+      primary_workspace: { workspace_id: effectivePrimaryWorkspaceId, path: "." },
+      primary_workspace_id: effectivePrimaryWorkspaceId,
+      selected_workspace_id: selectedWorkspaceId,
+      selected_workspace_scope: selectedWorkspaceScope,
+      configured_primary_workspace: { workspace_id: state.primaryWorkspaceId, path: "." },
+      configured_primary_workspace_id: state.primaryWorkspaceId,
       workspaces: workspaceDescriptors,
       multi_workspace: {
         available: Boolean(state.registry && state.taskRouter && state.patchCoordinator),

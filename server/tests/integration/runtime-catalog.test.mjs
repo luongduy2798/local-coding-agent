@@ -152,6 +152,10 @@ try {
   assert.equal(status.catalog_version, 5);
   assert.equal(status.catalog_hash, EXPECTED_CATALOG_HASH);
   assert.equal(status.multi_workspace.evicting_runtime_count, 0);
+  const initialWorkspaceList = await callTool(runtime.port, sessionId, 31, "workspace_list", {});
+  assert.equal(status.selected_workspace_id, initialWorkspaceList.data.selected_workspace_id);
+  assert.equal(status.selected_workspace_scope, initialWorkspaceList.data.selected_workspace_scope);
+  assert.equal(status.primary_workspace_id, initialWorkspaceList.data.selected_workspace_id);
   assert.equal(
     statusResponse.message?.result?.content?.[0]?.text?.includes(context.fixtureDir),
     false,
@@ -201,6 +205,14 @@ try {
     ),
     "lca_status must invalidate its warm control-plane cache after workspace registration"
   );
+  await callTool(runtime.port, sessionId, 62, "workspace_select", { workspace_id: workspaceBId });
+  const listedAfterSelect = await callTool(runtime.port, sessionId, 63, "workspace_list", {});
+  const statusAfterSelect = await callTool(runtime.port, sessionId, 64, "lca_status", {});
+  assert.equal(listedAfterSelect.data.selected_workspace_id, workspaceBId);
+  assert.equal(statusAfterSelect.data.selected_workspace_id, listedAfterSelect.data.selected_workspace_id);
+  assert.equal(statusAfterSelect.data.selected_workspace_scope, listedAfterSelect.data.selected_workspace_scope);
+  assert.equal(statusAfterSelect.data.primary_workspace_id, workspaceBId);
+  assert.equal(statusAfterSelect.data.configured_primary_workspace_id, status.configured_primary_workspace_id);
   const allWorkspaceEvent = await firstSseEvent(
     runtime.port,
     "/changes/events?workspace_id=all",
@@ -216,6 +228,11 @@ try {
     primary_workspace_id: workspaceBId
   });
   assert.equal(opened.data.task.primary_workspace_id, workspaceBId);
+  await callTool(runtime.port, sessionId, 65, "workspace_select", {
+    workspace_id: status.configured_primary_workspace_id
+  });
+  const taskAfterReselect = await callTool(runtime.port, sessionId, 66, "task_state", {});
+  assert.equal(taskAfterReselect.data.task.primary_workspace_id, workspaceBId);
   const openedBaseline = opened.data.task.workspace_state[0];
   assert.equal(openedBaseline.workspace_id, workspaceBId);
   assert.equal(openedBaseline.baseline_known, true);

@@ -28,6 +28,8 @@ const FROZEN_LEGACY_65 = new Set([
 ]);
 
 const SCENARIOS = [
+  scenario("call lca", ["lca_status"], ["workspace_info"]),
+  scenario("open the input composer widget in PiP", ["lca_input"], []),
   scenario("return LCA health status, active sessions and current policy", ["lca_status"], ["workspace_info", "workspace_doctor", "policy_status"]),
   scenario("create a concrete implementation plan with ordered steps", ["task_plan"], ["task_plan"]),
   scenario("save a resumable checkpoint with progress and next steps", ["task_checkpoint"], ["checkpoint", "session_report"]),

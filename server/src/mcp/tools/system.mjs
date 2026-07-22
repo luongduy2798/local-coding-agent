@@ -53,10 +53,10 @@ export function registerSystemTools(mcp, dependencies) {
     "lca_status",
     {
       title: "LCA status",
-      description: "Return LCA health/status: V5 runtime, catalog, active sessions, workspaces, performance, policy and safety.",
+      description: "Default entry point for bare `lca` or `call lca` requests. Return runtime health, catalog, active sessions, effective selected workspace, performance, policy and safety.",
       inputSchema: {}
     },
-    async () => jsonResult(await workspaceInfoPayload())
+    async () => jsonResult(await workspaceInfoPayload({ sessionId: currentMcpSessionId() }))
   );
 
   reg(
