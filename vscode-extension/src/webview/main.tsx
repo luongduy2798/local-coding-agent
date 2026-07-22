@@ -1,12 +1,12 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
-  ControlHeader,
-  OverviewPanel,
-  TasksPanel,
-  WorkspacesPanel,
+  ChronologicalTaskFeed,
+  WorkspaceHeader,
+  buildWorkspaceTasks,
+  makeUnassignedPresentation,
   type ControlStateView,
-  type ControlTab,
+  type WorkspaceRoute,
 } from "./control-center.js";
 import "./styles.css";
 
@@ -161,7 +161,6 @@ const initialState: ViewState = {
   changes: [],
   control: {
     loading: true,
-    monitoringPaused: false,
     revision: 0,
     serverOnline: false,
     supervisorOnline: false,
@@ -183,10 +182,11 @@ const initialState: ViewState = {
 
 function App(): React.JSX.Element {
   const [state, setState] = useState<ViewState>(initialState);
-  const [activeTab, setActiveTab] = useState<ControlTab>(() => {
-    const saved = vscode.getState() as { activeTab?: ControlTab } | undefined;
-    return saved?.activeTab || "overview";
+  const [route, setRoute] = useState<WorkspaceRoute>(() => {
+    const saved = vscode.getState() as { route?: { kind?: string } } | undefined;
+    return saved?.route?.kind === "history" ? { kind: "history" } : { kind: "tasks" };
   });
+  const [historyReturnKey, setHistoryReturnKey] = useState<string | undefined>();
 
   useEffect(() => {
     const listener = (event: MessageEvent<HostMessage>) => {
@@ -202,76 +202,66 @@ function App(): React.JSX.Element {
   }, []);
 
   useEffect(() => {
-    vscode.setState({ activeTab });
-  }, [activeTab]);
+    vscode.setState({ route });
+  }, [route]);
+
+  useEffect(() => {
+    if (state.selectedTaskId) post("selectTask", undefined, undefined, undefined);
+  }, [state.selectedTaskId]);
 
   const connected = state.connection?.kind === "connected";
-  const latestChange = state.changes[0];
+  const currentWorkspace = state.workspaceOptions.find(
+    (workspace) => workspace.key === state.selectedWorkspaceKey,
+  ) || state.workspaceOptions[0];
+  const currentWorkspaceId = currentWorkspace?.workspaceId;
+  const tasks = useMemo(
+    () => buildWorkspaceTasks(state.control, state.changes, currentWorkspaceId),
+    [state.control, state.changes, currentWorkspaceId],
+  );
+  const unassigned = useMemo(
+    () => makeUnassignedPresentation(state.control, state.changes, currentWorkspaceId),
+    [state.control, state.changes, currentWorkspaceId],
+  );
+  const selectWorkspace = (key: string) => {
+    setRoute({ kind: "tasks" });
+    post("selectWorkspace", undefined, undefined, key);
+  };
 
   return (
-    <main className="app-shell">
-      <ControlHeader
+    <main className={`app-shell workspace-shell ${connected && route.kind === "tasks" ? "feed-mode" : ""}`}>
+      <WorkspaceHeader
         control={state.control}
-        activeTab={activeTab}
+        currentWorkspace={currentWorkspace}
         syncMode={state.syncMode}
-        busy={Boolean(state.busyAction)}
-        onTab={setActiveTab}
-        onRefresh={() => {
-          post("refresh");
+        trusted={state.trusted}
+        busyAction={state.busyAction}
+        onRefresh={() => post("refresh")}
+        onConnect={() => post("connect")}
+        onRuntimeAction={(type, value) => post(type, undefined, undefined, value)}
+        onWorkspaceAction={(type, workspaceId) => post(type, undefined, undefined, undefined, workspaceId)}
+        onSelectWorkspace={selectWorkspace}
+        onViewHistory={(workspaceId) => {
+          setHistoryReturnKey(state.selectedWorkspaceKey);
+          setRoute({ kind: "history" });
+          post("viewWorkspaceHistory", undefined, undefined, undefined, workspaceId);
         }}
       />
 
-      {activeTab === "overview" && (
-        <OverviewPanel
-          control={state.control}
-          trusted={state.trusted}
-          busyAction={state.busyAction}
-          send={(type, workspaceId, value) => post(type, undefined, undefined, value, workspaceId)}
-        />
-      )}
-
-      {activeTab === "workspaces" && (
-        <WorkspacesPanel
-          control={state.control}
-          trusted={state.trusted}
-          busyAction={state.busyAction}
-          send={(type, workspaceId, value) => post(type, undefined, undefined, value, workspaceId)}
-          onViewHistory={(workspaceId) => {
-            setActiveTab("changes");
-            post("viewWorkspaceHistory", undefined, undefined, undefined, workspaceId);
-          }}
-        />
-      )}
-
-      {activeTab === "tasks" && (
-        <TasksPanel control={state.control} changes={state.changes} />
-      )}
-
-      {activeTab === "changes" && (connected || state.workspaceOptions.length > 1) && (
-        <ContextFilters
-          state={state}
-          showRegistration={connected}
-          onWorkspace={(value) => post("selectWorkspace", undefined, undefined, value)}
-          onTask={(value) => post("selectTask", undefined, undefined, value)}
-          onConnect={() => post("connect")}
-        />
-      )}
-
-      {activeTab === "changes" && !state.trusted && (
+      {!state.trusted && (
         <div className="trust-banner">
           <Icon name="lock" />
           <span>Trust this workspace to connect LCA or mutate files.</span>
         </div>
       )}
 
-      {activeTab === "changes" && state.scopeError && (
+      {state.scopeError && (
         <div className="scope-error-banner">
           <Icon name="warning" />
           <span>{state.scopeError}</span>
         </div>
       )}
 
-      {activeTab === "changes" && !connected && (
+      {!connected && (
         <ConnectionCard
           state={state}
           onConnect={() => post("connect")}
@@ -280,21 +270,59 @@ function App(): React.JSX.Element {
         />
       )}
 
-      {activeTab === "changes" && connected && !state.loading && state.changes.length === 0 && <EmptyState />}
+      {connected && route.kind === "tasks" && (
+        <ChronologicalTaskFeed
+          tasks={tasks}
+          unassigned={unassigned}
+          workspaceLabel={currentWorkspace?.label || "Current workspace"}
+          workspaceKey={currentWorkspaceId || currentWorkspace?.key}
+          renderChanges={(item) => (
+            <div className="change-list inline-change-list" aria-label={`Changes for ${item.task.title}`}>
+              {item.changes.map((change) => (
+                <ChangeCard
+                  key={`${change.workspace_id || "legacy"}:${change.id}`}
+                  change={change as ChangeRecord}
+                  state={state}
+                  compact
+                />
+              ))}
+            </div>
+          )}
+        />
+      )}
 
-      {activeTab === "changes" && connected && latestChange && (
-        <section className="change-list" aria-label="Review changes">
-          {state.changes.map((change) => (
-            <ChangeCard
-              key={`${change.workspace_id || "legacy"}:${change.id}`}
-              change={change}
-              state={state}
-            />
-          ))}
+      {connected && route.kind === "history" && (
+        <section className="history-route">
+          <button
+            className="back-button"
+            type="button"
+            onClick={() => {
+              setRoute({ kind: "tasks" });
+              if (historyReturnKey) post("selectWorkspace", undefined, undefined, historyReturnKey);
+            }}
+          >
+            <Icon name="chevronUp" /> Back to workspace tasks
+          </button>
+          <div className="list-heading">
+            <div><h2>Workspace history</h2><p>Read-only archived changes</p></div>
+            <span>{state.changes.length}</span>
+          </div>
+          {!state.loading && state.changes.length === 0 && <EmptyState />}
+          {state.changes.length > 0 && (
+            <div className="change-list" aria-label="Workspace history">
+              {state.changes.map((change) => (
+                <ChangeCard
+                  key={`${change.workspace_id || "legacy"}:${change.id}`}
+                  change={change}
+                  state={state}
+                />
+              ))}
+            </div>
+          )}
         </section>
       )}
 
-      {activeTab === "changes" && state.loading && !state.connection && (
+      {state.loading && !state.connection && (
         <div className="loading-state">
           <Spinner />
           <span>Connecting to Local Coding Agent…</span>
@@ -495,8 +523,16 @@ function EmptyState(): React.JSX.Element {
   );
 }
 
-function ChangeCard({ change, state }: { change: ChangeRecord; state: ViewState }): React.JSX.Element {
-  const [expanded, setExpanded] = useState(true);
+function ChangeCard({
+  change,
+  state,
+  compact = false,
+}: {
+  change: ChangeRecord;
+  state: ViewState;
+  compact?: boolean;
+}): React.JSX.Element {
+  const [expanded, setExpanded] = useState(!compact);
   const title = useMemo(() => changeTitle(change), [change]);
   const canUndoChange = ["applied", "reapplied", "partially_undone"].includes(change.status);
   const canReapplyChange = ["undone", "partially_undone"].includes(change.status);
@@ -505,7 +541,7 @@ function ChangeCard({ change, state }: { change: ChangeRecord; state: ViewState 
   const mutationAllowed = workspace?.registrationState === "active" && workspace.opened;
 
   return (
-    <Card className={`change-card status-${change.status}`}>
+    <Card className={`change-card status-${change.status} ${compact ? "compact-change-card" : ""}`}>
       <div className="change-header">
         <div className="change-heading">
           <div className="change-icon"><Icon name={statusIcon(change.status)} /></div>
@@ -514,7 +550,7 @@ function ChangeCard({ change, state }: { change: ChangeRecord; state: ViewState 
               <h2>{title}</h2>
               <StatusBadge status={change.status} />
             </div>
-            {(change.workspace_label || change.workspace_id || change.task_id || change.taskStatus) && (
+            {!compact && (change.workspace_label || change.workspace_id || change.task_id || change.taskStatus) && (
               <div className="context-badges">
                 {(change.workspace_label || change.workspace_id) && (
                   <span
@@ -541,11 +577,19 @@ function ChangeCard({ change, state }: { change: ChangeRecord; state: ViewState 
                 )}
               </div>
             )}
-            <LineStats stats={change.stats} className="change-line-stats" />
+            <div className="change-summary-line">
+              <span>
+                {change.operationCount !== undefined
+                  ? `${change.operationCount} operation${change.operationCount === 1 ? "" : "s"}`
+                  : change.source}
+              </span>
+              <span>•</span>
+              <span>{change.files.length} file{change.files.length === 1 ? "" : "s"}</span>
+              <span>•</span>
+              <LineStats stats={change.stats} compact className="change-line-stats" />
+            </div>
             <div className="change-meta">
               <span>{relativeTime(change.createdAt)}</span>
-              <span>•</span>
-              <span>{change.operationCount ? `${change.operationCount} operation${change.operationCount === 1 ? "" : "s"}` : change.source}</span>
               {change.taskStatus === "active" && <><span>•</span><span>In progress</span></>}
             </div>
           </div>
@@ -889,7 +933,8 @@ function post(
 }
 
 function changeTitle(change: ChangeRecord): string {
-  if (change.title && change.title !== "LCA task") return change.title;
+  const explicitTitle = change.title?.trim();
+  if (explicitTitle && explicitTitle !== "LCA task") return explicitTitle;
   if (change.renameGroups.length === 1) {
     const rename = change.renameGroups[0];
     return `Renamed ${rename.from} → ${rename.to}`;
@@ -905,6 +950,8 @@ function changeTitle(change: ChangeRecord): string {
     };
     return `${verb[file.operation]} ${file.path}`;
   }
+  const taskTitle = change.task_title?.trim();
+  if (taskTitle && taskTitle !== "LCA task") return taskTitle;
   return `Edited ${change.files.length} files`;
 }
 

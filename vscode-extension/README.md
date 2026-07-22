@@ -1,7 +1,8 @@
-# Local Coding Agent Control Center for VS Code
+# Local Coding Agent Workspace Activity for VS Code
 
-The extension adds one **Control Center** view to the VS Code Activity Bar. It manages observable
-LCA runtime state; it does not display `task_plan`, prompts, model thinking, or fake progress.
+The extension adds one workspace-focused **Workspace Activity** view to the VS Code Activity Bar.
+It shows observable LCA runtime, activity, task and Review Changes state; it does not display
+`task_plan`, prompts, model thinking, tool arguments/output, or fake progress.
 
 ## Install and open
 
@@ -21,17 +22,27 @@ integrated terminal. **Connect current folder** registers that folder, makes it 
 for new tasks, and starts LCA when needed. It never changes the primary workspace of a task that is
 already open.
 
-The Control Center has four tabs:
+The normal view is one workspace-focused feed:
 
-- **Overview** shows supervisor, server, tunnel, session and audit state and provides Start/Stop/Pause.
-- **Workspaces** shows the complete LCA registry, even for repos not open in this VS Code window.
-- **Tasks** shows real open/closed/failed state, running tools with elapsed time, completed/failed tools, verification, read-only process state and observed change/file counts.
-- **Changes** provides the existing review, native diff and safe replay workflow.
+- The compact header shows connection, version, active/max sessions and sync state. Start/Stop and
+  Refresh are direct icon actions; monitoring remains active whenever the view is visible, and the
+  workspace registry opens from the workspace popover.
+- Tasks form one chat-style chronological feed: older assignments stay above and the newest task is
+  appended and highlighted at the bottom. Opening the view or switching workspace starts at the
+  latest task.
+- Each task owns the safe audit activity shown directly beneath its title. Activity is ordered from
+  old to new, shows duration and relative time, and the webview uses one shared clock only while work
+  runs.
+- While the user remains near the bottom, new tasks and activity auto-follow. Scrolling upward pauses
+  following and shows **Latest** instead of pulling the view away from history.
+- A task with reviewable changes shows **Changes N**. Expanding it displays that task's existing
+  change records inline with `operations · files · +/−`, native diff, Undo and Reapply actions.
+- Archived workspace history remains available as a separate read-only route from the workspace
+  manager.
 
-The Changes workspace filter selects the repository open in the current VS Code window by default
-and places it first. Every other active/available registry workspace remains selectable below it.
-Each selection uses its workspace-scoped SSE stream; if SSE fails, the view temporarily polls and
-then reconnects to return to Live.
+The current editor folder is selected first. Every other active/available registry workspace remains
+available from the header manager. Each selection uses its workspace-scoped SSE stream; if SSE fails,
+the view temporarily polls and then reconnects to return to Live.
 
 Available actions:
 
@@ -68,7 +79,7 @@ Tool activity is read from the existing rotating runtime audit log, not a second
 The UI keeps at most 20,000 events from the last seven days and only projects safe metadata:
 invocation/tool/task/workspace IDs, phase, timestamps, duration, safe error code, verification enum
 and counts. Arguments, commands, output, prompts, tokens, thinking and error content never enter the
-webview. If audit is disabled, only the timeline becomes unavailable.
+webview. If audit is disabled, only per-task activity becomes unavailable.
 
 ## Development
 
@@ -80,6 +91,6 @@ npm test
 npm run build
 ```
 
-Open the `vscode-extension/` folder in VS Code, run `npm run build`, then press `F5`. The Control
-Center can inspect the complete registry; file mutation and **Open current file** remain restricted
-to repos open in the current trusted VS Code window.
+Open the `vscode-extension/` folder in VS Code, run `npm run build`, then press `F5`. Workspace
+Activity can inspect the complete registry from its header manager; file mutation and **Open current
+file** remain restricted to repos open in the current trusted VS Code window.

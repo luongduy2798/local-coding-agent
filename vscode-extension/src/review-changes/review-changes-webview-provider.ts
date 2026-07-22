@@ -176,10 +176,6 @@ export class ReviewChangesWebviewProvider implements vscode.WebviewViewProvider,
       case "stopLca":
         await this.run("stopLca", () => this.controlActions.stop());
         return;
-      case "pauseMonitoring":
-        this.controlStore.setMonitoringPaused(message.value === "true");
-        await this.postState();
-        return;
       case "makeDefaultWorkspace":
         await this.run(`default:${workspaceId || ""}`, () => this.controlActions.makeDefault(workspaceId || ""));
         return;

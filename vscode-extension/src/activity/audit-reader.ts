@@ -74,7 +74,6 @@ export class AuditReader implements vscode.Disposable {
   private watcher: FSWatcher | undefined;
   private timer: NodeJS.Timeout | undefined;
   private refreshPromise: Promise<void> | undefined;
-  private paused = false;
 
   get current(): AuditActivitySnapshot {
     return this.snapshot;
@@ -95,23 +94,13 @@ export class AuditReader implements vscode.Disposable {
       available: enabled && Boolean(normalized),
       error: enabled && !normalized ? "Audit path is unavailable." : undefined,
     };
-    if (!enabled || !normalized || this.paused) {
+    if (!enabled || !normalized) {
       this.stopWatching();
       this.emit();
       return;
     }
     this.startWatching();
     await this.refresh();
-  }
-
-  setPaused(paused: boolean): void {
-    if (this.paused === paused) return;
-    this.paused = paused;
-    if (paused) this.stopWatching();
-    else if (this.auditPath && this.snapshot.enabled) {
-      this.startWatching();
-      void this.refresh();
-    }
   }
 
   refresh(): Promise<void> {
@@ -128,7 +117,7 @@ export class AuditReader implements vscode.Disposable {
   }
 
   private startWatching(): void {
-    if (!this.auditPath || this.watcher || this.paused) return;
+    if (!this.auditPath || this.watcher) return;
     try {
       this.watcher = watch(path.dirname(this.auditPath), { persistent: false }, (_event, name) => {
         if (!name || String(name).startsWith(path.basename(this.auditPath!))) void this.refresh();
@@ -152,7 +141,7 @@ export class AuditReader implements vscode.Disposable {
   }
 
   private async readAvailableFiles(): Promise<void> {
-    if (!this.auditPath || !this.snapshot.enabled || this.paused) return;
+    if (!this.auditPath || !this.snapshot.enabled) return;
     try {
       const files = await auditFiles(this.auditPath);
       for (const file of files) await this.readFileDelta(file);

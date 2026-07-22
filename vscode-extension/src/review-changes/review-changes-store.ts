@@ -297,7 +297,7 @@ export class ReviewChangesStore implements vscode.Disposable {
         } else {
           const requestWorkspaceId = selected.workspaceId;
           const response = await this.connection.client.listChanges(
-            20,
+            100,
             {
               workspaceId: requestWorkspaceId,
               taskId: selectedTask?.apiTaskId,

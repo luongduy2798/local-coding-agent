@@ -41,7 +41,6 @@ export interface ControlTask {
 
 export interface ControlCenterState {
   loading: boolean;
-  monitoringPaused: boolean;
   revision: number;
   serverOnline: boolean;
   supervisorOnline: boolean;
@@ -64,7 +63,6 @@ export class ControlCenterStore implements vscode.Disposable {
   private readonly auditReader = new AuditReader();
   private state: ControlCenterState = {
     loading: true,
-    monitoringPaused: false,
     revision: 0,
     serverOnline: false,
     supervisorOnline: false,
@@ -104,14 +102,6 @@ export class ControlCenterStore implements vscode.Disposable {
     this.visible = visible;
     this.updateTimer();
     if (visible) void this.refresh();
-  }
-
-  setMonitoringPaused(paused: boolean): void {
-    this.state = { ...this.state, monitoringPaused: paused };
-    this.auditReader.setPaused(paused);
-    this.updateTimer();
-    this.emit();
-    if (!paused && this.visible) void this.refresh();
   }
 
   refresh(): Promise<void> {
@@ -176,7 +166,7 @@ export class ControlCenterStore implements vscode.Disposable {
   private updateTimer(): void {
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
-    if (!this.visible || this.disposed || this.state.monitoringPaused) return;
+    if (!this.visible || this.disposed) return;
     this.timer = setInterval(() => void this.refresh(), 2_000);
     this.timer.unref?.();
   }

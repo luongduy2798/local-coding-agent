@@ -5,6 +5,10 @@ import type { HealthResponse } from "../src/api/api-types.js";
 import { ConnectionManager } from "../src/connection/connection-manager.js";
 import { ReviewChangesStore } from "../src/review-changes/review-changes-store.js";
 import { filterAuditForRegisteredWorkspaces } from "../src/control-center/control-center-store.js";
+import {
+  buildWorkspaceTasks,
+  isScrollNearBottom,
+} from "../src/webview/control-center.js";
 
 const roots = {
   lzz: path.resolve("fixtures", "lzz"),
@@ -136,6 +140,98 @@ async function main(): Promise<void> {
     ],
   }, [{ id: "ws_aaaaaaaaaaaaaaaa" }]);
   assert.deepEqual(filteredAudit.activities.map((activity) => activity.invocationId), ["kept", "global"]);
+
+  const taskActivities = [
+    {
+      ...activity("newer", ["ws_cccccccccccccccc"]),
+      taskId: "task_workspacefeed0001",
+      startedAt: "2026-07-22T02:00:02.000Z",
+      finishedAt: "2026-07-22T02:00:02.001Z",
+    },
+    {
+      ...activity("other-workspace", ["ws_bbbbbbbbbbbbbbbb"]),
+      taskId: "task_workspacefeed0001",
+      startedAt: "2026-07-22T02:00:01.000Z",
+      finishedAt: "2026-07-22T02:00:01.001Z",
+    },
+    {
+      ...activity("older", ["ws_cccccccccccccccc"]),
+      taskId: "task_workspacefeed0001",
+      startedAt: "2026-07-22T02:00:00.000Z",
+      finishedAt: "2026-07-22T02:00:00.001Z",
+    },
+  ];
+
+  const workspaceTasks = buildWorkspaceTasks({
+    tasks: [
+      {
+        id: "task_workspacefeed0002",
+        title: "Newer workspace feed task",
+        status: "open",
+        primaryWorkspaceId: "ws_cccccccccccccccc",
+        workspaceIds: ["ws_cccccccccccccccc"],
+        createdAt: "2026-07-22T02:03:00.000Z",
+        updatedAt: "2026-07-22T02:03:00.000Z",
+        closedAt: null,
+      },
+      {
+        id: "task_workspacefeed0001",
+        title: "Older workspace feed task",
+        status: "completed",
+        primaryWorkspaceId: "ws_cccccccccccccccc",
+        workspaceIds: ["ws_cccccccccccccccc"],
+        createdAt: "2026-07-22T02:00:00.000Z",
+        updatedAt: "2026-07-22T02:00:02.000Z",
+        closedAt: "2026-07-22T02:00:03.000Z",
+      },
+      {
+        id: "task_otherworkspace01",
+        title: "Other workspace task",
+        status: "open",
+        primaryWorkspaceId: "ws_bbbbbbbbbbbbbbbb",
+        workspaceIds: ["ws_bbbbbbbbbbbbbbbb"],
+        createdAt: "2026-07-22T02:01:00.000Z",
+        updatedAt: "2026-07-22T02:01:00.000Z",
+        closedAt: null,
+      },
+    ],
+    audit: { activities: taskActivities },
+    processes: [],
+  } as never, [
+    {
+      id: "change-current",
+      workspace_id: "ws_cccccccccccccccc",
+      task_id: "task_workspacefeed0001",
+      files: [{ path: "src/current.ts" }],
+    },
+    {
+      id: "change-other",
+      workspace_id: "ws_bbbbbbbbbbbbbbbb",
+      task_id: "task_workspacefeed0001",
+      files: [{ path: "src/other.ts" }],
+    },
+  ], "ws_cccccccccccccccc");
+  assert.deepEqual(
+    workspaceTasks.map((item) => item.task.id),
+    ["task_workspacefeed0001", "task_workspacefeed0002"],
+    "task feed must render oldest above newest",
+  );
+  assert.deepEqual(
+    workspaceTasks[0].activities.map((item) => item.invocationId),
+    ["older", "newer"],
+    "activity must stay chronological inside its task",
+  );
+  assert.deepEqual(workspaceTasks[0].changes.map((change) => change.id), ["change-current"]);
+  assert.equal(
+    isScrollNearBottom({ scrollHeight: 1_000, scrollTop: 764, clientHeight: 200 }),
+    true,
+    "feed should auto-follow while the user remains near the bottom",
+  );
+  assert.equal(
+    isScrollNearBottom({ scrollHeight: 1_000, scrollTop: 600, clientHeight: 200 }),
+    false,
+    "feed should stop following after the user scrolls into history",
+  );
 
   let watchCalls = 0;
   let listCalls = 0;

@@ -66,7 +66,7 @@
       "lca": [
         {
           "id": "lca.reviewChanges",
-          "name": "Control Center",
+          "name": "Workspace Activity",
           "type": "webview"
         }
       ]
@@ -161,7 +161,7 @@
         "lca.reviewChanges.autoRefresh": {
           "type": "boolean",
           "default": true,
-          "description": "Monitor LCA while the Control Center is visible, using server events when available and polling as a fallback."
+          "description": "Monitor workspace activity and Review Changes while the view is visible, using server events when available and polling as a fallback."
         },
         "lca.reviewChanges.refreshInterval": {
           "type": "number",
