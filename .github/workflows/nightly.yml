@@ -1,0 +1,147 @@
+name: Runtime Nightly Reliability
+
+on:
+  schedule:
+    - cron: "17 18 * * *"
+  workflow_dispatch:
+    inputs:
+      cycles:
+        description: "Total verified supervisor/server/tunnel lifecycle cycles (1-100000, sharded across 10 jobs)"
+        required: false
+        default: "10000"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  lifecycle:
+    name: Lifecycle stress shard ${{ matrix.shard }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+      - run: npm ci
+        working-directory: server
+      - run: npm run test:safety
+        working-directory: server
+      - run: npm run test:architecture
+        working-directory: server
+      - name: Run verified supervisor/server/tunnel lifecycle shard
+        env:
+          LCA_NIGHTLY_TOTAL_CYCLES: ${{ inputs.cycles || '10000' }}
+          LCA_NIGHTLY_SHARD: ${{ matrix.shard }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! [[ "$LCA_NIGHTLY_TOTAL_CYCLES" =~ ^[0-9]+$ ]] || (( LCA_NIGHTLY_TOTAL_CYCLES < 1 || LCA_NIGHTLY_TOTAL_CYCLES > 100000 )); then
+            echo "cycles must be an integer between 1 and 100000" >&2
+            exit 2
+          fi
+          shard_count=10
+          base=$((LCA_NIGHTLY_TOTAL_CYCLES / shard_count))
+          remainder=$((LCA_NIGHTLY_TOTAL_CYCLES % shard_count))
+          shard_cycles=$base
+          if (( LCA_NIGHTLY_SHARD < remainder )); then
+            shard_cycles=$((shard_cycles + 1))
+          fi
+          : > lifecycle-stress.log
+          echo "shard=${LCA_NIGHTLY_SHARD} cycles=${shard_cycles} total=${LCA_NIGHTLY_TOTAL_CYCLES}" | tee -a lifecycle-stress.log
+          if (( shard_cycles > 0 )); then
+            LCA_LIFECYCLE_CYCLES="$shard_cycles" \
+            LCA_LIFECYCLE_WITH_TUNNEL=1 \
+              node --test scripts/local-coding-agent-supervisor.test.mjs >> lifecycle-stress.log 2>&1
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: lifecycle-stress-${{ github.run_id }}-${{ matrix.shard }}
+          path: lifecycle-stress.log
+          if-no-files-found: warn
+          retention-days: 14
+
+  reconnect:
+    name: Reconnect rate and restart recovery
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+      - run: npm ci
+        working-directory: server
+      - run: npm run test:safety
+        working-directory: server
+      - run: npm run test:architecture
+        working-directory: server
+      - name: Verify real restart/resume path
+        run: npm run test:runtime:reconnect
+        working-directory: server
+      - name: Measure 1,000 stateful reconnects
+        run: node benchmarks/reconnect-stress.mjs --cycles=1000 | tee reconnect-stress.log
+        working-directory: server
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: reconnect-stress-${{ github.run_id }}
+          path: server/reconnect-stress.log
+          if-no-files-found: error
+          retention-days: 30
+
+  scale:
+    name: ${{ matrix.scale }} scale evidence
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        scale: [10k, 100k]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+      - run: npm ci
+        working-directory: server
+      - name: Run cold-builder benchmark
+        working-directory: server
+        shell: bash
+        run: |
+          extra=()
+          if [[ "${{ matrix.scale }}" != "10k" ]]; then extra+=(--allow-large); fi
+          node --expose-gc benchmarks/scale.mjs --scale="${{ matrix.scale }}" --cold-builder "${extra[@]}" > "scale-${{ matrix.scale }}.raw.log"
+      - name: Extract canonical benchmark JSON
+        working-directory: server
+        env:
+          LCA_BENCHMARK_SCALE: ${{ matrix.scale }}
+        run: |
+          node -e "const fs=require('node:fs');const scale=process.env.LCA_BENCHMARK_SCALE;const raw=fs.readFileSync('scale-'+scale+'.raw.log','utf8');const marker='{\n  \"benchmark\": \"lca-scale\"';const start=raw.indexOf(marker);if(start<0)throw new Error('Benchmark JSON marker not found');const report=JSON.parse(raw.slice(start));fs.writeFileSync('scale-'+scale+'.json',JSON.stringify(report,null,2)+'\n');"
+      - name: Reject unexpected SLA regressions
+        working-directory: server
+        env:
+          LCA_BENCHMARK_SCALE: ${{ matrix.scale }}
+        run: |
+          node -e "const fs=require('node:fs');const scale=process.env.LCA_BENCHMARK_SCALE;const r=JSON.parse(fs.readFileSync('scale-'+scale+'.json','utf8'));const failed=Object.entries(r.sla||{}).filter(([,ok])=>ok!==true).map(([name])=>name);if(failed.length)throw new Error('SLA failures: '+failed.join(', '));console.log(JSON.stringify({scale,sla:r.sla,sla_passed:r.sla_passed},null,2));"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: scale-${{ matrix.scale }}-${{ github.run_id }}
+          path: |
+            server/scale-${{ matrix.scale }}.json
+            server/scale-${{ matrix.scale }}.raw.log
+          if-no-files-found: error
+          retention-days: 30

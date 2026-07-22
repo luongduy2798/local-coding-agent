@@ -226,15 +226,23 @@ try {
   client = await connect(lca.port);
   const tools = await client.listTools();
   const names = new Set(tools.tools.map((tool) => tool.name));
+  check("Runtime exposes one aggregate figma tool", names.has("figma"), JSON.stringify([...names]));
   for (const name of ["figma_status", "figma_list_tools", "figma_call_tool", "figma_get_design_context", "figma_get_screenshot", "figma_get_metadata", "figma_get_variable_defs"]) {
-    check(`${name} is exposed by LCA`, names.has(name), JSON.stringify([...names]));
+    check(`${name} is hidden from the Runtime catalog`, !names.has(name), JSON.stringify([...names]));
   }
+  const staleAlias = await callRaw(client, "figma_status");
+  check(
+    "stale Figma aliases are not callable",
+    staleAlias.isError === true && /Tool figma_status not found/.test(staleAlias.content?.[0]?.text || ""),
+    JSON.stringify(staleAlias)
+  );
 
-  const bridgeStatus = await call(client, "figma_status");
+  const bridgeStatus = await call(client, "figma", { action: "status" });
   const bridgeStatusJson = JSON.parse(bridgeStatus.content?.[0]?.text || "{}");
-  check("LCA figma_status reports connection", bridgeStatusJson.connected === true && bridgeStatusJson.tool_count === 4, JSON.stringify(bridgeStatusJson));
+  check("LCA aggregate figma status reports connection", bridgeStatusJson.connected === true && bridgeStatusJson.tool_count === 4, JSON.stringify(bridgeStatusJson));
 
-  const design = await call(client, "figma_get_design_context", {
+  const design = await call(client, "figma", {
+    action: "design_context",
     url: "https://www.figma.com/design/XZYsFkZZKLuvesuSg8vSqC/MoodLab?node-id=12305-144779",
     client_languages: ["Dart"],
     client_frameworks: ["Flutter"],
@@ -243,10 +251,10 @@ try {
   const designPayload = JSON.parse(design.content?.[0]?.text || "{}");
   check("design wrapper forwards normalized node and client context", designPayload.args?.nodeId === "12305:144779" && designPayload.args?.clientLanguages?.[0] === "Dart" && designPayload.args?.clientFrameworks?.[0] === "Flutter" && designPayload.args?.forceCode === true, JSON.stringify(designPayload));
 
-  const screenshot = await call(client, "figma_get_screenshot", { node_id: "7-8", enable_base64_response: true });
+  const screenshot = await call(client, "figma", { action: "screenshot", node_id: "7-8", enable_base64_response: true });
   check("screenshot wrapper preserves image content", screenshot.content?.some((item) => item.type === "image" && item.mimeType === "image/png" && item.data === "aGVsbG8="), JSON.stringify(screenshot));
 
-  const generic = await call(client, "figma_call_tool", { tool: "get_variable_defs", arguments: { nodeId: "9:10" } });
+  const generic = await call(client, "figma", { action: "call", tool: "get_variable_defs", arguments: { nodeId: "9:10" } });
   check("generic bridge forwards current upstream tools", /#FFFFFF/.test(generic.content?.[0]?.text || ""), JSON.stringify(generic));
 
   check("mock received normalized node id", mock.calls.some((entry) => entry.tool === "get_design_context" && entry.args.nodeId === "12305:144779"), JSON.stringify(mock.calls));
@@ -258,10 +266,10 @@ try {
 
   lca = await startLca(path.join(base, "strict-workspace"), mock.endpoint, "strict");
   client = await connect(lca.port);
-  const strictRead = await call(client, "figma_get_metadata", { node_id: "11:12" });
+  const strictRead = await call(client, "figma", { action: "metadata", node_id: "11:12" });
   check("strict policy allows dedicated read-only Figma wrappers", /11:12/.test(strictRead.content?.[0]?.text || ""), JSON.stringify(strictRead));
-  const strictGeneric = await callRaw(client, "figma_call_tool", { tool: "get_metadata", arguments: { nodeId: "11:12" } });
-  check("strict policy blocks generic Figma passthrough", strictGeneric.isError === true && /policy=strict/.test(strictGeneric.content?.[0]?.text || ""), JSON.stringify(strictGeneric));
+  const strictGeneric = await callRaw(client, "figma", { action: "call", tool: "future_write_tool", arguments: { nodeId: "11:12" } });
+  check("strict policy blocks unknown or mutating aggregate passthrough", strictGeneric.isError === true && /policy=strict/.test(strictGeneric.content?.[0]?.text || ""), JSON.stringify(strictGeneric));
 
   await client.close();
   client = null;
@@ -270,9 +278,9 @@ try {
 
   lca = await startLca(path.join(base, "balanced-workspace"), mock.endpoint, "balanced");
   client = await connect(lca.port);
-  const balancedRead = await call(client, "figma_call_tool", { tool: "get_variable_defs", arguments: { nodeId: "13:14" } });
+  const balancedRead = await call(client, "figma", { action: "call", tool: "get_variable_defs", arguments: { nodeId: "13:14" } });
   check("balanced policy allows known read-only generic Figma tools", /#FFFFFF/.test(balancedRead.content?.[0]?.text || ""), JSON.stringify(balancedRead));
-  const balancedUnknown = await callRaw(client, "figma_call_tool", { tool: "future_write_tool", arguments: { nodeId: "13:14" } });
+  const balancedUnknown = await callRaw(client, "figma", { action: "call", tool: "future_write_tool", arguments: { nodeId: "13:14" } });
   check("balanced policy requires approval for unknown or mutating upstream tools", balancedUnknown.isError === true && /Approval required/.test(balancedUnknown.content?.[0]?.text || ""), JSON.stringify(balancedUnknown));
 } finally {
   if (client) await client.close().catch(() => {});

@@ -138,6 +138,25 @@ export async function figmaDesktopStatus(options = {}) {
   }
 }
 
+export function buildFigmaDesktopArguments({
+  url,
+  node_id,
+  client_languages,
+  client_frameworks,
+  force_code,
+  enable_base64_response,
+  arguments: extra = {}
+} = {}) {
+  const args = { ...(extra || {}) };
+  const reference = parseFigmaNodeReference(url || node_id || "");
+  if (reference.nodeId && args.nodeId === undefined) args.nodeId = reference.nodeId;
+  if (client_languages?.length && args.clientLanguages === undefined) args.clientLanguages = client_languages;
+  if (client_frameworks?.length && args.clientFrameworks === undefined) args.clientFrameworks = client_frameworks;
+  if (force_code !== undefined && args.forceCode === undefined) args.forceCode = force_code;
+  if (enable_base64_response !== undefined && args.enableBase64Response === undefined) args.enableBase64Response = enable_base64_response;
+  return args;
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const command = process.argv[2] || "status";
   const result = command === "tools" ? await listFigmaDesktopTools() : await figmaDesktopStatus();

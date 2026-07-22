@@ -1,24 +1,38 @@
-# Review Changes
+# LCA Control Center and Review Changes
 
-Local Coding Agent groups dedicated workspace mutations into a backend-managed **task change
-set**. One user request produces one Review Changes card even when the agent needs several
-`apply_patch` calls. Each low-level mutation remains an operation record inside the task so
-Undo, Reapply, conflict checks, and rename handling stay exact.
+Local Coding Agent runtime groups `apply_patch` mutations into a backend-managed **task change
+set**, partitioned by task and workspace. One task can produce workspace-specific Review
+Changes cards even when the agent needs several patch calls or edits multiple registered
+repositories. Each low-level mutation remains an operation record inside its workspace journal
+for review and conflict checks. History mutation is deliberately limited to single-workspace
+tasks; a cross-workspace task cannot be undone journal-by-journal as if that were one transaction.
 
-A task starts on the first mutation. `task_plan` or `apply_patch.task_title` can name it.
-`session_report` closes it when the work is complete; the next mutation then starts a new task.
+A task is opened with `task_open` and closed with `task_close`. It has one primary workspace and
+at most eight attached workspaces. Attach/detach
+is allowed only before the first mutation; the workspace set is then frozen. Reconnecting uses
+the returned `task_token`, while normal stateful MCP requests reuse the session binding.
+
+The MCP contract still contains `task_plan`, but the VS Code extension neither creates, edits nor
+renders it. The Control Center reports only observable runtime state; it never exposes prompts,
+model thinking, or a fabricated completion percentage.
 
 ## Tracked operations
 
 Operation records inside the active task are created for:
 
-- `apply_patch` for create/update/delete/rename operations
-- `make_dir` for an intentionally empty directory
+- `apply_patch` for `create`, `update`, `delete`, `rename`, and `mkdir`; create/rename can also create missing parent directories
 
-`run_command` and `run_commands` create privacy-preserving activity records. Activity
+An explicit `mkdir` is tracked, but an empty directory is metadata-only in Review Changes and is
+not advertised as automatically undoable after the patch transaction has committed.
+
+`run_command`, `run_commands`, `process`, and Git create privacy-preserving activity records. Activity
 records contain counts, relative working directory, exit status, timeout status, and a
 generic message. They never contain command text, stdout, stderr, environment variables,
 or secrets.
+
+Shell/Git mutations are not atomic or automatically undoable. If their before/after manifest
+shows a tracked source change, the workspace becomes `unmanaged_changes`; `verify_changes`
+returns `INCOMPLETE` until the diff is reviewed and explicitly adopted.
 
 ## Mutation pipeline
 
@@ -26,25 +40,39 @@ A dedicated mutation follows this pipeline:
 
 ```text
 capture before
-→ verify the last read version
+→ verify path and expected_version for every operation
+→ acquire task/workspace transaction locks
+→ stage changes and persist commit intent
 → perform the mutation
 → capture after
 → write an atomic operation record
-→ append the operation to the active task change set
+→ append the operation to the routed task/workspace change set
 → update the known version
-→ return the normal tool result with change_id and task_id
+→ return change_id, task_id, transaction_id, workspace_id and relative path
 ```
 
 Operation and task-index writes are serialized in-process so concurrent mutations cannot
 overwrite each other's entries. JSON files are written to a temporary file and renamed
 atomically.
 
+Cross-workspace `apply_patch` uses a durable transaction coordinator. Locks are acquired in
+workspace-ID order with fencing tokens, staged operations and commit intent are persisted, and
+recovery uses that manifest to finish or roll back when it can prove a safe action. If it cannot,
+the transaction is left `in_doubt` and affected workspaces reject new mutations rather than
+reporting a false success. This is a recovery protocol, not a promise that arbitrary external
+filesystem failures can never require intervention.
+
+Filesystem commit and the per-workspace Review Changes journal are separate durable layers.
+If the filesystem transaction commits but a journal write fails, the response reports
+`journal_complete=false`/`journal_errors` and marks the workspace unmanaged; it must not claim
+that the unjournaled change is safely undoable.
+
 ## Storage
 
 Change history is scoped by workspace ID:
 
 ```text
-<AGENT_DATA_DIR>/workspaces/<workspace-id>/changes/
+<AGENT_DATA_DIR>/runtime/workspaces/<workspace-id>/changes/
 ├── index.json
 ├── records/       # individual mutation operations
 ├── tasks/         # one task change set per user request
@@ -153,43 +181,73 @@ Rename groups remain atomic.
 
 ## HTTP API
 
-The Changes API uses the same bearer authentication and browser-origin policy as `/mcp`.
+The Changes API is a trusted-local-companion API, not a public health surface. In production it
+requires a loopback request plus the supervisor's `X-LCA-Instance-Nonce`; the MCP tunnel bearer
+does not grant companion authority. The VS Code extension obtains the nonce through the local CLI;
+do not hard-code or commit it. Runtime callers scope reads and mutations by workspace/task. Mutation
+endpoints fail closed when task context is missing or does not own the requested record.
 
 ```text
-GET    /changes?limit=50
-GET    /changes/:id
-GET    /changes/:id/diff
-GET    /changes/:id/diff?path=src/file.js
-GET    /changes/:id/content?path=src/file.js&side=before
-GET    /changes/:id/content?path=src/file.js&side=after
-POST   /changes/:id/undo
-POST   /changes/:id/reapply
-POST   /changes/undo-all
-DELETE /changes
+GET    /changes?workspace_id=<id>&task_id=<id>&limit=50
+GET    /changes?workspace_id=all&task_id=<id>&limit=50
+GET    /changes/events?workspace_id=<id>&task_id=<id>&since_revision=<n>
+GET    /changes/:id?workspace_id=<id>&task_id=<id>
+GET    /changes/:id/diff?workspace_id=<id>&task_id=<id>
+GET    /changes/:id/diff?workspace_id=<id>&task_id=<id>&path=src/file.js
+GET    /changes/:id/content?workspace_id=<id>&task_id=<id>&path=src/file.js&side=before
+GET    /changes/:id/content?workspace_id=<id>&task_id=<id>&path=src/file.js&side=after
+POST   /changes/:id/undo?workspace_id=<id>&task_id=<id>
+POST   /changes/:id/reapply?workspace_id=<id>&task_id=<id>
+POST   /changes/undo-all?workspace_id=<id>&task_id=<id>
+DELETE /changes?workspace_id=<id>&task_id=<id>
 ```
 
-The list returns task-level records (`task_...`) for new work and remains backward compatible
-with legacy operation records (`change_...`). Limits are clamped to 1–200. `DELETE /changes`
-removes task records, operation records, snapshots, and activities without changing workspace
-files.
+The list returns task-level records (`task_...`) for runtime work and remains read-compatible with
+legacy operation records (`change_...`). Every bucket identifies its `workspace_id` and
+canonical root; file locations remain relative. Limits are clamped to 1–200. `DELETE /changes`
+removes only records in its authorized task/workspace scope and never changes workspace files.
+
+`/changes/events` is an SSE revision stream. Clients send their last revision and reload only
+when a newer task/workspace revision is available; polling is a compatibility fallback.
 
 Undo All processes changes newest to oldest and preflights a projected filesystem state
 before applying anything.
 
-## VS Code extension
+For a task attached to more than one workspace, the mutating routes—Undo, Reapply, Undo All,
+and Clear—return HTTP 409 with `CROSS_WORKSPACE_HISTORY_ATOMICITY_REQUIRED`. The response does
+not expose workspace roots. Reads may still be aggregated.
+Use a compensating cross-workspace `apply_patch`, or perform history mutation from a separate
+single-workspace task; selecting one journal from a multi-workspace task does not bypass this
+restriction.
 
-The extension in `vscode-extension/` exposes **Review Changes** in the Activity Bar. It:
+## VS Code Control Center
 
-- verifies `GET /healthz` against every open VS Code workspace folder;
-- lists one aggregated card per task from `GET /changes`;
+The extension in `vscode-extension/` exposes **Control Center** in the Activity Bar with four tabs:
+
+- **Overview**: supervisor/server/tunnel/session state and Start/Stop/Pause controls;
+- **Workspaces**: the complete registry, global default, availability and Archive/Restore/Permanent Remove;
+- **Tasks**: real tool start/finish/failure/interruption timers, verification, process and change/file counts;
+- **Changes**: task/workspace-scoped review, snapshot diff and safe replay.
+
+It also:
+
+- uses public `GET /healthz` only for liveness, then authenticates `GET /healthz/details` with the supervisor instance nonce to verify canonical workspace identity;
+- lists task/workspace-scoped cards with workspace badges and task/workspace filters;
 - opens before/after snapshots in the native VS Code diff editor;
 - supports task-level Undo/Reapply, per-file Partial Undo/Reapply, Undo All, and Clear History;
-- stores an optional bearer token with VS Code SecretStorage;
+- refreshes the local instance nonce through the explicit `lca status --json --include-instance-nonce` machine-readable flow;
 - disables filesystem mutations in untrusted workspaces;
-- polls only while the Review Changes view is visible.
+- consumes `/changes/events` revisions—including `workspace_id=all`—while visible, falls back to bounded polling if SSE is unavailable, and reconnects automatically to return to Live;
+- cancels stale requests so an older workspace/task response cannot overwrite a newer selection.
 
-Run `lca` inside the project before opening the view. Snapshot content is loaded from the
-change record only; the virtual diff provider cannot read arbitrary filesystem paths.
+Operational activity comes from the existing rotating runtime `audit.log`, with a seven-day/20,000-event UI bound. The reader handles rotation, partial lines and deduplication. Only invocation/tool/task/workspace IDs, phase, timestamps, duration, safe error code, verification enum and counts are projected; args, commands, output, prompt, token, thinking and error content never enter the webview.
+
+Archived workspaces stay visible in Workspaces/Tasks and their history remains readable, but replay is disabled until Restore. Permanent Remove uses a durable quarantine/intent transaction, leaves source files untouched, and cannot remove a workspace referenced by multi-workspace task history.
+
+Run `lca` inside each project you want to trust before opening the view. **Connect LCA to this
+workspace** registers/selects that folder for new tasks without restarting the shared
+server/tunnel. Snapshot content is loaded from the change record only; the virtual diff
+provider cannot read arbitrary filesystem paths.
 
 ## Change states
 

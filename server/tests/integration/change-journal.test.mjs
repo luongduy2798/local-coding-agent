@@ -1,12 +1,12 @@
 // Local Coding Agent Review Changes integration tests
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-import { readFile, readdir, writeFile, mkdir } from "node:fs/promises";
+import { chmod, readFile, readdir, stat, writeFile, mkdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { createIsolatedTestRoot } from "../helpers/test-guard.mjs";
+import { createIsolatedTestRoot, safeRemove } from "../helpers/test-guard.mjs";
 import { startTestServer, stopTestProcess } from "../helpers/test-runtime.mjs";
 
 let pass = 0;
@@ -36,6 +36,57 @@ async function callJson(client, name, args = {}) {
   return response.data;
 }
 
+function createOperation(args) {
+  return {
+    op: "create",
+    path: args.path,
+    content: args.content,
+    ...(args.expected_version ? { expected_version: args.expected_version } : {})
+  };
+}
+
+function updateOperation(args) {
+  return {
+    op: "update",
+    path: args.path,
+    edits: [{ old_text: args.old_text, new_text: args.new_text }],
+    ...(args.expected_version ? { expected_version: args.expected_version } : {})
+  };
+}
+
+async function createTrackedFile(client, args) {
+  return callJson(client, "apply_patch", { operations: [createOperation(args)] });
+}
+
+async function createTrackedFileRaw(client, args) {
+  return callRaw(client, "apply_patch", { operations: [createOperation(args)] });
+}
+
+async function updateTrackedFile(client, args) {
+  return callJson(client, "apply_patch", { operations: [updateOperation(args)] });
+}
+
+async function updateTrackedFileRaw(client, args) {
+  return callRaw(client, "apply_patch", { operations: [updateOperation(args)] });
+}
+
+async function renameTrackedPath(client, args) {
+  return callJson(client, "apply_patch", {
+    operations: [{ op: "rename", path: args.from, rename_to: args.to }]
+  });
+}
+
+async function deleteTrackedPath(client, args) {
+  return callJson(client, "apply_patch", {
+    operations: [{
+      op: "delete",
+      path: args.path,
+      ...(args.recursive ? { recursive: true } : {}),
+      ...(args.expected_version ? { expected_version: args.expected_version } : {})
+    }]
+  });
+}
+
 async function api(port, method, pathname, body) {
   const response = await fetch(`http://127.0.0.1:${port}${pathname}`, {
     method,
@@ -61,9 +112,22 @@ const client = new Client({ name: "change-journal-test", version: "1.0.0" });
 await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${runtime.port}/mcp`)));
 
 try {
-  const created = await callJson(client, "write_file", { path: "create.txt", content: "created\n" });
-  check("write_file returns a change id", /^change_/.test(created.change_id || ""), JSON.stringify(created));
-  check("write_file creates the file", existsSync(path.join(workspace, "create.txt")));
+  const workspaceList = await callJson(client, "workspace_list", {});
+  await callJson(client, "task_open", {
+    title: "Review Changes integration",
+    primary_workspace_id: workspaceList.selected_workspace_id
+  });
+  const created = await createTrackedFile(client, { path: "create.txt", content: "created\n" });
+  check("apply_patch create returns a change id", /^change_/.test(created.change_id || ""), JSON.stringify(created));
+  check("apply_patch create writes the file", existsSync(path.join(workspace, "create.txt")));
+  const initialJournalPaths = await listTreePaths(context.dataDir);
+  const initialJournalText = await readTreeText(context.dataDir);
+  check(
+    "journal snapshots use compressed content-addressed blobs",
+    initialJournalPaths.some((entry) => /\/blobs\/[a-f0-9]{2}\/[a-f0-9]{64}\.br$/.test(entry))
+      && !initialJournalText.includes(Buffer.from("created\n").toString("base64")),
+    JSON.stringify(initialJournalPaths)
+  );
   const createRecord = await api(runtime.port, "GET", `/changes/${created.change_id}`);
   check("create change record is available", createRecord.status === 200 && createRecord.data.change.files[0]?.operation === "created", JSON.stringify(createRecord.data));
   await api(runtime.port, "POST", `/changes/${created.change_id}/undo`, {});
@@ -71,37 +135,53 @@ try {
   await api(runtime.port, "POST", `/changes/${created.change_id}/reapply`, {});
   check("reapply recreates a newly created file", existsSync(path.join(workspace, "create.txt")));
 
-  await callJson(client, "write_file", { path: "replace.txt", content: "alpha\n" });
+  await writeFile(path.join(workspace, "executable.sh"), "#!/bin/sh\necho before\n", "utf8");
+  await chmod(path.join(workspace, "executable.sh"), 0o755);
+  await callJson(client, "read_file", { path: "executable.sh" });
+  const executableChange = await updateTrackedFile(client, {
+    path: "executable.sh",
+    old_text: "before",
+    new_text: "after"
+  });
+  await api(runtime.port, "POST", `/changes/${executableChange.change_id}/undo`, {});
+  const restoredMode = (await stat(path.join(workspace, "executable.sh"))).mode & 0o777;
+  check(
+    "journal restore preserves executable file mode",
+    restoredMode === 0o755,
+    restoredMode.toString(8)
+  );
+
+  await createTrackedFile(client, { path: "replace.txt", content: "alpha\n" });
   const firstRead = await callJson(client, "read_file", { path: "replace.txt" });
   check("read_file returns a SHA-256 version", /^[a-f0-9]{64}$/.test(firstRead.version || ""), JSON.stringify(firstRead));
-  const replaced = await callJson(client, "replace_in_file", { path: "replace.txt", old_text: "alpha", new_text: "beta" });
-  check("replace_in_file is tracked", /^change_/.test(replaced.change_id || ""), JSON.stringify(replaced));
-  const secondReplace = await callJson(client, "replace_in_file", { path: "replace.txt", old_text: "beta", new_text: "gamma" });
+  const replaced = await updateTrackedFile(client, { path: "replace.txt", old_text: "alpha", new_text: "beta" });
+  check("apply_patch update is tracked", /^change_/.test(replaced.change_id || ""), JSON.stringify(replaced));
+  const secondReplace = await updateTrackedFile(client, { path: "replace.txt", old_text: "beta", new_text: "gamma" });
   check("successful mutation updates known version", /^change_/.test(secondReplace.change_id || ""));
 
   const beforeFailedMutation = await api(runtime.port, "GET", "/changes?limit=200");
-  const failedMutation = await callRaw(client, "replace_in_file", { path: "replace.txt", old_text: "not-present", new_text: "never-written" });
+  const failedMutation = await updateTrackedFileRaw(client, { path: "replace.txt", old_text: "not-present", new_text: "never-written" });
   const afterFailedMutation = await api(runtime.port, "GET", "/changes?limit=200");
   check("failed mutation does not create a successful change record", failedMutation.isError && beforeFailedMutation.data.count === afterFailedMutation.data.count && /gamma/.test(await readFile(path.join(workspace, "replace.txt"), "utf8")), failedMutation.text);
 
   await writeFile(path.join(workspace, "replace.txt"), "external\n", "utf8");
-  const stale = await callRaw(client, "replace_in_file", { path: "replace.txt", old_text: "gamma", new_text: "delta" });
+  const stale = await updateTrackedFileRaw(client, { path: "replace.txt", old_text: "gamma", new_text: "delta" });
   check("external edit triggers STALE_FILE", stale.isError && stale.data?.code === "STALE_FILE", stale.text);
   check("stale mutation does not overwrite external content", (await readFile(path.join(workspace, "replace.txt"), "utf8")) === "external\n");
 
   await callJson(client, "read_file", { path: "replace.txt" });
-  const externalChange = await callJson(client, "replace_in_file", { path: "replace.txt", old_text: "external", new_text: "tracked" });
+  const externalChange = await updateTrackedFile(client, { path: "replace.txt", old_text: "external", new_text: "tracked" });
   const undoExternal = await api(runtime.port, "POST", `/changes/${externalChange.change_id}/undo`, {});
   check("HTTP undo succeeds", undoExternal.status === 200 && /external/.test(await readFile(path.join(workspace, "replace.txt"), "utf8")), JSON.stringify(undoExternal.data));
-  const staleAfterUndo = await callRaw(client, "replace_in_file", { path: "replace.txt", old_text: "external", new_text: "again" });
+  const staleAfterUndo = await updateTrackedFileRaw(client, { path: "replace.txt", old_text: "external", new_text: "again" });
   check("HTTP undo deliberately makes the cached read version stale", staleAfterUndo.isError && staleAfterUndo.data?.code === "STALE_FILE", staleAfterUndo.text);
   await callJson(client, "read_file", { path: "replace.txt" });
   const reapplyExternal = await api(runtime.port, "POST", `/changes/${externalChange.change_id}/reapply`, {});
   check("HTTP reapply succeeds", reapplyExternal.status === 200 && /tracked/.test(await readFile(path.join(workspace, "replace.txt"), "utf8")), JSON.stringify(reapplyExternal.data));
 
-  await callJson(client, "write_file", { path: "rename-source.txt", content: "rename\n" });
-  const moved = await callJson(client, "move_path", { from: "rename-source.txt", to: "rename-target.txt" });
-  check("move_path creates one atomic change", /^change_/.test(moved.change_id || "") && !existsSync(path.join(workspace, "rename-source.txt")) && existsSync(path.join(workspace, "rename-target.txt")));
+  await createTrackedFile(client, { path: "rename-source.txt", content: "rename\n" });
+  const moved = await renameTrackedPath(client, { from: "rename-source.txt", to: "rename-target.txt" });
+  check("apply_patch rename creates one atomic change", /^change_/.test(moved.change_id || "") && !existsSync(path.join(workspace, "rename-source.txt")) && existsSync(path.join(workspace, "rename-target.txt")));
   const undoMove = await api(runtime.port, "POST", `/changes/${moved.change_id}/undo`, { paths: ["rename-source.txt"] });
   check("partial rename undo expands to the atomic group", undoMove.status === 200 && existsSync(path.join(workspace, "rename-source.txt")) && !existsSync(path.join(workspace, "rename-target.txt")), JSON.stringify(undoMove.data));
   await api(runtime.port, "POST", `/changes/${moved.change_id}/reapply`, {});
@@ -109,7 +189,7 @@ try {
 
   await mkdir(path.join(workspace, "rename-directory", "nested"), { recursive: true });
   await writeFile(path.join(workspace, "rename-directory", "nested", "file.txt"), "directory rename\n", "utf8");
-  const movedDirectory = await callJson(client, "move_path", { from: "rename-directory", to: "renamed-directory" });
+  const movedDirectory = await renameTrackedPath(client, { from: "rename-directory", to: "renamed-directory" });
   const movedDirectoryRecord = await api(runtime.port, "GET", `/changes/${movedDirectory.change_id}`);
   check("directory rename is atomic and undoable without tree snapshots", movedDirectoryRecord.data.change.files.every((file) => file.undoable === true) && existsSync(path.join(workspace, "renamed-directory", "nested", "file.txt")), JSON.stringify(movedDirectoryRecord.data));
   await api(runtime.port, "POST", `/changes/${movedDirectory.change_id}/undo`, {});
@@ -117,8 +197,8 @@ try {
   await api(runtime.port, "POST", `/changes/${movedDirectory.change_id}/reapply`, {});
   check("directory rename reapply restores the destination tree", !existsSync(path.join(workspace, "rename-directory")) && existsSync(path.join(workspace, "renamed-directory", "nested", "file.txt")));
 
-  await callJson(client, "write_file", { path: "multi-a.txt", content: "a1\n" });
-  await callJson(client, "write_file", { path: "multi-b.txt", content: "b1\n" });
+  await createTrackedFile(client, { path: "multi-a.txt", content: "a1\n" });
+  await createTrackedFile(client, { path: "multi-b.txt", content: "b1\n" });
   const multi = await callJson(client, "apply_patch", {
     operations: [
       { op: "update", path: "multi-a.txt", edits: [{ old_text: "a1", new_text: "a2" }] },
@@ -129,8 +209,8 @@ try {
   check("partial undo changes record status", partial.status === 200 && partial.data.change.status === "partially_undone", JSON.stringify(partial.data));
   check("partial undo restores only the selected path", /a1/.test(await readFile(path.join(workspace, "multi-a.txt"), "utf8")) && /b2/.test(await readFile(path.join(workspace, "multi-b.txt"), "utf8")));
 
-  await callJson(client, "write_file", { path: "prevalidate-a.txt", content: "a1\n" });
-  await callJson(client, "write_file", { path: "prevalidate-b.txt", content: "b1\n" });
+  await createTrackedFile(client, { path: "prevalidate-a.txt", content: "a1\n" });
+  await createTrackedFile(client, { path: "prevalidate-b.txt", content: "b1\n" });
   const beforeInvalidPatch = await api(runtime.port, "GET", "/changes?limit=200");
   const invalidPatch = await callRaw(client, "apply_patch", {
     operations: [
@@ -141,29 +221,36 @@ try {
   const afterInvalidPatch = await api(runtime.port, "GET", "/changes?limit=200");
   check("multi-file patch prevalidation prevents partial mutation", invalidPatch.isError && beforeInvalidPatch.data.count === afterInvalidPatch.data.count && /a1/.test(await readFile(path.join(workspace, "prevalidate-a.txt"), "utf8")) && /b1/.test(await readFile(path.join(workspace, "prevalidate-b.txt"), "utf8")), invalidPatch.text);
 
-  const conflictChange = await callJson(client, "write_file", { path: "conflict.txt", content: "after\n" });
+  const conflictChange = await createTrackedFile(client, { path: "conflict.txt", content: "after\n" });
   await writeFile(path.join(workspace, "conflict.txt"), "outside\n", "utf8");
   const conflict = await api(runtime.port, "POST", `/changes/${conflictChange.change_id}/undo`, {});
   check("undo conflict returns 409 without changing filesystem", conflict.status === 409 && conflict.data.filesystemChanged === false && /outside/.test(await readFile(path.join(workspace, "conflict.txt"), "utf8")), JSON.stringify(conflict.data));
 
-  await callJson(client, "write_file", { path: "deleted-version.txt", content: "read then delete\n" });
-  await callJson(client, "read_file", { path: "deleted-version.txt" });
-  await callJson(client, "delete_path", { path: "deleted-version.txt" });
+  await createTrackedFile(client, { path: "deleted-version.txt", content: "read then delete\n" });
+  const deletedVersionRead = await callJson(client, "read_file", { path: "deleted-version.txt" });
+  await deleteTrackedPath(client, {
+    path: "deleted-version.txt",
+    expected_version: deletedVersionRead.version
+  });
   await writeFile(path.join(workspace, "deleted-version.txt"), "recreated outside\n", "utf8");
-  const staleRecreated = await callRaw(client, "write_file", { path: "deleted-version.txt", content: "must not overwrite\n" });
+  const staleRecreated = await createTrackedFileRaw(client, {
+    path: "deleted-version.txt",
+    content: "must not overwrite\n",
+    expected_version: "missing"
+  });
   check("known missing version detects a file recreated after delete", staleRecreated.isError && staleRecreated.data?.code === "STALE_FILE" && /recreated outside/.test(await readFile(path.join(workspace, "deleted-version.txt"), "utf8")), staleRecreated.text);
 
   const largeContent = `prefix-${"x".repeat(512)}-suffix`;
-  const large = await callJson(client, "write_file", { path: "large.txt", content: largeContent });
+  const large = await createTrackedFile(client, { path: "large.txt", content: largeContent });
   const largeRecord = await api(runtime.port, "GET", `/changes/${large.change_id}`);
   check("large file is metadata-only and not undoable", largeRecord.data.change.files[0]?.after?.reason === "snapshot_limit" && largeRecord.data.change.files[0]?.undoable === false, JSON.stringify(largeRecord.data));
-  const largeReplace = await callJson(client, "replace_in_file", { path: "large.txt", old_text: "prefix", new_text: "updated" });
+  const largeReplace = await updateTrackedFile(client, { path: "large.txt", old_text: "prefix", new_text: "updated" });
   const largeReplaceRecord = await api(runtime.port, "GET", `/changes/${largeReplace.change_id}`);
   check("large text remains editable without pretending it is undoable", /updated-/.test(await readFile(path.join(workspace, "large.txt"), "utf8")) && largeReplaceRecord.data.change.files[0]?.undoable === false, JSON.stringify(largeReplaceRecord.data));
 
   await mkdir(path.join(workspace, "directory", "nested"), { recursive: true });
   await writeFile(path.join(workspace, "directory", "nested", "file.txt"), "dir\n", "utf8");
-  const deletedDirectory = await callJson(client, "delete_path", { path: "directory", recursive: true });
+  const deletedDirectory = await deleteTrackedPath(client, { path: "directory", recursive: true });
   const directoryRecord = await api(runtime.port, "GET", `/changes/${deletedDirectory.change_id}`);
   check("recursive directory delete is metadata-only", directoryRecord.data.change.files[0]?.before?.type === "directory" && directoryRecord.data.change.files[0]?.undoable === false, JSON.stringify(directoryRecord.data));
 
@@ -174,9 +261,9 @@ try {
   check("read_many returns a version for every successful file", many.files.every((file) => /^[a-f0-9]{64}$/.test(file.version || "")), JSON.stringify(many.files));
 
   const concurrent = await Promise.all([
-    callJson(client, "write_file", { path: "concurrent-a.txt", content: "a\n" }),
-    callJson(client, "write_file", { path: "concurrent-b.txt", content: "b\n" }),
-    callJson(client, "write_file", { path: "concurrent-c.txt", content: "c\n" })
+    createTrackedFile(client, { path: "concurrent-a.txt", content: "a\n" }),
+    createTrackedFile(client, { path: "concurrent-b.txt", content: "b\n" }),
+    createTrackedFile(client, { path: "concurrent-c.txt", content: "c\n" })
   ]);
   const listed = await api(runtime.port, "GET", "/changes?limit=200");
   const concurrentTask = listed.data.changes.find((change) => change.id === concurrent[0].task_id);
@@ -191,12 +278,12 @@ try {
   check("unknown change id returns 404", unknown.status === 404 && unknown.data.code === "change_not_found", JSON.stringify(unknown.data));
 
   await writeFile(path.join(workspace, "binary.bin"), Buffer.from([0, 1, 2, 3, 255]));
-  const binaryDelete = await callJson(client, "delete_path", { path: "binary.bin" });
+  const binaryDelete = await deleteTrackedPath(client, { path: "binary.bin" });
   const binaryRecord = await api(runtime.port, "GET", `/changes/${binaryDelete.change_id}`);
   check("binary files are tracked as metadata-only", binaryRecord.data.change.files[0]?.before?.reason === "binary_file" && binaryRecord.data.change.files[0]?.undoable === false, JSON.stringify(binaryRecord.data));
 
-  await callJson(client, "write_file", { path: "reapply-conflict.txt", content: "before\n" });
-  const reapplyChange = await callJson(client, "replace_in_file", { path: "reapply-conflict.txt", old_text: "before", new_text: "after" });
+  await createTrackedFile(client, { path: "reapply-conflict.txt", content: "before\n" });
+  const reapplyChange = await updateTrackedFile(client, { path: "reapply-conflict.txt", old_text: "before", new_text: "after" });
   await api(runtime.port, "POST", `/changes/${reapplyChange.change_id}/undo`, {});
   await writeFile(path.join(workspace, "reapply-conflict.txt"), "outside\n", "utf8");
   const reapplyConflict = await api(runtime.port, "POST", `/changes/${reapplyChange.change_id}/reapply`, {});
@@ -208,16 +295,16 @@ try {
   check("command activity history omits command text, output and secrets", !journalText.includes(sentinel), "sentinel appeared in change-history data");
 
   await api(runtime.port, "DELETE", "/changes");
-  await callJson(client, "write_file", { path: "undo-all-conflict-a.txt", content: "a\n" });
-  await callJson(client, "write_file", { path: "undo-all-conflict-b.txt", content: "b\n" });
+  await createTrackedFile(client, { path: "undo-all-conflict-a.txt", content: "a\n" });
+  await createTrackedFile(client, { path: "undo-all-conflict-b.txt", content: "b\n" });
   await writeFile(path.join(workspace, "undo-all-conflict-a.txt"), "outside\n", "utf8");
   const undoAllConflict = await api(runtime.port, "POST", "/changes/undo-all", {});
   check("undo-all conflict performs no partial filesystem change", undoAllConflict.status === 409 && /outside/.test(await readFile(path.join(workspace, "undo-all-conflict-a.txt"), "utf8")) && existsSync(path.join(workspace, "undo-all-conflict-b.txt")), JSON.stringify(undoAllConflict.data));
 
   await api(runtime.port, "DELETE", "/changes");
-  await callJson(client, "write_file", { path: "undo-all-a.txt", content: "one\n" });
-  await callJson(client, "replace_in_file", { path: "undo-all-a.txt", old_text: "one", new_text: "two" });
-  await callJson(client, "write_file", { path: "undo-all-b.txt", content: "b\n" });
+  await createTrackedFile(client, { path: "undo-all-a.txt", content: "one\n" });
+  await updateTrackedFile(client, { path: "undo-all-a.txt", old_text: "one", new_text: "two" });
+  await createTrackedFile(client, { path: "undo-all-b.txt", content: "b\n" });
   const undoAll = await api(runtime.port, "POST", "/changes/undo-all", {});
   check("undo-all preflights projected state and undoes newest to oldest", undoAll.status === 200 && !existsSync(path.join(workspace, "undo-all-a.txt")) && !existsSync(path.join(workspace, "undo-all-b.txt")), JSON.stringify(undoAll.data));
 
@@ -226,7 +313,14 @@ try {
   const afterClear = await api(runtime.port, "GET", "/changes?limit=200");
   check("clear deletes change records but preserves workspace", clear.status === 200 && clear.data.deleted === beforeClear.data.count && afterClear.data.count === 0 && existsSync(path.join(workspace, "multi-b.txt")), JSON.stringify({ clear: clear.data, after: afterClear.data }));
 
+  await callJson(client, "task_close", {
+    task_token: multi.task_token,
+    status: "incomplete"
+  });
   await writeFile(path.join(workspace, "task-source.txt"), "original\n", "utf8");
+  const openedRenameTask = await callJson(client, "task_open", {
+    title: "Rename and refine the task file"
+  });
   await callJson(client, "task_plan", {
     goal: "Rename and refine the task file",
     steps: ["Rename the file", "Update its content"]
@@ -252,12 +346,15 @@ try {
   const taskAfterContent = await api(runtime.port, "GET", `/changes/${taskRename.task_id}/content?path=task-target.txt&side=after`);
   check("task aggregate exposes the final content after all patches", taskAfterContent.status === 200 && taskAfterContent.data.content === "final\n", JSON.stringify(taskAfterContent.data));
 
-  const taskReport = await callJson(client, "session_report", { include_review: false, include_change_summary: false });
+  const taskReport = await callJson(client, "task_close", {
+    task_token: openedRenameTask.task.task_token,
+    status: "incomplete"
+  });
   const completedTaskList = await api(runtime.port, "GET", "/changes?limit=10");
   const completedTask = completedTaskList.data.changes[0];
   check(
-    "session_report closes the active task change set",
-    taskReport.review_changes_task?.id === taskRename.task_id
+    "task_close closes the active task change set",
+    taskReport.review_changes_tasks?.[0]?.task?.id === taskRename.task_id
       && completedTask.taskStatus === "completed"
       && completedTask.operationCount === 2,
     JSON.stringify({ taskReport, completedTask })
@@ -298,13 +395,17 @@ try {
     task_title: "First explicit task",
     operations: [{ op: "create", path: "first-explicit-task.txt", content: "first\n" }]
   });
+  await callJson(client, "task_close", {
+    task_token: titledFirst.task_token,
+    status: "incomplete"
+  });
   const titledSecond = await callJson(client, "apply_patch", {
     task_title: "Second explicit task",
     operations: [{ op: "create", path: "second-explicit-task.txt", content: "second\n" }]
   });
   const titledTasks = await api(runtime.port, "GET", "/changes?limit=10");
   check(
-    "a different task_title closes the previous task before the new mutation",
+    "a closed task is followed by a separately titled task",
     titledFirst.task_id !== titledSecond.task_id
       && titledTasks.data.changes[0]?.id === titledSecond.task_id
       && titledTasks.data.changes[0]?.title === "Second explicit task"
@@ -316,32 +417,43 @@ try {
   );
   await api(runtime.port, "DELETE", "/changes");
 
-  const authWorkspace = path.join(context.repoDir, "auth-workspace");
+  const authWorkspace = path.join(context.fixtureDir, "auth-workspace");
   const authDataDir = path.join(context.dataDir, "auth-runtime");
   await mkdir(authWorkspace, { recursive: true });
   const authRuntime = await startTestServer({
     workspace: authWorkspace,
     dataDir: authDataDir,
     runId: context.runId,
-    env: { MCP_AUTH_TOKEN: "journal-test-token" }
+    env: {
+      MCP_AUTH_TOKEN: "journal-test-token",
+      LCA_TEST_RUNTIME_DIAGNOSTICS: "0"
+    }
   });
   try {
     const denied = await fetch(`http://127.0.0.1:${authRuntime.port}/changes`);
-    const allowed = await fetch(`http://127.0.0.1:${authRuntime.port}/changes`, {
+    const bearerOnly = await fetch(`http://127.0.0.1:${authRuntime.port}/changes`, {
       headers: { authorization: "Bearer journal-test-token" }
     });
+    const allowed = await fetch(`http://127.0.0.1:${authRuntime.port}/changes`, {
+      headers: { "x-lca-instance-nonce": context.runId }
+    });
     const allowedData = await allowed.json();
-    check("Changes API uses the same bearer authentication and workspace isolation", denied.status === 401 && allowed.status === 200 && allowedData.count === 0, JSON.stringify({ denied: denied.status, allowed: allowed.status, allowedData }));
+    check(
+      "Changes API requires the local instance nonce and rejects tunnel bearer authority",
+      denied.status === 401 && bearerOnly.status === 401 && allowed.status === 200 && allowedData.count === 0,
+      JSON.stringify({ denied: denied.status, bearerOnly: bearerOnly.status, allowed: allowed.status, allowedData })
+    );
   } finally {
     await stopTestProcess(authRuntime.child);
   }
 } finally {
   await client.close().catch(() => {});
   await stopTestProcess(runtime.child);
+  await safeRemove(context.fixtureDir, context, { recursive: true, force: true });
+  await safeRemove(context.dataDir, context, { recursive: true, force: true });
 }
 
 console.log(`\n==== REVIEW CHANGES: ${pass} passed, ${fail} failed ====`);
-console.log(`Fixture retained for inspection: ${context.testRoot}`);
 process.exit(fail === 0 ? 0 : 1);
 
 async function readTreeText(root) {
@@ -353,4 +465,15 @@ async function readTreeText(root) {
     else chunks.push(await readFile(fullPath, "utf8").catch(() => ""));
   }
   return chunks.join("\n");
+}
+
+async function listTreePaths(root, base = root) {
+  const paths = [];
+  const entries = await readdir(root, { withFileTypes: true }).catch(() => []);
+  for (const entry of entries) {
+    const fullPath = path.join(root, entry.name);
+    if (entry.isDirectory()) paths.push(...await listTreePaths(fullPath, base));
+    else paths.push(`/${path.relative(base, fullPath).split(path.sep).join("/")}`);
+  }
+  return paths;
 }

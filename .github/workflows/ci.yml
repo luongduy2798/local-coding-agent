@@ -8,17 +8,18 @@ on:
 
 jobs:
   server:
-    name: Server (${{ matrix.os }})
+    name: Server (${{ matrix.os }}, Node ${{ matrix.node }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [windows-latest, macos-latest, ubuntu-latest]
+        node: ["22.13.0", "24"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: ${{ matrix.node }}
           cache: npm
           cache-dependency-path: server/package-lock.json
       - name: Install server dependencies
@@ -32,6 +33,8 @@ jobs:
           node --check src/change-journal.mjs
           node --check src/core/redaction.mjs
           node --check src/integrations/figma-desktop.mjs
+          node --check src/coding/semantic/typescript-adapter.mjs
+          node --check src/coding/semantic/artifacts.mjs
           node --check scripts/check-test-safety.mjs
           node --check tests/helpers/test-guard.mjs
           node --check tests/helpers/test-runtime.mjs
@@ -43,14 +46,18 @@ jobs:
           node --check tests/integration/pro.test.mjs
           node --check tests/integration/hardening.test.mjs
           node --check tests/integration/figma-desktop.test.mjs
+          node --check tests/unit/typescript-semantic-adapter.test.mjs
           node --check tests/security/runtime.test.mjs
           node --check tests/security/baseline.test.mjs
           node --check ../evals/run.mjs
           node --check ../scripts/local-coding-agent.mjs
           node --check ../scripts/local-coding-agent.test.mjs
+          node --check ../scripts/process-lifecycle.mjs
+          node --check ../scripts/local-coding-agent-supervisor.test.mjs
           node --check ../scripts/network-doctor.mjs
           node --test ../scripts/network-doctor.test.mjs
           node --test ../scripts/local-coding-agent.test.mjs
+          node --test ../scripts/local-coding-agent-supervisor.test.mjs
           node --check ../scripts/validate-skills.mjs
           node ../scripts/local-coding-agent.mjs --help
           node ../scripts/local-coding-agent.mjs setup --help
@@ -64,14 +71,23 @@ jobs:
       - name: Test safety gate
         run: npm run test:safety
         working-directory: server
+      - name: Architecture gate
+        run: npm run test:architecture
+        working-directory: server
       - name: Change Journal tests
         run: npm run test:changes
+        working-directory: server
+      - name: Runtime capability tests
+        run: npm run test:runtime
         working-directory: server
       - name: Agent tool tests
         run: npm run test:agent
         working-directory: server
       - name: Pro tests
         run: npm run test:pro
+        working-directory: server
+      - name: Performance regression tests
+        run: npm run test:performance
         working-directory: server
       - name: Hardening tests
         run: npm run test:hardening
@@ -85,14 +101,37 @@ jobs:
         env:
           LCA_REAL_REPO: ${{ github.workspace }}
 
-  eval:
-    name: Eval suite
+  vscode-extension:
+    name: VS Code extension
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22.13.0
+          cache: npm
+          cache-dependency-path: vscode-extension/package-lock.json
+      - run: npm ci
+        working-directory: vscode-extension
+      - run: npm run check
+        working-directory: vscode-extension
+      - run: npm test
+        working-directory: vscode-extension
+      - run: npm run build
+        working-directory: vscode-extension
+
+  eval:
+    name: Eval suite (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ["22.13.0", "24"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
           cache: npm
           cache-dependency-path: server/package-lock.json
       - run: npm ci

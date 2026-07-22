@@ -8,7 +8,7 @@ Local MCP server cho ChatGPT Web connector. `server/server.mjs` là compatibilit
 
 ## Prerequisites
 
-- Node.js >= 18 (`node -v`)
+- Node.js >= 22.13.0 (`node -v`)
 - npm
 - Git nếu muốn tự nhận git root
 - OpenAI Tunnel ID và Runtime API key nếu dùng ChatGPT Web tunnel
@@ -40,16 +40,23 @@ cd /path/to/repo
 lca
 ```
 
-Nếu server đang chạy workspace cũ, `lca` tự restart với workspace mới.
+V5 dùng một supervisor chung. `lca` đăng ký/chọn repo hiện tại cho **task mới**
+mà không restart server hoặc tunnel; task đang chạy không bị chuyển workspace.
 
 Lệnh thường dùng:
 
 ```bash
 lca stop
 lca status
-lca workspace
+lca workspace list
+lca workspace use /path/to/repo
+lca workspace archive /path/to/repo
+lca workspace restore /path/to/repo
+lca workspace remove /path/to/repo
 lca doctor
 ```
+
+`workspace remove` là permanent LCA-data purge, không phải alias của Archive. Nó yêu cầu runtime đã dừng và xác nhận đúng label; source repository không bị xóa.
 
 ## ChatGPT Web Connector
 

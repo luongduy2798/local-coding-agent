@@ -1,8 +1,8 @@
-// Local Coding Agent v4.1 hardening regression suite
+// Local Coding Agent runtime hardening regression suite
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import http from "node:http";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -12,6 +12,7 @@ import { createIsolatedTestRoot, safeRemove } from "../helpers/test-guard.mjs";
 
 const TEST_DIR = path.dirname(fileURLToPath(import.meta.url));
 const SERVER = path.resolve(TEST_DIR, "../..", "server.mjs");
+const CLI = path.resolve(TEST_DIR, "../../..", "scripts", "local-coding-agent.mjs");
 let pass = 0;
 let fail = 0;
 
@@ -36,6 +37,17 @@ async function waitFor(url) {
   throw new Error(`Server did not become ready: ${url}`);
 }
 
+function getFreePort() {
+  return new Promise((resolve, reject) => {
+    const probe = http.createServer();
+    probe.once("error", reject);
+    probe.listen(0, "127.0.0.1", () => {
+      const address = probe.address();
+      probe.close(() => resolve(address.port));
+    });
+  });
+}
+
 async function startServer(workspace, { port, policy = "strict", auth = "", approvalToken = "", maxBody = "1048576" }) {
   await mkdir(workspace, { recursive: true });
   const child = spawn(process.execPath, [SERVER], {
@@ -53,7 +65,7 @@ async function startServer(workspace, { port, policy = "strict", auth = "", appr
       AGENT_APPROVAL_TOKEN: approvalToken,
       AGENT_MAX_BODY_BYTES: maxBody,
       LCA_TEST_RUN_ID: testContext.runId,
-      LCA_TEST_EXPOSE_REDUNDANT_TOOLS: "1"
+      LCA_TEST_RUNTIME_DIAGNOSTICS: "1"
     },
     windowsHide: true,
     stdio: ["ignore", "pipe", "pipe"]
@@ -85,6 +97,29 @@ async function connect(port) {
 async function call(client, name, args = {}) {
   const result = await client.callTool({ name, arguments: args });
   return { isError: Boolean(result.isError), text: result.content?.[0]?.text || "" };
+}
+
+async function openRuntimeTask(client, title) {
+  const info = JSON.parse((await call(client, "lca_status")).text);
+  const opened = await call(client, "task_open", {
+    title,
+    primary_workspace_id: info.primary_workspace_id
+  });
+  if (opened.isError) throw new Error(`task_open failed: ${opened.text}`);
+  return JSON.parse(opened.text).task;
+}
+
+function decideApproval(action, id, cwd) {
+  return spawnSync(process.execPath, [CLI, "approval", action, id], {
+    cwd,
+    env: { ...process.env, AGENT_DATA_DIR: testContext.dataDir },
+    encoding: "utf8",
+    windowsHide: true
+  });
+}
+
+function callPayload(result) {
+  try { return JSON.parse(result.text || "{}"); } catch { return {}; }
 }
 
 async function changeApi(port, method, pathname, body) {
@@ -120,24 +155,31 @@ let server;
 try {
   // Strict policy + browser-origin + body limit + removed legacy UI routes.
   console.log("\n[phase] strict policy, origin, body limit, no legacy UI routes");
-  server = await startServer(path.join(base, "strict"), { port: 19001, policy: "strict", maxBody: "8192" });
-  const evil = await fetch("http://127.0.0.1:19001/mcp", {
+  const strictPort = await getFreePort();
+  server = await startServer(path.join(base, "strict"), { port: strictPort, policy: "strict", maxBody: "8192" });
+  const evil = await fetch(`http://127.0.0.1:${strictPort}/mcp`, {
     method: "OPTIONS",
     headers: { Origin: "https://evil.example", "Access-Control-Request-Method": "POST" }
   });
   check("browser Origin is denied by default", evil.status === 403, `status=${evil.status}`);
 
-  const client = await connect(19001);
+  const client = await connect(strictPort);
+  const strictTask = await openRuntimeTask(client, "Strict aggregate-policy hardening");
   check("strict policy blocks apply_patch create", (await call(client, "apply_patch", { operations: [{ op: "create", path: "blocked.txt", content: "x" }] })).isError);
   check("strict policy blocks run_command", (await call(client, "run_command", { command: "node --version" })).isError);
   check("strict policy blocks run_commands", (await call(client, "run_commands", { commands: [{ command: "node --version" }] })).isError);
-  await call(client, "workspace_info");
+  check("strict policy blocks aggregate process start", (await call(client, "process", { action: "start", command: "node --version", task_token: strictTask.task_token })).isError);
+  check("strict policy blocks aggregate skill creation", (await call(client, "skills", { action: "create", name: "blocked", description: "blocked", body: "blocked", task_token: strictTask.task_token })).isError);
+  check("strict policy blocks aggregate note writes", (await call(client, "notes", { action: "save", title: "blocked", body: "blocked", task_token: strictTask.task_token })).isError);
+  check("strict policy blocks verification command execution", (await call(client, "verify_changes", { task_token: strictTask.task_token })).isError);
+  check("strict policy still allows read-only task state", !(await call(client, "task_state", { task_token: strictTask.task_token })).isError);
+  await call(client, "lca_status");
   await client.close();
 
-  const metricsRoute = await fetch("http://127.0.0.1:19001/metrics");
-  const uiRoute = await fetch("http://127.0.0.1:19001/ui");
-  const companionRoute = await fetch("http://127.0.0.1:19001/companion");
-  const evilCompanion = await fetch("http://127.0.0.1:19001/companion/api/workspace_search", {
+  const metricsRoute = await fetch(`http://127.0.0.1:${strictPort}/metrics`);
+  const uiRoute = await fetch(`http://127.0.0.1:${strictPort}/ui`);
+  const companionRoute = await fetch(`http://127.0.0.1:${strictPort}/companion`);
+  const evilCompanion = await fetch(`http://127.0.0.1:${strictPort}/companion/api/workspace_search`, {
     method: "POST",
     headers: { Origin: "https://evil.example", "content-type": "application/json" },
     body: JSON.stringify({ query: "@" })
@@ -146,79 +188,97 @@ try {
   check("legacy UI ui route is gone", uiRoute.status === 404, `status=${uiRoute.status}`);
   check("companion standalone HTTP route is gone", companionRoute.status === 404, `status=${companionRoute.status}`);
   check("hostile browser Origin is rejected", evilCompanion.status === 403, `status=${evilCompanion.status}`);
-  check("chunked payload is size-limited", (await chunkedPost(19001, JSON.stringify({ data: "x".repeat(12000) }))) === 413);
+  check("chunked payload is size-limited", (await chunkedPost(strictPort, JSON.stringify({ data: "x".repeat(12000) }))) === 413);
   await stopServer(server);
   server = null;
 
   // Balanced policy approvals are decided through the local operator token.
   console.log("\n[phase] token-only one-time approvals");
   const balancedSecret = `LCA_BALANCED_APPROVAL_${Date.now()}`;
-  server = await startServer(path.join(base, "balanced"), { port: 19006, policy: "balanced", approvalToken: balancedSecret });
-  const balanced = await connect(19006);
-  await call(balanced, "write_file", { path: "victim.txt", content: "x" });
-  const victimDelete = { operations: [{ op: "delete", path: "victim.txt" }] };
-  const victimDeleteAction = 'apply_patch:delete:["victim.txt"]';
+  const balancedWorkspace = path.join(base, "balanced");
+  const balancedPort = await getFreePort();
+  server = await startServer(balancedWorkspace, { port: balancedPort, policy: "balanced", approvalToken: balancedSecret });
+  const balanced = await connect(balancedPort);
+  const balancedTask = await openRuntimeTask(balanced, "Balanced approval hardening");
+  const listedBalancedTools = await balanced.listTools();
+  const balancedToolNames = listedBalancedTools.tools.map((tool) => tool.name);
+  check(
+    "approval controls are local-only and absent from the MCP catalog",
+    ["request_approval", "request_approval_batch", "approve_request", "deny_request"].every((name) => !balancedToolNames.includes(name)),
+    balancedToolNames.join(",")
+  );
+  const seededVictim = await call(balanced, "apply_patch", {
+    task_token: balancedTask.task_token,
+    operations: [{ op: "create", path: "victim.txt", content: "x" }]
+  });
+  check("balanced policy permits a normal seed write", !seededVictim.isError, seededVictim.text);
+  const seededSkill = await call(balanced, "skills", {
+    action: "create",
+    name: "balanced-skill",
+    description: "Balanced policy fixture",
+    body: "# Fixture\n",
+    task_token: balancedTask.task_token
+  });
+  check("balanced policy permits aggregate skill creation", !seededSkill.isError, seededSkill.text);
+  const blockedSkillDelete = await call(balanced, "skills", {
+    action: "delete",
+    name: "balanced-skill",
+    task_token: balancedTask.task_token
+  });
+  check("balanced policy requires local approval for aggregate skill deletion", blockedSkillDelete.isError && blockedSkillDelete.text.includes("Approval required"), blockedSkillDelete.text);
+  const victimDelete = {
+    task_token: balancedTask.task_token,
+    operations: [{ op: "delete", path: "victim.txt" }]
+  };
   const blockedDelete = await call(balanced, "apply_patch", victimDelete);
   check("balanced policy blocks delete before approval", blockedDelete.isError && blockedDelete.text.includes("Approval required") && blockedDelete.text.includes("victim.txt"));
+  const deleteRequestId = callPayload(blockedDelete).details?.request_id;
+  check("approval error returns a local request id", /^[0-9a-f-]{36}$/i.test(deleteRequestId || ""), blockedDelete.text);
   const blockedRiskyBatch = await call(balanced, "run_commands", {
+    task_token: balancedTask.task_token,
     commands: [{ command: "curl -o downloaded.txt https://example.invalid" }]
   });
   check("balanced policy does not let run_commands bypass risky-command approval", blockedRiskyBatch.isError && blockedRiskyBatch.text.includes("Approval required"));
-  const request = JSON.parse((await call(balanced, "request_approval", { action: victimDeleteAction, reason: "hardening regression" })).text);
-  check("operator token approves pending action", !(await call(balanced, "approve_request", { id: request.id, approval_token: balancedSecret })).isError);
-  check("approved action executes once", !(await call(balanced, "apply_patch", victimDelete)).isError);
-  await call(balanced, "write_file", { path: "victim.txt", content: "x" });
-  check("consumed approval cannot be replayed", (await call(balanced, "apply_patch", victimDelete)).isError);
+  const approvedLocally = decideApproval("approve", deleteRequestId, balancedWorkspace);
+  check("local CLI approves the exact pending action", approvedLocally.status === 0 && /approved/.test(approvedLocally.stdout), approvedLocally.stderr || approvedLocally.stdout);
+  const approvedDelete = await call(balanced, "apply_patch", victimDelete);
+  check("approved action executes once", !approvedDelete.isError, approvedDelete.text);
+  await call(balanced, "apply_patch", {
+    task_token: balancedTask.task_token,
+    operations: [{ op: "create", path: "victim.txt", content: "x" }]
+  });
+  const replayedDelete = await call(balanced, "apply_patch", victimDelete);
+  check("consumed approval cannot be replayed", replayedDelete.isError && callPayload(replayedDelete).details?.request_id !== deleteRequestId, replayedDelete.text);
+  check("local CLI cannot approve the consumed request twice", decideApproval("approve", deleteRequestId, balancedWorkspace).status !== 0);
+  const replayRequestId = callPayload(replayedDelete).details?.request_id;
+  const deniedLocally = decideApproval("deny", replayRequestId, balancedWorkspace);
+  check("local CLI can deny a pending request", deniedLocally.status === 0 && /denied/.test(deniedLocally.stdout), deniedLocally.stderr || deniedLocally.stdout);
+  check("denied request cannot be approved later", decideApproval("approve", replayRequestId, balancedWorkspace).status !== 0);
+  check("local approval command rejects path-like ids", decideApproval("approve", "../outside", balancedWorkspace).status !== 0);
 
-  await call(balanced, "write_file", { path: "batch-a.txt", content: "a" });
-  await call(balanced, "write_file", { path: "batch-b.txt", content: "b" });
-  const batchRequest = JSON.parse((await call(balanced, "request_approval_batch", {
-    actions: ['apply_patch:delete:["batch-a.txt"]', 'apply_patch:delete:["batch-b.txt"]'],
-    reason: "hardening exact batch regression",
-    expires_in_minutes: 5
-  })).text);
-  check("operator token approves exact action batch", !(await call(balanced, "approve_request", { id: batchRequest.id, approval_token: balancedSecret })).isError);
-  check("batch approval consumes first exact action", !(await call(balanced, "apply_patch", { operations: [{ op: "delete", path: "batch-a.txt" }] })).isError);
-  check("batch approval consumes second exact action", !(await call(balanced, "apply_patch", { operations: [{ op: "delete", path: "batch-b.txt" }] })).isError);
-  check("consumed batch action cannot be replayed", (await call(balanced, "apply_patch", { operations: [{ op: "delete", path: "batch-a.txt" }] })).isError);
-
-  const concurrentAction = "run_command:git fetch --dry-run";
-  const concurrentRequest = JSON.parse((await call(balanced, "request_approval", {
-    action: concurrentAction,
-    reason: "concurrent consume regression"
-  })).text);
-  await call(balanced, "approve_request", { id: concurrentRequest.id, approval_token: balancedSecret });
+  const blockedConcurrent = await call(balanced, "run_command", {
+    command: "git fetch --dry-run",
+    task_token: balancedTask.task_token
+  });
+  const concurrentRequestId = callPayload(blockedConcurrent).details?.request_id;
+  check("risky command produces an exact approval request", blockedConcurrent.isError && Boolean(concurrentRequestId), blockedConcurrent.text);
+  check("local CLI approves the concurrent command once", decideApproval("approve", concurrentRequestId, balancedWorkspace).status === 0);
   const concurrentResults = await Promise.all([
-    call(balanced, "run_command", { command: "git fetch --dry-run" }),
-    call(balanced, "run_command", { command: "git fetch --dry-run" })
+    call(balanced, "run_command", { command: "git fetch --dry-run", task_token: balancedTask.task_token }),
+    call(balanced, "run_command", { command: "git fetch --dry-run", task_token: balancedTask.task_token })
   ]);
   check("one-time approval remains one-time under concurrent calls", concurrentResults.filter((result) => result.isError).length === 1);
   await balanced.close();
   await stopServer(server);
   server = null;
-
-  // MCP-token decisions must not revive consumed/denied requests or accept path-like ids.
-  console.log("\n[phase] approval replay and id validation");
-  const approvalSecret = `LCA_APPROVAL_SECRET_${Date.now()}`;
-  server = await startServer(path.join(base, "approval-token"), { port: 19008, policy: "balanced", approvalToken: approvalSecret });
-  const tokenClient = await connect(19008);
-  const tokenRequest = JSON.parse((await call(tokenClient, "request_approval", { action: "delete_path:token.txt", reason: "token replay regression" })).text);
-  check("MCP operator token approves a pending request", !(await call(tokenClient, "approve_request", { id: tokenRequest.id, approval_token: approvalSecret })).isError);
-  check("MCP operator token cannot approve the same request twice", (await call(tokenClient, "approve_request", { id: tokenRequest.id, approval_token: approvalSecret })).isError);
-  check("MCP approval rejects path-like ids", (await call(tokenClient, "approve_request", { id: "../outside", approval_token: approvalSecret })).isError);
-  const denyRequest = JSON.parse((await call(tokenClient, "request_approval", { action: "delete_path:deny.txt", reason: "token deny regression" })).text);
-  check("MCP operator token denies a pending request", !(await call(tokenClient, "deny_request", { id: denyRequest.id, approval_token: approvalSecret })).isError);
-  check("denied request cannot be approved later", (await call(tokenClient, "approve_request", { id: denyRequest.id, approval_token: approvalSecret })).isError);
-  await tokenClient.close();
-  await stopServer(server);
-  server = null;
-  const approvalAudit = await readFile(path.join(testContext.dataDir, "audit.log"), "utf8").catch(() => "");
-  check("audit log redacts approval_token", !approvalAudit.includes(approvalSecret));
+  const approvalAudit = await readFile(path.join(testContext.dataDir, "runtime", "audit.log"), "utf8").catch(() => "");
+  check("audit log redacts approval_token", !approvalAudit.includes(balancedSecret));
 
   // Query-string tokens must not authenticate.
   console.log("\n[phase] header-only bearer authentication");
-  server = await startServer(path.join(base, "auth"), { port: 19003, policy: "full", auth: "operator-secret" });
-  const queryAuth = await fetch("http://127.0.0.1:19003/mcp?token=operator-secret", {
+  const authPort = await getFreePort();
+  server = await startServer(path.join(base, "auth"), { port: authPort, policy: "full", auth: "operator-secret" });
+  const queryAuth = await fetch(`http://127.0.0.1:${authPort}/mcp?token=operator-secret`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: "{}"
@@ -230,25 +290,37 @@ try {
   // Undo must cover created files and renamed directories.
   const workspaceA = path.join(base, "workspace-a");
   console.log("\n[phase] transactional undo coverage");
-  server = await startServer(workspaceA, { port: 19004, policy: "full" });
-  const full = await connect(19004);
-  const createdChange = JSON.parse((await call(full, "apply_patch", { operations: [{ op: "create", path: "created.txt", content: "created" }] })).text);
-  await changeApi(19004, "POST", `/changes/${createdChange.change_id}/undo`, {});
-  check("Review Changes undo removes files created by apply_patch", (await call(full, "stat_path", { path: "created.txt" })).isError);
-  await call(full, "write_file", { path: "source.txt", content: "a" });
-  const movedChange = JSON.parse((await call(full, "move_path", { from: "source.txt", to: "dest.txt" })).text);
-  await changeApi(19004, "POST", `/changes/${movedChange.change_id}/undo`, {});
-  check("Review Changes undo restores renamed file source", !(await call(full, "stat_path", { path: "source.txt" })).isError);
-  check("Review Changes undo removes renamed file destination", (await call(full, "stat_path", { path: "dest.txt" })).isError);
+  const undoPort = await getFreePort();
+  server = await startServer(workspaceA, { port: undoPort, policy: "full" });
+  const full = await connect(undoPort);
+  const fullTask = await openRuntimeTask(full, "Transactional undo hardening");
+  const createdChange = JSON.parse((await call(full, "apply_patch", {
+    task_token: fullTask.task_token,
+    operations: [{ op: "create", path: "created.txt", content: "created" }]
+  })).text);
+  await changeApi(undoPort, "POST", `/changes/${createdChange.change_id}/undo`, {});
+  check("Review Changes undo removes files created by apply_patch", (await call(full, "read_file", { path: "created.txt", task_token: fullTask.task_token })).isError);
+  await call(full, "apply_patch", {
+    task_token: fullTask.task_token,
+    operations: [{ op: "create", path: "source.txt", content: "a" }]
+  });
+  const movedChange = JSON.parse((await call(full, "apply_patch", {
+    task_token: fullTask.task_token,
+    operations: [{ op: "rename", path: "source.txt", rename_to: "dest.txt" }]
+  })).text);
+  await changeApi(undoPort, "POST", `/changes/${movedChange.change_id}/undo`, {});
+  check("Review Changes undo restores renamed file source", !(await call(full, "read_file", { path: "source.txt", task_token: fullTask.task_token })).isError);
+  check("Review Changes undo removes renamed file destination", (await call(full, "read_file", { path: "dest.txt", task_token: fullTask.task_token })).isError);
   await full.close();
   await stopServer(server);
   server = null;
 
   // History is scoped to the workspace and cannot replay into an old root.
   console.log("\n[phase] workspace-scoped history");
-  server = await startServer(path.join(base, "workspace-b"), { port: 19005, policy: "full" });
-  const other = await connect(19005);
-  const isolatedChanges = await changeApi(19005, "GET", "/changes?limit=10");
+  const isolatedPort = await getFreePort();
+  server = await startServer(path.join(base, "workspace-b"), { port: isolatedPort, policy: "full" });
+  const other = await connect(isolatedPort);
+  const isolatedChanges = await changeApi(isolatedPort, "GET", "/changes?limit=10");
   check("new workspace cannot see another workspace change history", isolatedChanges.status === 200 && isolatedChanges.data.count === 0, JSON.stringify(isolatedChanges.data));
   await other.close();
 } finally {

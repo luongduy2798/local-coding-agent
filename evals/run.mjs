@@ -1,4 +1,4 @@
-// Local Coding Agent — Eval Runner (v2.9)
+// Local Coding Agent — Eval Runner
 // Copyright (c) 2026 Lương Duy
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
@@ -20,7 +20,7 @@ const { StreamableHTTPClientTransport } = await import(pathToFileURL(sdkHttpPath
 
 import { readFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
-import { createIsolatedTestRoot, safeRemove } from "../server/tests/helpers/test-guard.mjs";
+import { createGitFixture, createIsolatedTestRoot, safeRemove } from "../server/tests/helpers/test-guard.mjs";
 import { getFreePort, startTestServer, stopTestProcess } from "../server/tests/helpers/test-runtime.mjs";
 
 const SERVER_MJS = path.resolve(__dirname, "..", "server", "server.mjs");
@@ -56,7 +56,10 @@ async function startServer(workspace) {
     runId: testContext.runId,
     port: EVAL_PORT,
     mode: "safe",
-    policy: "full"
+    policy: "full",
+    env: {
+      LCA_TEST_RUNTIME_DIAGNOSTICS: "0"
+    }
   });
   return runtime.child;
 }
@@ -103,11 +106,33 @@ async function runEvals(workspace) {
     client = await connectClient();
     console.log("Connected.\n");
 
+    const workspaceList = await call(client, "workspace_list", {});
+    const workspaceListData = await parseJSON(workspaceList.text);
+    const primaryWorkspaceId = workspaceListData?.workspaces?.[0]?.workspace_id;
+    const openedTask = await call(client, "task_open", {
+      title: "Runtime golden eval",
+      primary_workspace_id: primaryWorkspaceId
+    });
+    const openedTaskData = await parseJSON(openedTask.text);
+    check(
+      "eval setup: stateful session is bound to an explicit workspace task",
+      !openedTask.isError && Boolean(openedTaskData?.task?.id),
+      openedTask.text
+    );
+
     // ---- eval 1: edit-single-file ----
     console.log("EVAL: edit-single-file");
     {
-      await call(client, "write_file", { path: "src/greet.js", content: "function greet() { return 'hello'; }\n" });
-      const r = await call(client, "replace_in_file", { path: "src/greet.js", old_text: "hello", new_text: "world" });
+      await call(client, "apply_patch", {
+        operations: [{ op: "create", path: "src/greet.js", content: "function greet() { return 'hello'; }\n" }]
+      });
+      const r = await call(client, "apply_patch", {
+        operations: [{
+          op: "update",
+          path: "src/greet.js",
+          edits: [{ old_text: "hello", new_text: "world" }]
+        }]
+      });
       const read = await call(client, "read_file", { path: "src/greet.js" });
       const d = await parseJSON(read.text);
       check("edit-single-file: file written and edited", !r.isError && d && d.content && d.content.includes("world"));
@@ -116,8 +141,12 @@ async function runEvals(workspace) {
     // ---- eval 2: edit-multi-file (apply_patch) ----
     console.log("EVAL: edit-multi-file");
     {
-      await call(client, "write_file", { path: "src/a.js", content: "const a = 1;\n" });
-      await call(client, "write_file", { path: "src/b.js", content: "const b = 2;\n" });
+      await call(client, "apply_patch", {
+        operations: [
+          { op: "create", path: "src/a.js", content: "const a = 1;\n" },
+          { op: "create", path: "src/b.js", content: "const b = 2;\n" }
+        ]
+      });
       const r = await call(client, "apply_patch", {
         diff: `--- a/src/a.js\n+++ b/src/a.js\n@@ -1 +1 @@\n-const a = 1;\n+const a = 10;\n--- a/src/b.js\n+++ b/src/b.js\n@@ -1 +1 @@\n-const b = 2;\n+const b = 20;\n`
       });
@@ -132,19 +161,26 @@ async function runEvals(workspace) {
     // ---- eval 3: Review Changes undo restores ----
     console.log("EVAL: Review Changes undo");
     {
-      await call(client, "write_file", { path: "src/undo-me.js", content: "const x = 'original';\n" });
-      const changed = await call(client, "replace_in_file", { path: "src/undo-me.js", old_text: "original", new_text: "changed" });
+      await call(client, "apply_patch", {
+        operations: [{ op: "create", path: "src/undo-me.js", content: "const x = 'original';\n" }]
+      });
+      const changed = await call(client, "apply_patch", {
+        operations: [{
+          op: "update",
+          path: "src/undo-me.js",
+          edits: [{ old_text: "original", new_text: "changed" }]
+        }]
+      });
       const changedData = await parseJSON(changed.text);
       const before = await call(client, "read_file", { path: "src/undo-me.js" });
       const dBefore = await parseJSON(before.text);
       check("undo: file was changed", dBefore && dBefore.content.includes("changed"));
 
-      const undoResponse = await fetch(`http://127.0.0.1:${EVAL_PORT}/changes/${changedData.change_id}/undo`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: "{}"
+      const undoResponse = await call(client, "change_history", {
+        action: "undo",
+        id: changedData.change_id
       });
-      check("undo: Review Changes API returned ok", undoResponse.ok);
+      check("undo: change_history returned ok", !undoResponse.isError);
 
       const after = await call(client, "read_file", { path: "src/undo-me.js" });
       const dAfter = await parseJSON(after.text);
@@ -155,9 +191,9 @@ async function runEvals(workspace) {
     console.log("EVAL: review_diff detects console.log");
     {
       // This eval only works if workspace is a git repo; if not, we note it
-      const gs = await call(client, "git_status", {});
+      const gs = await call(client, "git", { args: ["rev-parse", "--is-inside-work-tree"] });
       const gsData = await parseJSON(gs.text);
-      if (!gsData || !gsData.is_git_repo) {
+      if (!gsData || gsData.exit_code !== 0) {
         console.log("  [SKIP] review_diff: not a git repo (expected for scratch workspace)");
       } else {
         const rd = await call(client, "review_diff", { cwd: "." });
@@ -167,20 +203,22 @@ async function runEvals(workspace) {
     }
 
     // ---- eval 5: run failing test reported ----
-    console.log("EVAL: run_tests reports failure");
+    console.log("EVAL: run_command reports failure");
     {
       // Write a simple Node test that will fail
-      await call(client, "write_file", { path: "test/fail.test.js", content: "// simple failing test\nprocess.exit(1);\n" });
-      const r = await call(client, "run_tests", { command: "node test/fail.test.js", cwd: "." });
+      await call(client, "apply_patch", {
+        operations: [{ op: "create", path: "test/fail.test.js", content: "// simple failing test\nprocess.exit(1);\n" }]
+      });
+      const r = await call(client, "run_command", { command: "node test/fail.test.js", cwd: "." });
       const d = await parseJSON(r.text);
-      check("run_tests: failing test detected (exit_code != 0)", d && d.exit_code !== 0 && d.ok === false);
+      check("run_command: failing test detected (exit_code != 0)", d && d.exit_code !== 0 && d.ok === false);
     }
 
     // ---- eval 6: prevent path escape ----
     console.log("EVAL: path escape blocked");
     {
       const r = await call(client, "read_file", { path: "../../../../etc/passwd" });
-      check("path-escape: read outside root blocked", r.isError && r.text.includes("outside the allowed roots"));
+      check("path-escape: read outside root blocked", r.isError && /outside/i.test(r.text));
     }
 
     // ---- eval 7: prevent secret in audit ----
@@ -188,15 +226,11 @@ async function runEvals(workspace) {
     {
       const sentinel = "EVAL_SECRET_" + randomUUID().replace(/-/g, "").slice(0, 16);
       await call(client, "apply_patch", { operations: [{ op: "create", path: "sec-eval.txt", content: `API_KEY=${sentinel}` }] });
-      await call(client, "delete_path", { path: "sec-eval.txt" });
-      const auditPath = path.join(testContext.dataDir, "audit.log");
+      await call(client, "apply_patch", { operations: [{ op: "delete", path: "sec-eval.txt" }] });
+      const auditPath = path.join(testContext.dataDir, "runtime", "audit.log");
       let auditContent = "";
       try { auditContent = await readFile(auditPath, "utf8"); } catch { /* no audit log */ }
-      if (auditContent) {
-        check("audit: secret NOT in audit.log", !auditContent.includes(sentinel));
-      } else {
-        console.log("  [SKIP] audit file not found");
-      }
+      check("audit: secret NOT in audit.log", auditContent.length > 0 && !auditContent.includes(sentinel));
     }
 
     // ---- eval 8: git safety (flag blocked) ----
@@ -209,26 +243,38 @@ async function runEvals(workspace) {
       check("git-safety: -c flag blocked", r2.isError);
     }
 
-    // ---- eval 9: repo_map on sample project ----
-    console.log("EVAL: repo_map");
+    // ---- eval 9: workspace_snapshot on sample project ----
+    console.log("EVAL: workspace_snapshot");
     {
       // Write a package.json so project_profile can detect it
-      await call(client, "write_file", { path: "package.json", content: JSON.stringify({ name: "eval-proj", scripts: { test: "node test/fail.test.js", build: "echo build" } }, null, 2) });
-      const r = await call(client, "repo_map", { refresh: true });
+      await call(client, "apply_patch", {
+        operations: [{
+          op: "create",
+          path: "package.json",
+          content: JSON.stringify({
+            name: "eval-proj",
+            scripts: { test: "node test/fail.test.js", build: "echo build" }
+          }, null, 2)
+        }]
+      });
+      const r = await call(client, "workspace_snapshot", { refresh: true });
       const d = await parseJSON(r.text);
-      check("repo_map: returns tree + profile", d && Array.isArray(d.tree) && d.profile && Array.isArray(d.profile.languages));
-      check("repo_map: detects javascript", d && d.profile && d.profile.languages.includes("javascript"));
+      check("workspace_snapshot: returns tree + profile", d && Array.isArray(d.tree?.entries) && d.profile && Array.isArray(d.profile.languages));
+      check("workspace_snapshot: detects javascript", d && d.profile && d.profile.languages.includes("javascript"));
     }
 
-    // ---- eval 10: resume checkpoint ----
-    console.log("EVAL: checkpoint + resume");
+    // ---- eval 10: task checkpoint ----
+    console.log("EVAL: task checkpoint");
     {
-      const cp = await call(client, "checkpoint", { summary: "Eval progress: 10 evals done", next_steps: ["verify", "commit"] });
-      check("checkpoint: saved without error", !cp.isError);
-
-      const resume = await call(client, "resume", {});
-      const d = await parseJSON(resume.text);
-      check("resume: returns saved checkpoint", d && d.summary && d.summary.includes("Eval progress"));
+      const cp = await call(client, "task_checkpoint", {
+        summary: "Eval progress: 10 evals done",
+        next_steps: ["verify", "commit"]
+      });
+      const d = await parseJSON(cp.text);
+      check(
+        "task_checkpoint: saves resumable task state",
+        !cp.isError && d?.checkpoint?.summary?.includes("Eval progress")
+      );
     }
 
     // ---- eval 11: task_plan + task_state ----
@@ -240,28 +286,188 @@ async function runEvals(workspace) {
 
       const state = await call(client, "task_state", { set_step_done: 0 });
       const sd = await parseJSON(state.text);
-      check("task_state: step marked done", sd && sd.steps && sd.steps[0].done === true);
+      check("task_state: step marked done", sd?.plan?.steps?.[0]?.done === true);
     }
 
-    // ---- eval 12: policy_status ----
-    console.log("EVAL: policy_status");
+    // ---- eval 12: lca_status ----
+    console.log("EVAL: lca_status");
     {
-      const r = await call(client, "policy_status", {});
+      const r = await call(client, "lca_status", {});
       const d = await parseJSON(r.text);
-      check("policy_status: returns policy info", d && typeof d.policy === "string" && ["strict", "balanced", "full"].includes(d.policy));
+      check(
+        "lca_status: returns fixed catalog and policy info",
+        d?.catalog_version === 5 &&
+          typeof d.policy === "string" &&
+          ["strict", "balanced", "full"].includes(d.policy)
+      );
     }
 
-    // ---- eval 13: preview_patch dry-run ----
-    console.log("EVAL: preview_patch");
+    // ---- eval 13: apply_patch failed preflight is non-mutating ----
+    console.log("EVAL: apply_patch preflight");
     {
-      await call(client, "write_file", { path: "src/preview-me.js", content: "const x = 1;\n" });
-      const r = await call(client, "preview_patch", { diff: "--- a/src/preview-me.js\n+++ b/src/preview-me.js\n@@ -1 +1 @@\n-const x = 1;\n+const x = 99;\n" });
-      const d = await parseJSON(r.text);
-      check("preview_patch: dry-run ok", d && typeof d.ok === "boolean");
-      // Verify file was NOT changed
-      const read = await call(client, "read_file", { path: "src/preview-me.js" });
+      await call(client, "apply_patch", {
+        operations: [{ op: "create", path: "src/preflight-me.js", content: "const x = 1;\n" }]
+      });
+      const r = await call(client, "apply_patch", {
+        operations: [{
+          op: "update",
+          path: "src/preflight-me.js",
+          expected_version: "stale-version",
+          content: "const x = 99;\n"
+        }]
+      });
+      check("apply_patch: stale expected_version is rejected", r.isError);
+      const read = await call(client, "read_file", { path: "src/preflight-me.js" });
       const rd = await parseJSON(read.text);
-      check("preview_patch: file unchanged after dry run", rd && rd.content && rd.content.includes("const x = 1;"));
+      check("apply_patch: failed preflight leaves file unchanged", rd?.content?.includes("const x = 1;"));
+    }
+
+    // ---- eval 14: retrieval and symbol quality golden set ----
+    console.log("EVAL: retrieval + symbol golden set");
+    {
+      await call(client, "apply_patch", {
+        operations: [
+          {
+            op: "create",
+            path: "src/pricing.js",
+            content: "export function calculateTotal(lines) { return lines.reduce((sum, line) => sum + line.price, 0); }\n"
+          },
+          {
+            op: "create",
+            path: "src/discounts.js",
+            content: "export function applyDiscount(total, rate) { return total * (1 - rate); }\n"
+          },
+          {
+            op: "create",
+            path: "src/inventory.js",
+            content: "export function reserveInventory(lines) { return lines.map((line) => line.sku); }\n"
+          },
+          {
+            op: "create",
+            path: "src/tax.js",
+            content: "export function computeTax(total, rate) { return total * rate; }\n"
+          },
+          {
+            op: "create",
+            path: "src/shipping.js",
+            content: "export function estimateShipping(lines) { return lines.length * 2; }\n"
+          },
+          {
+            op: "create",
+            path: "src/customer.js",
+            content: "export function normalizeCustomer(customer) { return { ...customer, email: customer.email.toLowerCase() }; }\n"
+          },
+          {
+            op: "create",
+            path: "src/order-service.js",
+            content: "import { calculateTotal } from './pricing.js';\nimport { applyDiscount } from './discounts.js';\nimport { reserveInventory } from './inventory.js';\nimport { computeTax } from './tax.js';\nexport function submitOrder(lines) { reserveInventory(lines); const subtotal = applyDiscount(calculateTotal(lines), 0.1); return subtotal + computeTax(subtotal, 0.08); }\n"
+          },
+          {
+            op: "create",
+            path: "src/checkout.js",
+            content: "import { submitOrder } from './order-service.js';\nimport { estimateShipping } from './shipping.js';\nimport { normalizeCustomer } from './customer.js';\nexport function finalizeCheckout(lines, customer) { return { total: submitOrder(lines) + estimateShipping(lines), customer: normalizeCustomer(customer) }; }\n"
+          },
+          {
+            op: "create",
+            path: "test/order-service.test.js",
+            content: "import { finalizeCheckout } from '../src/checkout.js';\nvoid finalizeCheckout;\n"
+          }
+        ]
+      });
+      await call(client, "index_control", { action: "rebuild" });
+      const definitionGoldens = [
+        ["calculateTotal", "src/pricing.js"],
+        ["applyDiscount", "src/discounts.js"],
+        ["reserveInventory", "src/inventory.js"],
+        ["computeTax", "src/tax.js"],
+        ["estimateShipping", "src/shipping.js"],
+        ["normalizeCustomer", "src/customer.js"],
+        ["submitOrder", "src/order-service.js"],
+        ["finalizeCheckout", "src/checkout.js"]
+      ];
+      let truePositives = 0;
+      let returnedDefinitions = 0;
+      const definitionResults = {};
+      for (const [symbol, expectedPath] of definitionGoldens) {
+        const response = await call(client, "code_query", {
+          query: symbol,
+          mode: "definition",
+          depth: "auto",
+          limit: 20
+        });
+        const data = await parseJSON(response.text);
+        const paths = new Set(
+          (data?.results || []).map((item) => item.location?.path).filter(Boolean)
+        );
+        definitionResults[symbol] = [...paths];
+        returnedDefinitions += paths.size;
+        if (paths.has(expectedPath)) truePositives++;
+      }
+      const recallAt20 = truePositives / definitionGoldens.length;
+      const precision = truePositives / Math.max(1, returnedDefinitions);
+      const symbolF1 = (2 * precision * recallAt20) / Math.max(Number.EPSILON, precision + recallAt20);
+      check(
+        "retrieval: Recall@20 >= 95%",
+        recallAt20 >= 0.95,
+        JSON.stringify({ recallAt20, definitionResults })
+      );
+      check(
+        "symbols: F1 >= 95% on seeded definition set",
+        symbolF1 >= 0.95,
+        JSON.stringify({ precision, recallAt20, symbolF1, definitionResults })
+      );
+
+      const referenceGoldens = [
+        ["calculateTotal", "src/order-service.js"],
+        ["applyDiscount", "src/order-service.js"],
+        ["reserveInventory", "src/order-service.js"],
+        ["computeTax", "src/order-service.js"],
+        ["estimateShipping", "src/checkout.js"],
+        ["normalizeCustomer", "src/checkout.js"],
+        ["submitOrder", "src/checkout.js"],
+        ["finalizeCheckout", "test/order-service.test.js"]
+      ];
+      let foundReferences = 0;
+      const referenceResults = {};
+      for (const [symbol, expectedPath] of referenceGoldens) {
+        const response = await call(client, "code_query", {
+          query: symbol,
+          mode: "references",
+          depth: "auto",
+          limit: 20
+        });
+        const data = await parseJSON(response.text);
+        const paths = new Set(
+          (data?.results || []).map((item) => item.location?.path).filter(Boolean)
+        );
+        referenceResults[symbol] = [...paths];
+        if (paths.has(expectedPath)) foundReferences++;
+      }
+      check(
+        "retrieval: reference Recall@20 >= 95%",
+        foundReferences / referenceGoldens.length >= 0.95,
+        JSON.stringify(referenceResults)
+      );
+    }
+
+    // ---- eval 15: seeded security bug is blocked by review ----
+    console.log("EVAL: seeded security bug");
+    {
+      await call(client, "apply_patch", {
+        operations: [{
+          op: "create",
+          path: "src/unsafe-eval.js",
+          content: "export function executeUserInput(input) { return eval(input); }\n"
+        }]
+      });
+      const review = await call(client, "review_diff", {});
+      const reviewData = await parseJSON(review.text);
+      check(
+        "seeded bug: review_diff blocks eval-based code injection",
+        reviewData?.verdict === "BLOCK"
+          && reviewData?.findings?.some((item) => /eval\(\)/i.test(item.issue || "")),
+        review.text
+      );
     }
 
   } finally {
@@ -274,10 +480,13 @@ async function runEvals(workspace) {
 // Main
 // ============================================================================
 
-const evalWorkspace = testContext.fixtureDir;
+const evalFixture = await createGitFixture(testContext, {
+  initialFiles: { "fixture/.gitkeep": "" }
+});
+const evalWorkspace = evalFixture.fixtureDir;
 
 console.log("=".repeat(60));
-console.log("Local Coding Agent — Eval Suite (v2.9)");
+console.log("Local Coding Agent — Eval Suite");
 console.log("=".repeat(60));
 console.log(`Workspace: ${evalWorkspace}`);
 
@@ -289,6 +498,9 @@ try {
 } finally {
   await safeRemove(evalWorkspace, testContext, { recursive: true, force: true }).catch((error) => {
     console.error(`Cleanup skipped for safety: ${error?.message || error}`);
+  });
+  await safeRemove(testContext.dataDir, testContext, { recursive: true, force: true }).catch((error) => {
+    console.error(`Data cleanup skipped for safety: ${error?.message || error}`);
   });
 }
 
@@ -303,10 +515,10 @@ results.forEach((r) => {
   console.log(`  ${r.ok ? "PASS" : "FAIL"} ${r.name}${r.detail ? " — " + r.detail : ""}`);
 });
 
-if (pct < 90) {
-  console.error(`\nFAIL: Only ${pct}% passed (need >= 90%)`);
+if (fail > 0) {
+  console.error(`\nFAIL: ${fail} eval assertion(s) failed`);
   process.exit(1);
 } else {
-  console.log(`\nPASS: ${pct}% >= 90%`);
+  console.log(`\nPASS: ${pct}% with zero failed assertions`);
   process.exit(0);
 }

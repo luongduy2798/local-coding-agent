@@ -253,11 +253,32 @@
     let pendingTimer = null;
     let shownItems = [];
     let pipRequestPending = false;
+    let sendPending = false;
     let lastSearchKey = '';
     let searchSeq = 0;
+    let contextRevision = null;
+    let contextWorkspaceId = null;
+    let contextTaskId = null;
+    let contextWorkspaceSetVersion = null;
     const suggestionCache = new Map();
     const MAX_SUGGESTION_CACHE = 80;
-    const SEARCH_DEBOUNCE_MS = 20;
+    const SEARCH_DEBOUNCE_MS = 120;
+    const WORKFLOW_ITEMS = [
+      ['plan', 'mode', 'Plan mode', 'Inspect context and propose a plan first.'],
+      ['implement', 'workflow', 'Implement', 'Apply the requested change with focused edits.'],
+      ['debug', 'workflow', 'Debug', 'Gather evidence, isolate the cause, then fix it.'],
+      ['review', 'workflow', 'Review', 'Review correctness, security, edge cases and tests.'],
+      ['refactor', 'workflow', 'Refactor', 'Improve structure while preserving behavior.'],
+      ['release', 'workflow', 'Release', 'Check versioning, changelog, tests and rollout.'],
+      ['setup', 'workflow', 'Setup', 'Inspect setup, onboarding and platform behavior.'],
+      ['context', 'workflow', 'Context pack', 'Gather compact repository context first.']
+    ].map(([name, type, label, description]) => ({
+      name,
+      type,
+      label,
+      description,
+      command: `/${name}`
+    }));
 
     function unwrapToolResult(result) {
       if (result && result.structuredContent) return result.structuredContent;
@@ -271,6 +292,30 @@
     async function callTool(name, args) {
       if (!window.openai?.callTool) throw new Error('callTool unavailable');
       return unwrapToolResult(await window.openai.callTool(name, args || {}));
+    }
+
+    function contextKey() {
+      return `${contextWorkspaceId || ''}:${contextTaskId || ''}:${contextWorkspaceSetVersion ?? ''}`;
+    }
+
+    function contextArgs() {
+      return {
+        workspace_id: contextWorkspaceId || undefined
+      };
+    }
+
+    function responseMatchesContext(data, expectedKey) {
+      if (contextKey() !== expectedKey) return false;
+      const responseTaskId = data.task_id ?? null;
+      const responseVersion = data.workspace_set_version ?? null;
+      if (
+        responseTaskId !== contextTaskId ||
+        Number(responseVersion ?? 0) !== Number(contextWorkspaceSetVersion ?? 0) ||
+        (data.workspace_id && contextWorkspaceId && data.workspace_id !== contextWorkspaceId)
+      ) {
+        throw new Error('Task/workspace context changed; reopen LCA input.');
+      }
+      return true;
     }
 
     function setStatus(text, kind = '') {
@@ -348,6 +393,11 @@
       if (selected.length) {
         const label = selected.length === 1 ? selected[0] : `${selected.length} context`;
         contextPill.textContent = `@ ${label}`;
+        contextPill.classList.remove('hidden');
+      } else if (contextWorkspaceId) {
+        const workspaceLabel = `ws ${contextWorkspaceId.slice(-6)}`;
+        const taskLabel = contextTaskId ? `task ${contextTaskId.slice(-6)}` : 'new task';
+        contextPill.textContent = `${workspaceLabel} · ${taskLabel}`;
         contextPill.classList.remove('hidden');
       } else {
         contextPill.textContent = '';
@@ -473,10 +523,7 @@
     }
 
     async function preloadSuggestions() {
-      try {
-        const slashData = await callTool('slash_commands', { query: '/', limit: 24 });
-        rememberSuggestions('/:', slashData.commands || []);
-      } catch {}
+      rememberSuggestions('/:', WORKFLOW_ITEMS);
     }
 
     async function updateSuggestions() {
@@ -503,15 +550,51 @@
       }
 
       const seq = ++searchSeq;
+      const expectedContext = contextKey();
       setStatus('searching…');
       try {
         let items;
         if (trigger.prefix === '@') {
-          const data = await callTool('workspace_search', { query: '@' + trigger.query, limit: 24 });
-          items = data.results || [];
+          const query = trigger.query.trim();
+          const safeGlobQuery = query.replace(/[\\*?\[\]{}]/g, '');
+          const fileRequest = callTool('find_files', {
+            glob: safeGlobQuery ? `*${safeGlobQuery}*` : '*',
+            limit: 24,
+            ...contextArgs()
+          });
+          const symbolRequest = query.length >= 2
+            ? callTool('code_query', {
+                query,
+                mode: 'symbol',
+                depth: 'fast',
+                limit: 12,
+                ...contextArgs()
+              }).catch(() => ({ results: [] }))
+            : Promise.resolve({ results: [] });
+          const [files, symbols] = await Promise.all([fileRequest, symbolRequest]);
+          if (contextKey() !== expectedContext) return;
+          const fileItems = (files.files || []).map((entry) => ({
+            type: 'file',
+            path: entry.path,
+            label: entry.path,
+            detail: 'file'
+          }));
+          const symbolItems = (symbols.results || []).map((entry) => ({
+            type: 'symbol',
+            path: entry.location?.path,
+            label: entry.symbol || entry.name || entry.location?.path,
+            detail: entry.location?.path || 'symbol'
+          })).filter((entry) => entry.path && entry.label);
+          items = [...symbolItems, ...fileItems]
+            .filter((entry, index, all) => all.findIndex((candidate) =>
+              candidate.type === entry.type && candidate.path === entry.path && candidate.label === entry.label
+            ) === index)
+            .slice(0, 24);
         } else {
-          const data = await callTool('slash_commands', { query: '/' + trigger.query, limit: 24 });
-          items = data.commands || [];
+          const query = trigger.query.trim().toLowerCase();
+          items = WORKFLOW_ITEMS.filter((item) =>
+            !query || item.name.includes(query) || item.label.toLowerCase().includes(query)
+          );
         }
         if (seq !== searchSeq) return;
         rememberSuggestions(key, items);
@@ -548,16 +631,24 @@
         return '';
       }
       setStatus('composing…');
-      const data = await callTool('compose_prompt', {
-        input: task,
-        mode: selectedMode || undefined,
-        selected_context: selected,
-        include_context_pack: true
-      });
-      return data.prompt || '';
+      const mode = extractModeFromInput();
+      const lines = [
+        'Use the Local Coding Agent tools for this task.',
+        'Start with workspace_snapshot or code_query, keep every operation in the current task/workspace, and use apply_patch for filesystem mutation.'
+      ];
+      if (mode) lines.push(`Workflow: /${mode}.`);
+      if (selected.length) {
+        lines.push('Selected context:');
+        for (const item of selected) lines.push(`- ${item}`);
+      }
+      lines.push('', 'Task:', task);
+      return lines.join('\n');
     }
 
     async function sendCurrentTask() {
+      if (sendPending) return;
+      sendPending = true;
+      sendButton.disabled = true;
       try {
         const prompt = await composePrompt();
         if (!prompt) return;
@@ -565,13 +656,13 @@
           setStatus('send unavailable', 'error');
           return;
         }
-        sendButton.disabled = true;
         await window.openai.sendFollowUpMessage({ prompt, scrollToBottom: true });
         resetComposerAfterSend();
         setStatus('sent');
       } catch (error) {
         setStatus(error.message, 'error');
       } finally {
+        sendPending = false;
         sendButton.disabled = false;
       }
     }
@@ -655,6 +746,23 @@
     function hydrateFromToolOutput() {
       const output = window.openai?.toolOutput || {};
       const inputArgs = window.openai?.toolInput || {};
+      const nextWorkspaceId = output.workspace?.workspace_id || null;
+      const nextTaskId = output.task_id ?? null;
+      const nextWorkspaceSetVersion = output.workspace_set_version ?? null;
+      const contextChanged =
+        (contextWorkspaceId && nextWorkspaceId && contextWorkspaceId !== nextWorkspaceId) ||
+        contextTaskId !== nextTaskId ||
+        Number(contextWorkspaceSetVersion ?? 0) !== Number(nextWorkspaceSetVersion ?? 0);
+      if (contextChanged) {
+        selected.length = 0;
+        suggestionCache.clear();
+        searchSeq += 1;
+        contextRevision = null;
+      }
+      if (nextWorkspaceId) contextWorkspaceId = nextWorkspaceId;
+      contextTaskId = nextTaskId;
+      contextWorkspaceSetVersion = nextWorkspaceSetVersion;
+      if (Number.isInteger(output.context_revision)) contextRevision = output.context_revision;
       const initial = output.initial_input || inputArgs.initial_input || '';
       if (initial && !input.value) input.value = initial;
       syncInputUi();

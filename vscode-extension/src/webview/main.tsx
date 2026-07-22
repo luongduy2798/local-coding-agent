@@ -1,5 +1,13 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
+import {
+  ControlHeader,
+  OverviewPanel,
+  TasksPanel,
+  WorkspacesPanel,
+  type ControlStateView,
+  type ControlTab,
+} from "./control-center.js";
 import "./styles.css";
 
 interface LineChangeStats {
@@ -64,6 +72,7 @@ interface ChangeSnapshot {
 
 interface ChangedFile {
   path: string;
+  workspace_id?: string;
   operation: ChangeOperation;
   before: ChangeSnapshot;
   after: ChangeSnapshot;
@@ -81,6 +90,10 @@ interface RenameGroup {
 
 interface ChangeRecord {
   id: string;
+  workspace_id?: string;
+  workspace_label?: string;
+  task_id?: string;
+  task_title?: string;
   source: string;
   title?: string;
   taskStatus?: "active" | "completed";
@@ -94,7 +107,7 @@ interface ChangeRecord {
 }
 
 type ConnectionState =
-  | { kind: "connected"; workspace: string; version: string }
+  | { kind: "connected"; workspace: string; version: string; workspaceCount: number }
   | { kind: "server_offline"; message: string }
   | { kind: "workspace_mismatch"; message: string; workspace: string }
   | { kind: "unauthorized"; message: string }
@@ -103,11 +116,34 @@ type ConnectionState =
 
 interface ViewState {
   loading: boolean;
+  revision: number;
+  serverRevision?: string | number;
+  syncMode: "idle" | "sse" | "polling";
   busyAction?: string;
   trusted: boolean;
   currentWorkspace?: string;
+  selectedWorkspaceKey?: string;
+  selectedTaskId?: string;
+  scopeError?: string;
+  workspaceOptions: Array<{
+    key: string;
+    label: string;
+    root: string;
+    workspaceId?: string;
+    available: boolean;
+    registered: boolean;
+    trusted: boolean;
+    opened: boolean;
+    registrationState: "active" | "archived";
+  }>;
+  taskOptions: Array<{
+    taskId: string;
+    title: string;
+    status?: string;
+  }>;
   connection?: ConnectionState;
   changes: ChangeRecord[];
+  control: ControlStateView;
 }
 
 interface HostMessage {
@@ -117,44 +153,125 @@ interface HostMessage {
 
 const initialState: ViewState = {
   loading: true,
+  revision: 0,
+  syncMode: "idle",
   trusted: true,
+  workspaceOptions: [],
+  taskOptions: [],
   changes: [],
+  control: {
+    loading: true,
+    monitoringPaused: false,
+    revision: 0,
+    serverOnline: false,
+    supervisorOnline: false,
+    tunnelOnline: false,
+    tunnelReady: false,
+    runtimeId: null,
+    sessions: { active: 0, max: 32 },
+    audit: {
+      available: false,
+      enabled: false,
+      currentRuntimeId: null,
+      activities: [],
+    },
+    workspaces: [],
+    tasks: [],
+    processes: [],
+  },
 };
 
 function App(): React.JSX.Element {
   const [state, setState] = useState<ViewState>(initialState);
+  const [activeTab, setActiveTab] = useState<ControlTab>(() => {
+    const saved = vscode.getState() as { activeTab?: ControlTab } | undefined;
+    return saved?.activeTab || "overview";
+  });
 
   useEffect(() => {
     const listener = (event: MessageEvent<HostMessage>) => {
-      if (event.data?.type === "state") setState(event.data.state);
+      if (event.data?.type !== "state") return;
+      latestViewRevision = Math.max(latestViewRevision, event.data.state.revision);
+      setState((current) => (
+        event.data.state.revision < current.revision ? current : event.data.state
+      ));
     };
     window.addEventListener("message", listener);
     vscode.postMessage({ type: "ready" });
     return () => window.removeEventListener("message", listener);
   }, []);
 
+  useEffect(() => {
+    vscode.setState({ activeTab });
+  }, [activeTab]);
+
   const connected = state.connection?.kind === "connected";
   const latestChange = state.changes[0];
-  const hasChanges = connected && Boolean(latestChange);
 
   return (
     <main className="app-shell">
-      <Header
-        state={state}
-        hasChanges={hasChanges}
-        onRefresh={() => post("refresh")}
-        onUndoAll={() => post("undoAll")}
-        onClear={() => post("clear")}
+      <ControlHeader
+        control={state.control}
+        activeTab={activeTab}
+        syncMode={state.syncMode}
+        busy={Boolean(state.busyAction)}
+        onTab={setActiveTab}
+        onRefresh={() => {
+          post("refresh");
+        }}
       />
 
-      {!state.trusted && (
+      {activeTab === "overview" && (
+        <OverviewPanel
+          control={state.control}
+          trusted={state.trusted}
+          busyAction={state.busyAction}
+          send={(type, workspaceId, value) => post(type, undefined, undefined, value, workspaceId)}
+        />
+      )}
+
+      {activeTab === "workspaces" && (
+        <WorkspacesPanel
+          control={state.control}
+          trusted={state.trusted}
+          busyAction={state.busyAction}
+          send={(type, workspaceId, value) => post(type, undefined, undefined, value, workspaceId)}
+          onViewHistory={(workspaceId) => {
+            setActiveTab("changes");
+            post("viewWorkspaceHistory", undefined, undefined, undefined, workspaceId);
+          }}
+        />
+      )}
+
+      {activeTab === "tasks" && (
+        <TasksPanel control={state.control} changes={state.changes} />
+      )}
+
+      {activeTab === "changes" && (connected || state.workspaceOptions.length > 1) && (
+        <ContextFilters
+          state={state}
+          showRegistration={connected}
+          onWorkspace={(value) => post("selectWorkspace", undefined, undefined, value)}
+          onTask={(value) => post("selectTask", undefined, undefined, value)}
+          onConnect={() => post("connect")}
+        />
+      )}
+
+      {activeTab === "changes" && !state.trusted && (
         <div className="trust-banner">
           <Icon name="lock" />
-          <span>Trust this workspace to undo or reapply file changes.</span>
+          <span>Trust this workspace to connect LCA or mutate files.</span>
         </div>
       )}
 
-      {!connected && (
+      {activeTab === "changes" && state.scopeError && (
+        <div className="scope-error-banner">
+          <Icon name="warning" />
+          <span>{state.scopeError}</span>
+        </div>
+      )}
+
+      {activeTab === "changes" && !connected && (
         <ConnectionCard
           state={state}
           onConnect={() => post("connect")}
@@ -163,15 +280,21 @@ function App(): React.JSX.Element {
         />
       )}
 
-      {connected && !state.loading && state.changes.length === 0 && <EmptyState />}
+      {activeTab === "changes" && connected && !state.loading && state.changes.length === 0 && <EmptyState />}
 
-      {connected && latestChange && (
-        <section className="change-list" aria-label="Latest review change">
-          <ChangeCard key={latestChange.id} change={latestChange} state={state} />
+      {activeTab === "changes" && connected && latestChange && (
+        <section className="change-list" aria-label="Review changes">
+          {state.changes.map((change) => (
+            <ChangeCard
+              key={`${change.workspace_id || "legacy"}:${change.id}`}
+              change={change}
+              state={state}
+            />
+          ))}
         </section>
       )}
 
-      {state.loading && !state.connection && (
+      {activeTab === "changes" && state.loading && !state.connection && (
         <div className="loading-state">
           <Spinner />
           <span>Connecting to Local Coding Agent…</span>
@@ -181,58 +304,79 @@ function App(): React.JSX.Element {
   );
 }
 
-function Header({
+function ContextFilters({
   state,
-  hasChanges,
-  onRefresh,
-  onUndoAll,
-  onClear,
+  showRegistration,
+  onWorkspace,
+  onTask,
+  onConnect,
 }: {
   state: ViewState;
-  hasChanges: boolean;
-  onRefresh: () => void;
-  onUndoAll: () => void;
-  onClear: () => void;
+  showRegistration: boolean;
+  onWorkspace: (value: string | undefined) => void;
+  onTask: (value: string | undefined) => void;
+  onConnect: () => void;
 }): React.JSX.Element {
-  const connection = state.connection;
-  const connected = connection?.kind === "connected";
+  const selected = state.workspaceOptions.find(
+    (workspace) => workspace.key === state.selectedWorkspaceKey,
+  );
   return (
-    <header className="page-header">
-      <div>
-        <div className="eyebrow">LOCAL CODING AGENT</div>
-        <h1>Review Changes</h1>
-        <div className="connection-line">
-          <span className={`status-dot ${connected ? "connected" : "disconnected"}`} />
-          <span>{connected ? "Connected" : "Not connected"}</span>
-          {connected && <span className="muted">v{connection.version}</span>}
+    <>
+      <section className="context-filters" aria-label="Review context">
+        <label className="context-filter">
+          <span>Workspace</span>
+          <select
+            value={state.selectedWorkspaceKey || "__all_available_workspaces__"}
+            disabled={Boolean(state.busyAction)}
+            onChange={(event) => onWorkspace(event.target.value || undefined)}
+          >
+            {state.workspaceOptions.map((workspace) => (
+              <option
+                key={workspace.key}
+                value={workspace.key}
+                disabled={!workspace.available}
+              >
+                {workspace.label}
+                {!workspace.registered ? " (not registered)" : ""}
+                {!workspace.available ? " (unavailable)" : ""}
+                {workspace.registrationState === "archived" ? " (read only)" : ""}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <label className="context-filter">
+          <span>Task</span>
+          <select
+            value={state.selectedTaskId || ""}
+            disabled={Boolean(state.busyAction) || state.taskOptions.length === 0}
+            onChange={(event) => onTask(event.target.value || undefined)}
+          >
+            <option value="">All tasks</option>
+            {state.taskOptions.map((task) => (
+              <option key={task.taskId} value={task.taskId}>
+                {task.title}{task.status ? ` (${task.status})` : ""}
+              </option>
+            ))}
+          </select>
+        </label>
+      </section>
+      {showRegistration && selected && !selected.registered && (
+        <div className="workspace-registration-banner">
+          <span><Icon name="workspace" /> {selected.label} is not registered with LCA.</span>
+          <Button
+            variant="secondary"
+            icon="plug"
+            compact
+            loading={state.busyAction === "connect"}
+            disabled={!state.trusted || Boolean(state.busyAction)}
+            onClick={onConnect}
+          >
+            Connect
+          </Button>
         </div>
-      </div>
-      <div className="header-actions">
-        {hasChanges && (
-          <>
-            <IconButton
-              title="Undo all changes"
-              icon="undo"
-              disabled={!state.trusted || Boolean(state.busyAction)}
-              onClick={onUndoAll}
-            />
-            <IconButton
-              title="Clear history"
-              icon="clear"
-              disabled={!state.trusted || Boolean(state.busyAction)}
-              onClick={onClear}
-            />
-          </>
-        )}
-        <IconButton
-          title="Refresh"
-          icon="refresh"
-          spinning={state.loading}
-          disabled={Boolean(state.busyAction)}
-          onClick={onRefresh}
-        />
-      </div>
-    </header>
+      )}
+    </>
   );
 }
 
@@ -289,6 +433,13 @@ function ConnectionCard({
 
       <div className="field-grid">
         <Field label="Current Workspace" value={state.currentWorkspace || "Not available"} />
+        {state.workspaceOptions.length > 1 && (
+          <Field
+            label="Open Folders"
+            value={state.workspaceOptions.map((workspace) => workspace.label).join(", ")}
+            wrap
+          />
+        )}
         {mismatch && <Field label="LCA Workspace" value={connection.workspace} />}
         <Field label="Status" value={connectionMessage(connection)} wrap />
       </div>
@@ -299,7 +450,7 @@ function ConnectionCard({
             variant="primary"
             icon="plug"
             loading={state.busyAction === "connect"}
-            disabled={busy}
+            disabled={!state.trusted || busy}
             onClick={onConnect}
           >
             Connect to This Workspace
@@ -323,7 +474,8 @@ function ConnectionCard({
 
       {canConnect && (
         <p className="card-note">
-          Connecting stops the current LCA process and starts it for this VS Code workspace.
+          Connecting registers and selects this folder for new tasks while preserving the
+          existing supervisor and tunnel when they are already running.
         </p>
       )}
     </Card>
@@ -346,6 +498,8 @@ function ChangeCard({ change, state }: { change: ChangeRecord; state: ViewState 
   const canUndoChange = ["applied", "reapplied", "partially_undone"].includes(change.status);
   const canReapplyChange = ["undone", "partially_undone"].includes(change.status);
   const disabled = Boolean(state.busyAction);
+  const workspace = state.workspaceOptions.find((item) => item.workspaceId === change.workspace_id);
+  const mutationAllowed = workspace?.registrationState === "active" && workspace.opened;
 
   return (
     <Card className={`change-card status-${change.status}`}>
@@ -357,6 +511,33 @@ function ChangeCard({ change, state }: { change: ChangeRecord; state: ViewState 
               <h2>{title}</h2>
               <StatusBadge status={change.status} />
             </div>
+            {(change.workspace_label || change.workspace_id || change.task_id || change.taskStatus) && (
+              <div className="context-badges">
+                {(change.workspace_label || change.workspace_id) && (
+                  <span
+                    className="context-badge workspace-badge"
+                    title={change.workspace_id || change.workspace_label}
+                  >
+                    <Icon name="workspace" />
+                    {change.workspace_label || shortId(change.workspace_id || "")}
+                  </span>
+                )}
+                {(change.task_id || change.taskStatus) && (
+                  <span
+                    className="context-badge task-badge"
+                    title={change.task_id || change.taskStatus}
+                  >
+                    <Icon name="task" />
+                    {change.task_title ||
+                      (change.task_id
+                        ? `Task ${shortId(change.task_id)}`
+                        : change.taskStatus === "active"
+                          ? "Active task"
+                          : "Completed task")}
+                  </span>
+                )}
+              </div>
+            )}
             <LineStats stats={change.stats} className="change-line-stats" />
             <div className="change-meta">
               <span>{relativeTime(change.createdAt)}</span>
@@ -373,9 +554,15 @@ function ChangeCard({ change, state }: { change: ChangeRecord; state: ViewState 
               variant="ghost"
               icon="undo"
               compact
-              disabled={!state.trusted || disabled}
-              loading={state.busyAction === `undo:${change.id}`}
-              onClick={() => post("undoChange", change.id)}
+              disabled={!state.trusted || !mutationAllowed || disabled}
+              loading={state.busyAction === `undo:${change.workspace_id || ""}:${change.id}`}
+              onClick={() => post(
+                "undoChange",
+                change.id,
+                undefined,
+                undefined,
+                change.workspace_id,
+              )}
             >
               Undo
             </Button>
@@ -385,9 +572,15 @@ function ChangeCard({ change, state }: { change: ChangeRecord; state: ViewState 
               variant="ghost"
               icon="redo"
               compact
-              disabled={!state.trusted || disabled}
-              loading={state.busyAction === `reapply:${change.id}`}
-              onClick={() => post("reapplyChange", change.id)}
+              disabled={!state.trusted || !mutationAllowed || disabled}
+              loading={state.busyAction === `reapply:${change.workspace_id || ""}:${change.id}`}
+              onClick={() => post(
+                "reapplyChange",
+                change.id,
+                undefined,
+                undefined,
+                change.workspace_id,
+              )}
             >
               Reapply
             </Button>
@@ -424,6 +617,8 @@ function FileRow({
   const canUndo = file.undoable && file.undoStatus === "applied";
   const canReapply = file.undoable && file.undoStatus === "undone";
   const operation = operationDetails(file.operation);
+  const workspace = state.workspaceOptions.find((item) => item.workspaceId === change.workspace_id);
+  const mutationAllowed = workspace?.registrationState === "active" && workspace.opened;
 
   return (
     <div className="file-row">
@@ -431,7 +626,13 @@ function FileRow({
         className="file-main"
         type="button"
         disabled={!file.undoable || disabled}
-        onClick={() => post("openDiff", change.id, file.path)}
+        onClick={() => post(
+          "openDiff",
+          change.id,
+          file.path,
+          undefined,
+          change.workspace_id,
+        )}
         title={file.undoable ? `Review ${file.path}` : "Diff unavailable for this file"}
       >
         <span className={`operation-badge operation-${file.operation}`}>{operation.marker}</span>
@@ -449,23 +650,44 @@ function FileRow({
         <IconButton
           title="Open current file"
           icon="open"
-          disabled={disabled || file.operation === "deleted"}
-          onClick={() => post("openCurrentFile", change.id, file.path)}
+          disabled={disabled || !workspace?.opened || file.operation === "deleted"}
+          onClick={() => post(
+            "openCurrentFile",
+            change.id,
+            file.path,
+            undefined,
+            change.workspace_id,
+          )}
         />
         <IconButton
           title="Review diff"
           icon="review"
           disabled={disabled || !file.undoable}
-          onClick={() => post("openDiff", change.id, file.path)}
+          onClick={() => post(
+            "openDiff",
+            change.id,
+            file.path,
+            undefined,
+            change.workspace_id,
+          )}
         />
         {canUndo && (
           <Button
             variant="ghost"
             icon="undo"
             compact
-            disabled={!state.trusted || disabled}
-            loading={state.busyAction === `undo:${change.id}:${file.path}`}
-            onClick={() => post("undoFile", change.id, file.path)}
+            disabled={!state.trusted || !mutationAllowed || disabled}
+            loading={
+              state.busyAction ===
+              `undo:${change.workspace_id || ""}:${change.id}:${file.path}`
+            }
+            onClick={() => post(
+              "undoFile",
+              change.id,
+              file.path,
+              undefined,
+              change.workspace_id,
+            )}
           >
             Undo
           </Button>
@@ -475,9 +697,18 @@ function FileRow({
             variant="ghost"
             icon="redo"
             compact
-            disabled={!state.trusted || disabled}
-            loading={state.busyAction === `reapply:${change.id}:${file.path}`}
-            onClick={() => post("reapplyFile", change.id, file.path)}
+            disabled={!state.trusted || !mutationAllowed || disabled}
+            loading={
+              state.busyAction ===
+              `reapply:${change.workspace_id || ""}:${change.id}:${file.path}`
+            }
+            onClick={() => post(
+              "reapplyFile",
+              change.id,
+              file.path,
+              undefined,
+              change.workspace_id,
+            )}
           >
             Reapply
           </Button>
@@ -593,6 +824,8 @@ type IconName =
   | "history"
   | "warning"
   | "check"
+  | "workspace"
+  | "task"
   | "chevronUp"
   | "chevronDown";
 
@@ -612,14 +845,44 @@ function Icon({ name }: { name: IconName }): React.JSX.Element {
     history: <><path d="M4 5v4h4"/><path d="M5 8a6 6 0 1 1 1 6M10 6v4l3 2"/></>,
     warning: <><path d="M10 3 2 17h16L10 3Z"/><path d="M10 8v4M10 15h.01"/></>,
     check: <path d="m4 10 4 4 8-8"/>,
+    workspace: <><rect x="3" y="4" width="14" height="12" rx="2"/><path d="M3 8h14M7 4v4"/></>,
+    task: <><path d="M6 4h8v13H6z"/><path d="M8 3h4v3H8zM8 10l1.5 1.5L12 9M8 14h4"/></>,
     chevronUp: <path d="m5 12 5-5 5 5"/>,
     chevronDown: <path d="m5 8 5 5 5-5"/>,
   };
   return <svg className="icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>;
 }
 
-function post(type: string, changeId?: string, path?: string): void {
-  vscode.postMessage({ type, changeId, path });
+let latestViewRevision = 0;
+let messageSequence = 0;
+const recentMessages = new Map<string, number>();
+
+function post(
+  type: string,
+  changeId?: string,
+  path?: string,
+  value?: string,
+  workspaceId?: string,
+): void {
+  const key = [type, workspaceId || "", changeId || "", path || "", value || ""].join(":");
+  const now = Date.now();
+  const previous = recentMessages.get(key) || 0;
+  if (now - previous < 500) return;
+  recentMessages.set(key, now);
+  if (recentMessages.size > 100) {
+    for (const [messageKey, createdAt] of recentMessages) {
+      if (now - createdAt > 2000) recentMessages.delete(messageKey);
+    }
+  }
+  vscode.postMessage({
+    type,
+    changeId,
+    path,
+    value,
+    workspaceId,
+    revision: latestViewRevision,
+    requestId: `${now}-${++messageSequence}`,
+  });
 }
 
 function changeTitle(change: ChangeRecord): string {
@@ -650,6 +913,10 @@ function relativeTime(value: string): string {
   const hours = Math.floor(minutes / 60);
   if (hours < 24) return `${hours}h ago`;
   return `${Math.floor(hours / 24)}d ago`;
+}
+
+function shortId(value: string): string {
+  return value.length > 10 ? value.slice(0, 8) : value;
 }
 
 function statusIcon(status: ChangeStatus): IconName {

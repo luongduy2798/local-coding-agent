@@ -13,6 +13,66 @@ export type ChangeOperation =
   | "renamed"
   | "metadata_only";
 
+export type ApiRevision = string | number;
+
+export interface WorkspaceDescriptor {
+  workspace_id?: string;
+  id?: string;
+  label?: string;
+  root?: string;
+  canonical_root?: string;
+  canonicalRoot?: string;
+  path?: string;
+  available?: boolean;
+  availability?: string;
+  trusted?: boolean;
+  trust_state?: string;
+  registration_state?: "active" | "archived";
+  registrationState?: "active" | "archived";
+  archived_at?: string | null;
+  archivedAt?: string | null;
+  metadata?: {
+    label?: string;
+    trusted?: boolean;
+  };
+}
+
+export interface TaskDescriptor {
+  task_id?: string;
+  routingTaskId?: string;
+  routing_task_id?: string;
+  id?: string;
+  title?: string;
+  status?: "open" | "active" | "completed" | "closed" | "failed";
+  primary_workspace_id?: string;
+  workspace_ids?: string[];
+  created_at?: string;
+  updated_at?: string;
+  closed_at?: string | null;
+  workspace_set_frozen?: boolean;
+}
+
+export interface ProcessDescriptor {
+  process_id: string;
+  name?: string;
+  status: string;
+  exit_code?: number | null;
+  task_id?: string | null;
+  workspace_id?: string | null;
+  started_at?: string | null;
+}
+
+export interface AuditStatus {
+  enabled: boolean;
+  path?: string;
+  exists?: boolean;
+  bytes?: number;
+  rotating?: boolean;
+  queued_entries?: number;
+  last_entry_at?: string | null;
+  updated_at?: string | null;
+}
+
 export interface HealthResponse {
   status: string;
   version: string;
@@ -21,6 +81,21 @@ export interface HealthResponse {
   workspace: string;
   roots: string[];
   mcp_endpoint: string;
+  workspace_id?: string;
+  selected_workspace_id?: string;
+  global_default_workspace_id?: string;
+  runtime_id?: string;
+  workspaces?: WorkspaceDescriptor[];
+  tasks?: TaskDescriptor[];
+  processes?: ProcessDescriptor[];
+  audit?: AuditStatus;
+  mcp_sessions?: {
+    active?: number;
+    max?: number;
+    total_requests?: number;
+  };
+  revision?: ApiRevision;
+  change_events_endpoint?: string;
 }
 
 export interface LineChangeStats {
@@ -40,6 +115,7 @@ export interface ChangeSnapshot {
 
 export interface ChangedFile {
   path: string;
+  workspace_id?: string;
   operation: ChangeOperation;
   before: ChangeSnapshot;
   after: ChangeSnapshot;
@@ -65,6 +141,14 @@ export interface ChangeOperationRecord {
 
 export interface ChangeRecord {
   id: string;
+  workspace?: string;
+  workspace_id?: string;
+  workspace_key?: string;
+  workspace_label?: string;
+  task_id?: string;
+  routingTaskId?: string;
+  routing_task_id?: string;
+  task_title?: string;
   source: string;
   title?: string;
   taskStatus?: "active" | "completed";
@@ -83,8 +167,20 @@ export interface ChangeRecord {
 }
 
 export interface ChangeListResponse {
-  count: number;
-  changes: ChangeRecord[];
+  count?: number;
+  changes?: ChangeRecord[];
+  workspace_id?: string;
+  label?: string;
+  revision?: ApiRevision;
+  notModified?: boolean;
+  workspaces?: Array<WorkspaceDescriptor & {
+    changes?: ChangeRecord[] | {
+      count?: number;
+      changes: ChangeRecord[];
+      revision?: ApiRevision;
+    };
+  }>;
+  tasks?: TaskDescriptor[];
 }
 
 export interface ChangeContentResponse {
@@ -101,6 +197,18 @@ export interface ChangeContentResponse {
 
 export interface ChangeMutationResponse {
   change: ChangeRecord;
+  revision?: ApiRevision;
+}
+
+export interface ReviewScope {
+  workspaceId?: string;
+  taskId?: string;
+}
+
+export interface ChangeEvent {
+  event: string;
+  revision?: ApiRevision;
+  data?: unknown;
 }
 
 export interface ConflictFile {

@@ -4,13 +4,18 @@
 
 import http from "node:http";
 import { spawn } from "node:child_process";
-import { mkdir } from "node:fs/promises";
+import { mkdir, readdir } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Script } from "node:vm";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { createIsolatedTestRoot } from "../helpers/test-guard.mjs";
+import {
+  createGitFixture,
+  createIsolatedTestRoot,
+  registerDisposableRoot,
+  safeRemove
+} from "../helpers/test-guard.mjs";
 
 const TEST_DIR = path.dirname(fileURLToPath(import.meta.url));
 const SERVER = path.resolve(TEST_DIR, "../..", "server.mjs");
@@ -71,7 +76,7 @@ async function startServer(workspace) {
       AGENT_EXTRA_ROOTS_JSON: "[]",
       MCP_AUTH_TOKEN: "",
       AGENT_AUDIT: "0",
-      LCA_TEST_EXPOSE_REDUNDANT_TOOLS: "1"
+      LCA_TEST_RUNTIME_DIAGNOSTICS: "1"
     },
     windowsHide: true,
     stdio: ["ignore", "pipe", "pipe"]
@@ -119,104 +124,130 @@ async function callJson(client, name, args = {}) {
 }
 
 const testContext = await createIsolatedTestRoot({ prefix: "lca-pro-", protectedPaths: [path.resolve("..")] });
-const base = testContext.fixtureDir;
+const testFixture = await createGitFixture(testContext, {
+  initialFiles: {
+    "package.json": JSON.stringify({
+      scripts: {
+        test: "node --version",
+        build: "node --version",
+        lint: "node --version",
+        typecheck: "node --version"
+      },
+      dependencies: { express: "^4.0.0" }
+    }, null, 2),
+    "README.md": "# Pro workspace\n",
+    "src/index.js": "export function hello(){ return 'pro'; }\n"
+  }
+});
+const base = testFixture.root;
+await runLocal("git", ["add", "."], base);
+await runLocal("git", ["commit", "-m", "initial pro state"], base);
 let server;
 let client;
 try {
   server = await startServer(base);
   client = await connect(server.port);
 
-  await callJson(client, "write_file", {
-    path: "package.json",
-    content: JSON.stringify({ scripts: { test: "node --version", build: "node --version", lint: "node --version", typecheck: "node --version" }, dependencies: { express: "^4.0.0" } }, null, 2)
+  const info = await callJson(client, "lca_status");
+  check("lca_status exposes pro tier", info.tier === "pro", `tier=${info.tier}`);
+  check("lca_status exposes fixed catalog metadata", info.tool_catalog === "fixed" && info.catalog_version === 5 && typeof info.catalog_hash === "string", JSON.stringify(info));
+  check("lca_status exposes policy", typeof info.policy === "string" && info.policy.length > 0);
+
+  const workspaceList = await callJson(client, "workspace_list");
+  const workspaceId = workspaceList.workspaces?.[0]?.workspace_id;
+  check("workspace_list exposes one trusted fixture", workspaceList.count === 1 && Boolean(workspaceId) && workspaceList.workspaces[0].trusted === true, JSON.stringify(workspaceList));
+  const opened = await callJson(client, "task_open", {
+    title: "Pro fixed-catalog regression",
+    primary_workspace_id: workspaceId
   });
-  await callJson(client, "write_file", { path: "README.md", content: "# Pro workspace\n" });
-  await callJson(client, "write_file", { path: "src/index.js", content: "export function hello(){ return 'pro'; }\n" });
+  const taskToken = opened.task?.task_token;
+  check("task_open binds a resumable task", Boolean(taskToken) && opened.task?.primary_workspace_id === workspaceId, JSON.stringify(opened));
 
-  const info = await callJson(client, "workspace_info");
-  check("workspace_info exposes pro tier", info.tier === "pro", `tier=${info.tier}`);
-  check("workspace_info exposes policy", typeof info.policy === "string" && info.policy.length > 0);
-
-  const snap = await callJson(client, "workspace_snapshot", { depth: 3, max_entries: 120, include_symbols: true, refresh: true });
+  const snap = await callJson(client, "workspace_snapshot", {
+    depth: 3,
+    max_entries: 120,
+    include_symbols: true,
+    refresh: true,
+    task_token: taskToken
+  });
   check("snapshot kind is workspace_snapshot", snap.kind === "workspace_snapshot");
   check("snapshot is pro", snap.pro === true && snap.tier === "pro");
-  check("snapshot version is 4.5.0-pro", snap.version === "4.5.0-pro", `version=${snap.version}`);
+  check("snapshot version is 5.0.0-pro", snap.version === "5.0.0-pro", `version=${snap.version}`);
   check("snapshot includes safety model", snap.safety?.file_tools_root_confined === true && snap.safety?.command_os_sandbox === false);
   check("snapshot detects javascript", snap.profile?.languages?.includes("javascript"), JSON.stringify(snap.profile));
   check("snapshot omits fast-workflow commands", snap.commands === undefined, JSON.stringify(snap.commands));
   check("snapshot includes ripgrep status", typeof snap.ripgrep?.available === "boolean", JSON.stringify(snap.ripgrep));
-  check("snapshot includes cache status", typeof snap.cache?.hit === "boolean" && snap.cache.ttl_seconds > 0, JSON.stringify(snap.cache));
+  check("snapshot includes coverage-aware cache status", typeof snap.cache?.hit === "boolean" && snap.cache.freshness?.authoritative === true, JSON.stringify(snap.cache));
   check("snapshot includes important files", snap.important_files?.some((f) => f.path === "README.md"));
-  check("snapshot includes tree entries", snap.tree?.entries?.includes("src/index.js"));
+  check("snapshot includes workspace-qualified tree entries", snap.tree?.entries?.some((entry) => entry.workspace_id === snap.workspace_id && entry.path === "src/index.js"));
   check("snapshot includes symbols when requested", snap.symbols?.some((s) => s.name === "hello"), JSON.stringify(snap.symbols?.slice(0, 10)));
   check("snapshot includes recommended reads", snap.recommended_reads?.some((f) => f.path === "README.md"), JSON.stringify(snap.recommended_reads));
   check("snapshot workflow hints skip automatic tests", snap.workflow_hints?.some((h) => /explicitly requested/.test(h)), JSON.stringify(snap.workflow_hints));
   check("snapshot omits metrics", snap.metrics === undefined && snap.health === undefined);
   check("snapshot includes next actions", Array.isArray(snap.next_best_actions) && snap.next_best_actions.length > 0);
   check("snapshot next actions avoid quality gates", !snap.next_best_actions.join("\n").match(/quality_gate|run_tests|run_changed_tests|build|lint/), JSON.stringify(snap.next_best_actions));
-  const focusedSnap = await callJson(client, "workspace_snapshot", { focus: "hello function", include_matches: true, max_output_chars: 5000 });
-  check("snapshot supports focused evidence", focusedSnap.evidence?.returned > 0, JSON.stringify(focusedSnap.evidence));
-  await callJson(client, "write_file", { path: "src/deep/a/b/c/feature.js", content: "export function deepFeature(){ return true; }\n" });
-  await callJson(client, "workspace_snapshot", { depth: 2, max_entries: 20, refresh: true });
-  const deepMap = await callJson(client, "repo_map", { depth: 6, max_entries: 400 });
-  check("repo_map rebuilds cache for deeper coverage", deepMap.tree?.includes("src/deep/a/b/c/feature.js"), JSON.stringify(deepMap.tree?.slice(-20)));
-  const deepSymbols = await callJson(client, "repo_symbols", { max_files: 800, max_matches: 2000 });
-  check("repo_symbols expands cached symbol coverage", deepSymbols.symbols?.some((s) => s.name === "deepFeature"), JSON.stringify(deepSymbols.symbols?.slice(-20)));
+  const focusedSnap = await callJson(client, "workspace_snapshot", {
+    focus: "hello function",
+    include_matches: true,
+    max_output_chars: 5000,
+    task_token: taskToken
+  });
+  check("snapshot supports focused evidence", focusedSnap.evidence?.count > 0, JSON.stringify(focusedSnap));
+  await callJson(client, "apply_patch", {
+    task_token: taskToken,
+    operations: [{
+      op: "create",
+      path: "src/deep/a/b/c/feature.js",
+      content: "export function deepFeature(){ return true; }\n"
+    }]
+  });
+  const deepFiles = await callJson(client, "find_files", {
+    glob: "*feature.js",
+    task_token: taskToken,
+    limit: 20
+  });
+  check("find_files locates deep context without a separate repo-map tool", deepFiles.files?.some((entry) => entry.path === "src/deep/a/b/c/feature.js"), JSON.stringify(deepFiles));
+  const deepSymbols = await callJson(client, "code_query", {
+    query: "deepFeature",
+    mode: "symbol",
+    depth: "fast",
+    task_token: taskToken,
+    refresh: true
+  });
+  check("code_query expands cached symbol coverage", deepSymbols.results?.some((result) => result.symbol === "deepFeature" || result.name === "deepFeature"), JSON.stringify(deepSymbols));
 
-  const atSearch = await callJson(client, "workspace_search", { query: "@deep", include: ["file", "folder", "symbol"], limit: 10 });
-  check("workspace_search finds @ file context", atSearch.results?.some((r) => r.type === "file" && r.path.endsWith("feature.js")), JSON.stringify(atSearch.results));
-  check("workspace_search finds @ symbol context", atSearch.results?.some((r) => r.type === "symbol" && r.symbol === "deepFeature"), JSON.stringify(atSearch.results));
-
-  const slash = await callJson(client, "slash_commands", { query: "/", limit: 20 });
-  check("slash_commands omits /plan autocomplete", !slash.commands?.some((c) => c.command === "/plan"), JSON.stringify(slash.commands));
-  check("slash_commands shows workflows on empty slash", slash.commands?.some((c) => c.command === "/debug" || c.command === "/implement"), JSON.stringify(slash.commands));
-  check("slash_commands shows skills on empty slash", slash.commands?.some((c) => c.type === "skill" && c.command.startsWith("/skill:")), JSON.stringify(slash.commands));
-
-  const skillSlash = await callJson(client, "slash_commands", { query: "/skill", limit: 20 });
-  check("slash_commands suggests /skill:name format", skillSlash.commands?.some((c) => c.type === "skill" && c.command.startsWith("/skill:")), JSON.stringify(skillSlash.commands));
-
-  const composed = await callJson(client, "compose_prompt", { input: "fix setup flow @deepFeature /plan", selected_context: ["src/index.js"] });
-  check("compose_prompt detects plan mode", composed.mode === "plan", JSON.stringify(composed));
-  check("compose_prompt includes selected context", composed.selected_context?.some((c) => c.path === "src/index.js"), JSON.stringify(composed.selected_context));
-  check("compose_prompt emits ready prompt", /Use LCA Plan mode/.test(composed.prompt) && /Selected context/.test(composed.prompt), composed.prompt);
-  check("compose_prompt documents Review Changes", /Review Changes/.test(composed.prompt) && /tracked automatically/.test(composed.prompt) && /STALE_FILE/.test(composed.prompt), composed.prompt);
-  const removedLifecycleIdentifiers = [
-    ["task", "mode"].join("_"),
-    ["task", "begin"].join("_"),
-    ["task", "finish"].join("_"),
-    ["task", "get"].join("_")
-  ];
-  check(
-    "compose_prompt omits removed lifecycle payload",
-    removedLifecycleIdentifiers.every((identifier) => !JSON.stringify(composed).includes(identifier)),
-    JSON.stringify(composed)
-  );
-  const composedSkill = await callJson(client, "compose_prompt", { input: "check setup /skill:setup-local-coding-agent", mode: "plan" });
-  check("typed slash workflow/skill is preserved in compose", composedSkill.mode === "plan" && composedSkill.skills?.includes("setup-local-coding-agent") && /read_skill/.test(composedSkill.prompt), JSON.stringify(composedSkill));
-  const slashOverridesButtonMode = await callJson(client, "compose_prompt", { input: "review it /debug", mode: "plan" });
-  check("typed slash workflow overrides quick action mode", slashOverridesButtonMode.mode === "debug", JSON.stringify(slashOverridesButtonMode));
+  const profile = await callJson(client, "project_profile", { task_token: taskToken, refresh: true });
+  check("project_profile retains language and script discovery", profile.languages?.includes("javascript") && profile.scripts?.test === "node --version", JSON.stringify(profile));
 
   const companionPage = await fetch(`http://127.0.0.1:${server.port}/companion`);
   check("companion standalone HTTP page is not exposed", companionPage.status === 404, `status=${companionPage.status}`);
 
   const tools = await client.listTools();
-  const lcaTool = tools.tools?.find((t) => t.name === "lca");
-  const lcaInfo = await callJson(client, "lca", {});
-  check("lca alias tool is listed", Boolean(lcaTool), JSON.stringify(tools.tools?.map((t) => t.name)));
-  check("lca alias returns workspace info", lcaInfo.primary_root === info.primary_root && lcaInfo.version === info.version, JSON.stringify(lcaInfo));
-  const openCompanionTool = tools.tools?.find((t) => t.name === "open_companion");
+  const toolNames = tools.tools?.map((tool) => tool.name) || [];
+  check("model catalog contains exactly 35 tools", toolNames.length === 35, JSON.stringify(toolNames));
+  check(
+    "legacy aliases and app-only backend aliases are absent",
+    ["lca", "workspace_info", "repo_map", "repo_symbols", "workspace_search", "slash_commands", "compose_prompt", "session_report"].every((name) => !toolNames.includes(name)),
+    JSON.stringify(toolNames)
+  );
+  const staleLcaAlias = await client.callTool({ name: "lca", arguments: {} });
+  check("legacy lca alias is not callable", staleLcaAlias.isError === true && /Tool lca not found/.test(staleLcaAlias.content?.[0]?.text || ""), JSON.stringify(staleLcaAlias));
   const lcaInputTool = tools.tools?.find((t) => t.name === "lca_input");
-  check("planner tools remain available", ["task_plan", "task_state", "decision_log"].every((name) => tools.tools?.some((tool) => tool.name === name)), JSON.stringify(tools.tools?.map((tool) => tool.name)));
-  check("Apps SDK lca_input tool is listed", Boolean(lcaInputTool), JSON.stringify(tools.tools?.map((t) => t.name)));
-  const workspaceSearchListed = tools.tools?.find((tool) => tool.name === "workspace_search");
-  check("companion backend tools are app-only", workspaceSearchListed?._meta?.ui?.visibility?.[0] === "app", JSON.stringify(workspaceSearchListed?._meta));
-  check("open_companion tool is removed", !openCompanionTool, JSON.stringify(tools.tools?.map((t) => t.name)));
+  check("planner tools remain available", ["task_plan", "task_state", "task_checkpoint", "task_close"].every((name) => toolNames.includes(name)), JSON.stringify(toolNames));
+  check("Apps SDK lca_input tool is listed", Boolean(lcaInputTool), JSON.stringify(toolNames));
   check("Apps SDK render tool has output template", lcaInputTool?._meta?.["openai/outputTemplate"] === "ui://widget/lca-compact-input-v2.html", JSON.stringify({ lcaInput: lcaInputTool?._meta }));
   const resources = await client.listResources();
   check("Apps SDK companion widget resource is listed", resources.resources?.some((r) => r.uri === "ui://widget/lca-compact-input-v2.html"), JSON.stringify(resources.resources));
   const widgetResource = await client.readResource({ uri: "ui://widget/lca-compact-input-v2.html" });
   const widgetHtml = widgetResource.contents?.[0]?.text || "";
-  check("Apps SDK companion widget resource is html", widgetResource.contents?.[0]?.mimeType === "text/html;profile=mcp-app" && widgetHtml.includes("sendFollowUpMessage") && widgetHtml.includes("slash_commands") && widgetHtml.includes("suggestions.scrollTop = 0") && !widgetHtml.includes("Prompt output"), JSON.stringify(widgetResource.contents?.[0]));
+  check("Apps SDK companion widget resource is html", widgetResource.contents?.[0]?.mimeType === "text/html;profile=mcp-app" && widgetHtml.includes("sendFollowUpMessage") && widgetHtml.includes("find_files") && widgetHtml.includes("code_query") && widgetHtml.includes("suggestions.scrollTop = 0") && !widgetHtml.includes("Prompt output"), JSON.stringify(widgetResource.contents?.[0]));
+  check(
+    "Apps SDK widget fences task/workspace context before search and send",
+    widgetHtml.includes("contextTaskId") &&
+      widgetHtml.includes("workspace_set_version") &&
+      widgetHtml.includes("responseMatchesContext"),
+    "missing widget task/workspace fencing"
+  );
   const removedWidgetIdentifiers = [
     ["task", "toggle"].join("-"),
     ["task", "mode"].join("_")
@@ -235,39 +266,54 @@ try {
   }
   check("Apps SDK companion widget script compiles", Boolean(widgetScript) && !widgetScriptError, widgetScriptError || "inline script missing");
   check("Apps SDK companion widget requests PiP from a user action", /id\s*=\s*(['\"])pip\1/.test(widgetHtml) && /pipButton\.addEventListener\(\s*(['\"])click\1\s*,\s*requestPipMode\s*\)/.test(widgetScript) && /requestDisplayMode\(\{\s*mode:\s*(['\"])pip\1\s*\}\)/.test(widgetScript), "PiP button, click handler, or requestDisplayMode({ mode: 'pip' }) missing");
+  check(
+    "Apps SDK widget fences duplicate sends before the first await",
+    /async function sendCurrentTask\(\)\s*\{\s*if \(sendPending\) return;\s*sendPending = true;\s*sendButton\.disabled = true;/.test(widgetScript) &&
+      (widgetScript.match(/sendButton\.addEventListener\(\s*(['\"])click\1\s*,\s*sendCurrentTask\s*\)/g) || []).length === 1,
+    "synchronous send lock or unique click binding missing"
+  );
+  check(
+    "Apps SDK widget clears selected context when task/workspace revision changes",
+    /if \(contextChanged\)\s*\{[\s\S]*?selected\.length = 0;[\s\S]*?suggestionCache\.clear\(\);[\s\S]*?searchSeq \+= 1;/.test(widgetScript),
+    "revision-bound selected-context reset missing"
+  );
   const lcaInput = await client.callTool({ name: "lca_input", arguments: { initial_input: "fix @deepFeature" } });
-  check("lca_input returns structured widget payload", lcaInput.structuredContent?.initial_input === "fix @deepFeature" && lcaInput.structuredContent?.shortcuts?.length === 1 && lcaInput.structuredContent.shortcuts[0]?.name === "plan" && /LCA input is ready/.test(lcaInput.content?.[0]?.text || ""), JSON.stringify(lcaInput));
+  check("lca_input returns task-bound widget payload", lcaInput.structuredContent?.initial_input === "fix @deepFeature" && lcaInput.structuredContent?.task_id === opened.task.id && lcaInput.structuredContent?.workspace?.workspace_id === workspaceId && lcaInput.structuredContent?.shortcuts?.length === 1 && lcaInput.structuredContent.shortcuts[0]?.name === "plan" && /LCA input is ready/.test(lcaInput.content?.[0]?.text || ""), JSON.stringify(lcaInput));
+  check("widget composes prompts locally against the stable tools", widgetScript.includes("Start with workspace_snapshot or code_query") && widgetScript.includes("use apply_patch for filesystem mutation") && !widgetScript.includes("compose_prompt"), "stable prompt composer missing");
 
-  const doctor = await callJson(client, "workspace_doctor", {});
-  check("doctor returns score", Number.isInteger(doctor.score) && doctor.score >= 0 && doctor.score <= 100);
-  check("doctor checks policy", doctor.checks?.some((c) => c.id === "policy"));
-  check("doctor does not check commands", !doctor.checks?.some((c) => c.id === "commands"), JSON.stringify(doctor.checks));
-
-  const detected = await callJson(client, "detect_test_commands", {});
-  check("manual detect_test_commands still works", detected.commands?.test === "npm test", JSON.stringify(detected.commands));
-  const gatePlan = await callJson(client, "quality_gate", { dry_run: true });
-  check("manual quality_gate dry run still works", gatePlan.dry_run === true && gatePlan.plan?.some((g) => g.name === "test"), JSON.stringify(gatePlan.plan));
-
-  await runLocal("git", ["init"], base);
-  await runLocal("git", ["config", "user.email", "test@example.com"], base);
-  await runLocal("git", ["config", "user.name", "Test User"], base);
   await runLocal("git", ["add", "."], base);
-  await runLocal("git", ["commit", "-m", "initial"], base);
-  await callJson(client, "write_file", { path: "src/index.js", content: "export function hello(){ console.log('debug'); return 'pro'; }\n" });
-  const review = await callJson(client, "review_diff", {});
-  check("review_diff returns summary", review.summary?.changed_files === 1 && review.summary?.source_files === 1, JSON.stringify(review.summary));
+  await runLocal("git", ["commit", "-m", "add deep feature"], base);
+  await callJson(client, "apply_patch", {
+    task_token: taskToken,
+    operations: [{
+      op: "update",
+      path: "src/index.js",
+      content: "export function hello(){ console.log('debug'); return 'pro'; }\n"
+    }]
+  });
+  const review = await callJson(client, "review_diff", { task_token: taskToken });
+  check("review_diff returns summary", review.summary?.changed_files >= 1 && review.summary?.source_files >= 1, JSON.stringify(review.summary));
   check("review_diff returns heuristic findings", review.findings?.some((f) => /console\.log|corresponding test/.test(f.issue)), JSON.stringify(review.findings));
 
-  const report = await callJson(client, "session_report", {});
-  check("session_report kind", report.kind === "session_report");
-  check("session_report exposes doctor summary", report.doctor?.summary && Number.isInteger(report.doctor.score));
-  check("session_report consolidates review and change summary", report.change_summary?.changed_files === 1 && report.review?.findings_count >= 1, JSON.stringify({ change_summary: report.change_summary, review: report.review }));
-  check("session_report exposes process-scoped tool runtime metrics", report.tool_runtime?.scope === "process" && Number.isInteger(report.tool_runtime?.calls) && report.tool_runtime.calls > 0, JSON.stringify(report.tool_runtime));
-  check("session_report omits legacy metrics", report.metrics === undefined && report.health === undefined && report.recent_errors === undefined);
+  const gatePlan = await callJson(client, "verify_changes", { task_token: taskToken, dry_run: true });
+  check("verify_changes dry run plans every required gate", gatePlan.status === "DRY_RUN" && gatePlan.plan?.gates?.some((gate) => gate.kind === "test"), JSON.stringify(gatePlan));
+  const history = await callJson(client, "change_history", { action: "list", task_token: taskToken });
+  check("change_history replaces session-level mutation summaries", history.changes?.length >= 1 && history.changes[0]?.operationCount >= 2, JSON.stringify(history));
+
+  const report = await callJson(client, "lca_status", {});
+  check("lca_status exposes process-scoped tool runtime metrics", report.runtime?.tools?.scope === "process" && Number.isInteger(report.runtime?.tools?.calls) && report.runtime.tools.calls > 0, JSON.stringify(report.runtime?.tools));
+  check("lca_status omits legacy report fields", report.metrics === undefined && report.health === undefined && report.recent_errors === undefined);
 } finally {
   if (client) await client.close().catch(() => {});
   if (server) await stopServer(server.child);
-  console.log(`Git-backed Pro fixture retained for inspection: ${testContext.testRoot}`);
+  const rootEntries = await readdir(base, { withFileTypes: true });
+  for (const entry of rootEntries) {
+    if (entry.name === ".git") continue;
+    const target = path.join(base, entry.name);
+    await registerDisposableRoot(testContext, target);
+    await safeRemove(target, testContext, { recursive: entry.isDirectory(), force: true });
+  }
+  await safeRemove(testContext.dataDir, testContext, { recursive: true, force: true });
 }
 
 console.log(`\n==== PRO RESULT: ${pass} passed, ${fail} failed ====`);

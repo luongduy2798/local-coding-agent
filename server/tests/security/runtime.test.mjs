@@ -2,12 +2,12 @@
 // Copyright (c) 2026 Lương Duy
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-import { spawnSync } from "node:child_process";
 import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { summarizeArgs } from "../../src/core/redaction.mjs";
 
 const ENDPOINT = process.env.TEST_ENDPOINT;
 const TEST_ROOT = process.env.LCA_TEST_ROOT;
@@ -40,24 +40,30 @@ async function call(name, args) {
   return { result, text };
 }
 
-const info = JSON.parse((await call("workspace_info", {})).text);
+const info = JSON.parse((await call("lca_status", {})).text);
 const root = info.primary_root;
 if (path.resolve(root) !== path.resolve(TEST_FIXTURE)) {
   throw new Error(`Security test workspace mismatch: ${root}`);
 }
+const opened = JSON.parse((await call("task_open", {
+  title: "Runtime security regression",
+  primary_workspace_id: info.primary_workspace_id
+})).text);
+const taskToken = opened.task?.task_token;
+if (!taskToken) throw new Error("Security test could not open an explicit task.");
 
 // Default macOS volumes are commonly case-insensitive. A differently-cased
 // absolute path to the same root must remain inside the root after canonicalization.
 if (process.platform === "darwin") {
   const variant = root.replace(/[A-Za-z]/, (ch) => ch === ch.toLowerCase() ? ch.toUpperCase() : ch.toLowerCase());
   if (variant !== root && existsSync(variant)) {
-    const caseVariant = await call("stat_path", { path: variant });
+    const caseVariant = await call("list_files", { path: variant, limit: 10, task_token: taskToken });
     ok(!caseVariant.result.isError, "case-insensitive macOS root path is accepted", caseVariant.text);
   }
 }
 
 // 1) Symlink/junction escape must be blocked.
-const outside = path.join(TEST_ROOT, `outside-${Date.now()}`);
+const outside = path.join(path.dirname(root), `outside-${Date.now()}`);
 await mkdir(outside, { recursive: true });
 await writeFile(path.join(outside, "secret.txt"), "outside-secret\n", "utf8");
 const linkPath = path.join(root, "escape-link");
@@ -67,41 +73,46 @@ try {
   console.log(`[SKIP] symlink/junction setup failed: ${err?.message || err}`);
 }
 if (existsSync(linkPath)) {
-  const escaped = await call("read_file", { path: "escape-link/secret.txt" });
+  const escaped = await call("read_file", { path: "escape-link/secret.txt", task_token: taskToken });
   ok(Boolean(escaped.result.isError), "symlink/junction escape is blocked", escaped.text);
 }
 
 // 2) Non-git helper behavior should be structured and compact.
 const nongit = path.join(root, "nongit");
 await mkdir(nongit, { recursive: true });
-const status = JSON.parse((await call("git_status", { cwd: "nongit" })).text);
-ok(status.is_git_repo === false && status.clean === null, "git_status reports non-git repo correctly", JSON.stringify(status));
-const diff = JSON.parse((await call("git_diff", { cwd: "nongit" })).text);
-ok(diff.is_git_repo === false && typeof diff.error === "string" && diff.error.length < 200, "git_diff reports non-git repo compactly", JSON.stringify(diff).slice(0, 500));
+const status = JSON.parse((await call("git", { args: ["status", "--short"], cwd: "nongit", task_token: taskToken })).text);
+ok(status.exit_code !== 0 && /not a git repository/i.test(status.stderr), "git reports non-git status honestly", JSON.stringify(status));
+const diff = JSON.parse((await call("git", { args: ["diff"], cwd: "nongit", task_token: taskToken })).text);
+ok(diff.exit_code !== 0 && /not a git repository/i.test(diff.stderr) && diff.stderr.length < 200_000, "git diff reports non-git repo within the hard response budget", JSON.stringify(diff).slice(0, 500));
 
-// 3) Raw git must not allow read-only subcommands to write outside the root.
-spawnSync("git", ["init"], { cwd: root, stdio: "ignore" });
-spawnSync("git", ["config", "user.email", "test@example.com"], { cwd: root, stdio: "ignore" });
-spawnSync("git", ["config", "user.name", "Test User"], { cwd: root, stdio: "ignore" });
-await writeFile(path.join(root, "tracked.txt"), "one\n", "utf8");
-spawnSync("git", ["add", "tracked.txt"], { cwd: root, stdio: "ignore" });
-spawnSync("git", ["commit", "-m", "init"], { cwd: root, stdio: "ignore" });
-await writeFile(path.join(root, "tracked.txt"), "two\n", "utf8");
-const outsideDiff = path.join(TEST_ROOT, `outside-${Date.now()}.diff`);
-const gitOutput = await call("git", { args: ["diff", `--output=${outsideDiff}`] });
+// 3) Raw git flags that can mutate outside the workspace are rejected before
+// Git executes, so this test deliberately remains a non-Git disposable root.
+const outsideDiff = path.join(path.dirname(root), `outside-${Date.now()}.diff`);
+const gitOutput = await call("git", { args: ["diff", `--output=${outsideDiff}`], task_token: taskToken });
 ok(Boolean(gitOutput.result.isError), "git --output is blocked in safe mode", gitOutput.text);
 ok(!existsSync(outsideDiff), "git --output did not create file outside root");
 
-const restore = await call("git", { args: ["restore", "."] });
+const restore = await call("git", { args: ["restore", "."], task_token: taskToken });
 ok(Boolean(restore.result.isError), "git restore is blocked in safe mode", restore.text);
 
 // 4) Nested audit payloads must be redacted.
 const secret = `LCA_AUDIT_SECRET_${Date.now()}`;
 await call("apply_patch", {
+  task_token: taskToken,
   operations: [{ op: "create", path: "audit-secret.txt", content: secret }]
 });
-const audit = await readFile(path.join(TEST_DATA_DIR, "audit.log"), "utf8").catch(() => "");
+const audit = await readFile(path.join(TEST_DATA_DIR, "runtime", "audit.log"), "utf8").catch(() => "");
 ok(!audit.includes(secret), "audit log redacts nested apply_patch content");
+const tokenSentinel = `TASK_TOKEN_SECRET_${Date.now()}`;
+const summarized = summarizeArgs({
+  task_token: tokenSentinel,
+  instanceNonce: tokenSentinel,
+  nested: { refreshToken: tokenSentinel }
+});
+ok(
+  !summarized.includes(tokenSentinel),
+  "audit argument summaries redact task tokens, nonces and nested credential aliases"
+);
 
 await client.close();
 console.log(`\n==== SECURITY RESULT: ${pass} passed, ${fail} failed ====`);

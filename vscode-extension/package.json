@@ -1,8 +1,8 @@
 {
   "name": "local-coding-agent-vscode",
   "displayName": "Local Coding Agent",
-  "description": "Review and undo changes made by Local Coding Agent.",
-  "version": "0.3.0",
+  "description": "Operate Local Coding Agent workspaces and tasks, and review task-scoped changes.",
+  "version": "0.5.0",
   "publisher": "luongduy",
   "private": true,
   "license": "AGPL-3.0-or-later",
@@ -23,14 +23,22 @@
   "capabilities": {
     "untrustedWorkspaces": {
       "supported": "limited",
-      "description": "Review Changes remains readable, but Undo, Reapply, Undo All, and Clear History are disabled."
+      "description": "Review Changes remains readable, but connecting, process launch, and file mutations are disabled.",
+      "restrictedConfigurations": [
+        "lca.cliPath",
+        "lca.serverUrl",
+        "lca.allowRemoteServer"
+      ]
     }
   },
   "scripts": {
     "build:extension": "esbuild src/extension.ts --bundle --platform=node --format=cjs --external:vscode --outfile=dist/extension.js",
-    "build:webview": "esbuild src/webview/main.tsx --bundle --platform=browser --format=iife --outfile=dist/webview.js --loader:.css=css",
+    "build:webview": "esbuild src/webview/main.tsx --bundle --platform=browser --format=iife --minify --outfile=dist/webview.js --loader:.css=css",
     "build": "npm run build:extension && npm run build:webview",
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "test:audit": "node tests/run-audit-reader-test.mjs",
+    "test:control": "node tests/run-control-center-test.mjs",
+    "test": "npm run test:audit && npm run test:control"
   },
   "dependencies": {
     "react": "^19.1.1",
@@ -58,7 +66,7 @@
       "lca": [
         {
           "id": "lca.reviewChanges",
-          "name": "Review Changes",
+          "name": "Control Center",
           "type": "webview"
         }
       ]
@@ -143,7 +151,7 @@
         "lca.cliPath": {
           "type": "string",
           "default": "lca",
-          "description": "Path or command used by the Connect action to stop and start Local Coding Agent."
+          "description": "Path or command used by the Connect action to register/select a workspace and start Local Coding Agent when needed."
         },
         "lca.serverUrl": {
           "type": "string",
@@ -153,13 +161,13 @@
         "lca.reviewChanges.autoRefresh": {
           "type": "boolean",
           "default": true,
-          "description": "Refresh Review Changes while the view is visible."
+          "description": "Monitor LCA while the Control Center is visible, using server events when available and polling as a fallback."
         },
         "lca.reviewChanges.refreshInterval": {
           "type": "number",
           "default": 2000,
           "minimum": 1000,
-          "description": "Refresh interval in milliseconds while the view is visible."
+          "description": "Fallback polling interval in milliseconds when server events are unavailable."
         },
         "lca.allowRemoteServer": {
           "type": "boolean",

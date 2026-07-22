@@ -21,7 +21,7 @@ Bạn chỉ cần làm 3 bước:
 
 Yêu cầu:
 
-- Node.js >= 18
+- Node.js >= 22.13.0
 - npm
 - Git, khuyên dùng để `lca` tự lấy git root làm workspace
 - OpenAI Tunnel ID và Runtime API key nếu dùng ChatGPT Web tunnel
@@ -44,7 +44,7 @@ Nếu cần xem hướng dẫn cho hệ điều hành khác máy đang chạy, d
 
 ## Dùng Hằng Ngày
 
-Mỗi lần muốn ChatGPT làm việc trên repo nào, hãy mở terminal tại repo đó rồi chạy `lca`. LCA sẽ tự nhận git root làm workspace.
+Mỗi lần muốn ChatGPT bắt đầu task mới trên repo nào, hãy mở terminal tại repo đó rồi chạy `lca`. LCA sẽ tự nhận git root, đăng ký workspace tin tưởng và chọn nó làm workspace mặc định cho task tiếp theo.
 
 Trên Windows, mở terminal mới sau setup rồi chạy:
 
@@ -60,17 +60,24 @@ cd /path/to/your-repo
 lca
 ```
 
-Nếu server đang chạy workspace cũ, `lca` sẽ tự restart sang workspace mới.
+runtime chỉ có một supervisor sở hữu server và tunnel. Chuyển workspace không restart hai process này và không đổi workspace của task đang chạy. Hai chat có thể mở hai task trên hai repo khác nhau cùng lúc.
 
 Lệnh chính:
 
 ```bash
-lca           # set workspace = repo hiện tại, start server + tunnel
+lca           # đăng ký/chọn repo hiện tại cho task mới; start supervisor nếu cần
 lca stop      # dừng server + tunnel
-lca status    # xem trạng thái
-lca workspace # mở TUI chọn workspace
+lca status    # xem supervisor, connector, session, task và workspace
+lca workspace # mở TUI chọn workspace cho task mới
+lca workspace list
+lca workspace use /path/to/repo
+lca workspace archive <path|workspace-id> # tạm ẩn, giữ ID/task/history
+lca workspace restore <path|workspace-id> # khôi phục workspace đã archive
+lca workspace remove <path|workspace-id>  # xóa vĩnh viễn dữ liệu LCA, không xóa source repo
 lca config    # mở TUI cấu hình mode/policy/workspace/port
 lca doctor    # kiểm tra cấu hình local
+lca update    # backup config/existing runtime state và nâng cấp an toàn
+lca rollback  # quay lại release trước, giữ nguyên dữ liệu runtime
 ```
 
 Kiểm tra local:
@@ -79,6 +86,8 @@ Kiểm tra local:
 lca status
 http://127.0.0.1:8789/healthz
 ```
+
+`/healthz` chỉ trả liveness/version/catalog và không lộ workspace, PID hay cấu hình. Thông tin chi tiết nằm ở `lca status`; endpoint nội bộ `/healthz/details` dành cho CLI/extension local và yêu cầu instance nonce do supervisor cấp. Bearer của tunnel không có quyền companion/control-plane.
 
 ## Tích Hợp ChatGPT Web
 
@@ -93,27 +102,31 @@ Tóm tắt:
 5. Chọn tunnel đã tạo.
 6. Auth: chọn `No auth`.
 7. Lưu connector.
-8. Trong ChatGPT, gọi tool `lca` để kiểm tra workspace thật.
+8. Trong ChatGPT, gọi tool `lca_status` để kiểm tra runtime, task và workspace.
 
 Runtime API key nằm ở `.env.local` và chỉ dùng cho local tunnel-client. Không nhập Runtime API key vào phần auth của ChatGPT connector.
 
 ## ChatGPT Tools
 
-Sau khi connector hoạt động, bạn thường chỉ cần gọi 2 tool này trong ChatGPT:
+runtime có catalog cố định 35 tool. Sau khi connector hoạt động, hai entry point thường dùng là:
 
 ```text
-lca        # kiểm tra workspace thật, policy và output limits
+lca_status # kiểm tra runtime, catalog, workspace/task và output limits
 lca_input  # mở Apps SDK widget, có thể ghim PiP để nhập task trong lúc chat
 ```
 
-`lca` là tool trạng thái duy nhất, dùng khi mở chat mới hoặc muốn kiểm tra nhanh connector đang trỏ vào workspace nào.
+`lca_status` trả `catalog_version=5` và `catalog_hash`. Khi catalog thay đổi, hãy refresh connector một lần và mở chat mới; tên tool cũ không còn callable và client stale sẽ nhận lỗi kèm hướng dẫn refresh.
+
+Trước khi dùng tool đọc/sửa/chạy code, mở context bằng `workspace_select` rồi `task_open`. Session stateful tự bind vào `task_id`; chỉ dùng lại `task_token` khi reconnect/resume. Nếu thiếu hoặc mơ hồ task context, coding tool fail closed thay vì tự chọn repo.
+
+Danh sách catalog và semantics task/multi-workspace: [docs/RUNTIME.md](docs/RUNTIME.md).
 
 ## LCA Input: `@` Context và `/` Workflow
 
 `lca_input` mở widget ngay trong ChatGPT để nhập task có context rõ hơn. Widget này dùng:
 
-- `@...` để chọn file, folder, symbol hoặc skill trong workspace.
-- `/...` để gọi workflow hoặc skill, ví dụ `/debug`, `/review`, `/implement`, `/refactor`, `/skill:<name>`.
+- `@...` để chọn file hoặc symbol trong workspace.
+- `/...` để chọn workflow cục bộ, ví dụ `/debug`, `/review`, `/implement`, `/refactor`.
 - Nút **PiP** yêu cầu ChatGPT ghim composer thành cửa sổ nổi để vẫn dùng được trong lúc tiếp tục chat.
 - Nút nhanh **Plan** là quick action; không chèn chữ vào input.
 - Nút send sẽ tự compose prompt rồi gửi vào ChatGPT, không cần hiện Prompt output.
@@ -126,11 +139,7 @@ Ví dụ task trong widget:
 
 ChatGPT luôn mở app ở inline trước, nên cần bấm **PiP** một lần để chuyển mode. Host sẽ quyết định mode cuối cùng; trên mobile, yêu cầu PiP có thể được chuyển thành fullscreen.
 
-Các tool nền phía sau:
-
-- `workspace_search`: autocomplete cho `@...`.
-- `slash_commands`: autocomplete cho `/...`.
-- `compose_prompt`: parse input, resolve context đã chọn, và tạo prompt sẵn để gửi vào ChatGPT.
+Widget không đăng ký catalog phụ. Autocomplete `@...` gọi trực tiếp `find_files` và `code_query` trong catalog cố định; danh sách `/...` và bước compose prompt chạy cục bộ trong widget.
 
 ## Figma Desktop MCP
 
@@ -165,54 +174,63 @@ lca figma open     # mở Figma và in hướng dẫn bật MCP
 
 `lca setup` cũng có bước **Connect Figma Desktop MCP** sau khi cài dependency. Bước này không bắt buộc; có thể hoàn tất sau bằng `lca figma`.
 
-Các tool chính trong ChatGPT:
+Các action chính của tool `figma` trong ChatGPT:
 
 ```text
-figma_get_design_context   # code/design context theo URL, node id hoặc selection hiện tại
-figma_get_screenshot       # lấy ảnh selection/node và giữ nguyên image content
-figma_get_metadata         # cây layer gọn để khoanh vùng frame lớn
-figma_get_variable_defs    # variables và styles đang dùng
-figma_list_tools           # đọc tool/schema live từ Figma Desktop
-figma_call_tool            # gọi tool mới của Figma mà không phải cập nhật LCA trước
+design_context  # code/design context theo URL, node id hoặc selection hiện tại
+screenshot      # lấy ảnh selection/node và giữ nguyên image content
+metadata        # cây layer gọn để khoanh vùng frame lớn
+variables       # variables và styles đang dùng
+list            # đọc tool/schema live từ Figma Desktop
+call            # gọi tool mới của Figma mà không phải cập nhật LCA trước
 ```
 
 Ví dụ:
 
 ```text
-@Macmini dùng figma_get_design_context và figma_get_screenshot đọc URL Figma này, rồi code màn hình Flutter theo source hiện tại.
+@Macmini dùng `figma` action `design_context` và `screenshot` đọc URL Figma này, rồi code màn hình Flutter theo source hiện tại.
 ```
 
 Selection-based cũng hoạt động: chọn frame trong Figma Desktop rồi yêu cầu ChatGPT đọc selection mà không cần truyền URL.
 
-## Review Changes
+## LCA Control Center và Review Changes
 
-Các mutation tool chuyên dụng được backend ghi lịch sử tự động:
+Các mutation qua `apply_patch` được backend ghi lịch sử tự động:
 
 ```text
-apply_patch   # create/update/delete/rename, hỗ trợ batch nhiều file
-make_dir      # tạo directory rỗng khi cần
+apply_patch   # create/update/delete/rename/mkdir, hỗ trợ batch và nhiều workspace
 ```
 
-Kết quả mutation có `change_id` cho operation và `task_id` cho toàn bộ công việc. Nhiều lần `apply_patch` trong cùng yêu cầu của người dùng được gom vào một task change set, nên extension chỉ hiện một card. Có thể đặt tên task bằng `task_plan` hoặc `apply_patch.task_title`; `session_report` đóng task sau khi hoàn thành. `read_file` và từng file đọc thành công qua `read_many` trả SHA-256 `version`. Nếu file bị sửa bên ngoài sau lần ChatGPT đọc gần nhất, mutation sẽ bị chặn bằng `STALE_FILE`; ChatGPT phải đọc lại rồi thử lại. Khi cần kiểm tra lại đúng nội dung/range cũ, truyền `known_version` cùng `skip_if_unchanged=true` để LCA trả metadata `unchanged` thay vì gửi lặp nội dung qua tunnel. Không bật cờ này khi đang yêu cầu một range mới.
+Mỗi task khóa một primary workspace và tối đa 8 attached workspaces. Attach/detach chỉ được phép trước mutation đầu tiên; sau đó workspace set bị freeze. `task_open` trả `task_id` và `task_token`; token chỉ cần truyền lại khi reconnect/resume. `task_close` đóng task sau khi hoàn thành.
 
-LCA dùng một tool catalog cố định để ChatGPT không phải Refresh connector khi đổi chế độ. Các alias và wrapper bị thay thế hoàn toàn được ẩn; những capability chuyên biệt như `workspace_doctor`, `preview_patch`, `run_changed_tests`, `security_scan`, profile, Figma, skill và notes vẫn được giữ. Backend autocomplete của Apps SDK được đánh dấu app-only.
+Kết quả mutation có `change_id`, `task_id`, `workspace_id` và path tương đối. Nhiều lần `apply_patch` trong cùng task được gom thành một change set. `read_file` và từng file đọc thành công qua `read_many` trả SHA-256 `version`; mutation có `expected_version` sai sẽ bị chặn thay vì ghi đè thay đổi bên ngoài.
 
-`workspace_snapshot` hỗ trợ `focus` để gom repo context và các match liên quan trong một evidence pack. `session_report` có thể gom git state, change summary và heuristic review trong một call; quality gate chỉ chạy khi được yêu cầu rõ ràng.
+LCA runtime dùng catalog cố định 35 tool, không đổi theo mode/policy. Các thao tác file, preview và validate được hợp nhất trong `apply_patch`; repo map/symbol trong `workspace_snapshot` và `code_query`; test/lint/build trong `verify_changes`; Figma và notes dùng action trong tool tổng hợp tương ứng.
+
+`workspace_snapshot` gom repo context; `code_query` truy vấn text, symbol, definition, reference, import và call graph theo fast-first. Runtime có parser structural chạy trong worker, hard-timeout được, cho JavaScript/TypeScript/TSX, Python, Go, Rust, Java/Kotlin, C# và Dart; artifact parser được materialize trong data dir từ manifest đã pin SHA-256. JSON/YAML/Shell dùng structural/lexical fallback. Nếu workspace có `<workspace>/node_modules/typescript`, Language Service project-local sẽ cung cấp semantic sâu hơn cho JavaScript/TypeScript; LCA không tự cài hoặc dùng compiler global/ancestor. Mọi fallback đều trả `engine`, `completeness`, `confidence` và `fallback_reason` rõ ràng. `verify_changes` chỉ trả `PASS` khi tất cả gate bắt buộc đã chạy; gate thiếu/không hỗ trợ hoặc source bị sửa ngoài `apply_patch` trả `INCOMPLETE`.
+
+Trạng thái release được ghi theo số đo, không hiểu “10/10” là không bao giờ sai: catalog cố định 35 tool đạt 24.652 byte raw/4.139 byte nén. Benchmark cold-builder mới nhất trên 100k file đạt index 9,89 giây, snapshot warm 0,04 ms, query warm p95 0,04 ms, freshness 238,80 ms, RSS sau GC 120,17 MB, cache hai workspace hot 23,46 MB và event-loop p99 11,96 ms; toàn bộ SLA 100k trong benchmark đều pass. Performance fixture đo dispatch p95 0,006 ms và `lca_status` server-total p95 1,3 ms. Xem bằng chứng, phạm vi và các giới hạn semantic còn lại tại [docs/RUNTIME.md](docs/RUNTIME.md#measured-release-status-and-known-limits).
+
+`run_command`, `run_commands`, `process` và Git có thể làm thay đổi filesystem nhưng không được tuyên bố atomic/undoable. LCA so sánh before/after manifest; nếu shell sửa tracked source, workspace bị đánh dấu `unmanaged_changes` cho đến khi thay đổi được review/adopt.
 
 Review Changes không phụ thuộc Git. Mỗi task giữ các operation riêng, nhưng card được tổng hợp từ trạng thái trước operation đầu tiên đến trạng thái sau operation cuối cùng. Undo task chạy operation theo thứ tự mới → cũ; Reapply chạy cũ → mới. File text nhỏ có before/after snapshot để hỗ trợ Diff, Undo, Partial Undo và Reapply. File lớn, binary và directory chỉ lưu metadata nên không bị backend giả vờ rằng có thể phục hồi an toàn. Rename được quản lý như atomic group và Undo/Reapply luôn kiểm tra conflict trước khi ghi đè.
+
+Với task có nhiều workspace, `change_history` và các endpoint Undo/Reapply/Undo All/Clear bị chặn bằng `CROSS_WORKSPACE_HISTORY_ATOMICITY_REQUIRED`. `apply_patch` có coordinator cross-workspace riêng, nhưng history mutation hiện chưa có transaction bao phủ tất cả journal; hãy dùng một compensating `apply_patch` đa workspace hoặc mở task đơn workspace.
 
 HTTP API:
 
 ```text
-GET    /changes
-GET    /changes/:id
-GET    /changes/:id/diff
-GET    /changes/:id/content?path=src/file.js&side=before|after
-POST   /changes/:id/undo
-POST   /changes/:id/reapply
-POST   /changes/undo-all
-DELETE /changes
+GET    /changes?workspace_id=<id>&task_id=<id>
+GET    /changes/:id?workspace_id=<id>&task_id=<id>
+GET    /changes/:id/diff?workspace_id=<id>&task_id=<id>
+GET    /changes/:id/content?workspace_id=<id>&task_id=<id>&path=src/file.js&side=before|after
+POST   /changes/:id/undo?workspace_id=<id>&task_id=<id>
+POST   /changes/:id/reapply?workspace_id=<id>&task_id=<id>
+POST   /changes/undo-all?workspace_id=<id>&task_id=<id>
+DELETE /changes?workspace_id=<id>&task_id=<id>
 ```
+
+`/changes`, kể cả SSE `/changes/events`, không phải API public: production request phải đi từ loopback và có `X-LCA-Instance-Nonce` của supervisor. Bearer của MCP tunnel không cấp quyền đọc hoặc mutation companion. Extension dùng flow local tường minh `lca status --json --include-instance-nonce`; output `lca status` thông thường đã redact nonce. Không hard-code, log hoặc chia sẻ nonce.
 
 `run_command` và `run_commands` chỉ tạo activity record tối giản; lịch sử thay đổi không lưu command text, stdout, stderr, environment hoặc secret.
 
@@ -229,7 +247,16 @@ Gỡ extension:
 lca extension uninstall
 ```
 
-`lca setup` thông thường không cài extension. View **Local Coding Agent → Review Changes** hiển thị một card cho toàn bộ task, hỗ trợ native diff, Undo/Reapply cả task hoặc từng file, Undo All và Clear History. Nếu LCA đang chạy cho workspace khác, chọn **Connect LCA to this workspace** để stop instance cũ và start lại theo repo đang mở trong VS Code.
+`lca setup` thông thường không cài extension. View **Local Coding Agent → Control Center** có bốn tab:
+
+- **Overview** quản lý Start/Stop/Pause monitoring và trạng thái supervisor/server/tunnel/session.
+- **Workspaces** hiển thị toàn bộ registry, đặt default cho task mới, Archive, Restore hoặc Remove permanently.
+- **Tasks** chỉ hiển thị sự kiện vận hành thật: tool đang chạy/duration, kết quả, verification, process và số change/file quan sát được. Nó không hiển thị `task_plan`, prompt hay thinking của model.
+- **Changes** giữ review/diff/Undo/Reapply hiện tại; filter `All available workspaces` dùng SSE thật và tự quay lại Live sau polling fallback.
+
+Activity được đọc từ audit log xoay vòng tại `<config-root>/data/runtime/audit.log` (hoặc `<AGENT_DATA_DIR>/runtime/audit.log`), không tạo activity database riêng. Log dành cho UI chỉ chiếu metadata whitelist; không đưa args, command, output, prompt, token hoặc error content vào webview. **Connect current folder** đăng ký repo, đặt nó làm global default cho task mới và start LCA khi cần; nó không đổi primary của task đang chạy.
+
+Archive giữ nguyên workspace ID, task, journal, blob và index nhưng loại workspace khỏi model routing/aggregate Changes. Restore kích hoạt lại đúng identity cũ. Remove permanently yêu cầu LCA đã dừng và xác nhận đúng label; nó xóa dữ liệu LCA bằng purge transaction có recovery nhưng giữ nguyên source repo. Default/configured workspace, task multi-workspace và transaction chưa hoàn tất đều bị chặn.
 
 Chi tiết: [docs/REVIEW_CHANGES.md](docs/REVIEW_CHANGES.md).
 
@@ -256,7 +283,7 @@ lca config path
 
 ## Workspace Là Gì
 
-Workspace là thư mục ChatGPT được phép đọc/sửa/chạy command thông qua connector.
+Workspace là root tin tưởng mà ChatGPT được phép đọc/sửa/chạy command thông qua connector. Mỗi workspace có ID ổn định, canonical root và trạng thái `available`/`unavailable`.
 
 Khi chạy:
 
@@ -265,7 +292,7 @@ cd /path/to/repo
 lca
 ```
 
-workspace sẽ là git root của repo đó. Nếu không nằm trong git repo, workspace là thư mục hiện tại.
+workspace sẽ là git root của repo đó. Thư mục không phải Git phải được đăng ký rõ ràng từ CLI. Model không thể tự tin tưởng một absolute path mới. Root trùng/bao nhau, symlink thoát ra ngoài và root đã move/delete bị fail closed; LCA không fallback sang `cwd` hay repo khác.
 
 ## Bảo Mật
 
@@ -285,16 +312,18 @@ Nguyên tắc an toàn:
 
 `Policy` là lớp quyền cho tool/action:
 
-- `balanced`: mặc định khuyên dùng. Cho workflow coding bình thường, nhưng action rủi ro cần approval token.
+- `balanced`: cho workflow coding bình thường, nhưng action rủi ro cần phê duyệt cục bộ. Dùng `lca approval list`, rồi `lca approval approve <id>` hoặc `lca approval deny <id>`; không cần gửi approval token vào chat.
 - `strict`: chặt hơn, phù hợp khi chỉ muốn agent đọc/review/inspect.
 - `full`: bỏ policy approval gate, ít bị hỏi duyệt hơn nhưng rủi ro hơn.
 
-Setup wizard mặc định chọn:
+Với cài đặt mới, setup wizard đề xuất và yêu cầu one-time consent trước khi dùng:
 
 ```text
 Mode: full
 Policy: full
 ```
+
+Khi migrate config `safe`/`balanced` cũ, wizard không âm thầm nâng quyền lên `full/full` nếu chưa có consent.
 
 Nếu muốn chặt hơn, có thể đổi lại `safe` hoặc `balanced` sau setup bằng TUI:
 
@@ -328,11 +357,11 @@ Chi tiết: [docs/TEST_SAFETY.md](docs/TEST_SAFETY.md).
 | Lỗi                                                  | Cách xử lý                                                                                                                                                           |
 | ---------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `lca: command not found` / `'lca' is not recognized` | Trên Windows: đóng terminal cũ, mở terminal mới rồi chạy lại `lca`. Nếu vẫn lỗi, chạy `scripts\lca.cmd cli` để cài lại wrapper hoặc gọi trực tiếp path wizard in ra. |
-| Server chạy nhầm repo                                | `cd` vào repo đúng rồi chạy lại `lca`.                                                                                                                               |
+| Task mới chọn nhầm repo                            | `lca workspace list`, sau đó `lca workspace use /repo/dung`; task đang mở không bị đổi.                                                                       |
 | Port `8789` bận                                      | Chạy `lca setup` và đổi MCP port, hoặc set `PORT` trước khi chạy.                                                                                                    |
 | Server không health                                  | Kiểm tra `lca status` và `http://127.0.0.1:8789/healthz`.                                                                                                            |
-| Connector không thấy tool                            | Đảm bảo `lca` đang chạy, tunnel connected, connector dùng `No auth`.                                                                                                 |
-| Sửa nhầm repo                                        | Trong ChatGPT gọi `lca` để xem root thật.                                                                                                                             |
+| Connector không thấy catalog mới                         | Đảm bảo `lca` đang chạy, tunnel connected, connector dùng `No auth`; refresh connector một lần và mở chat mới.                                    |
+| Task/sửa nhầm repo                                   | Trong ChatGPT gọi `lca_status` và `task_state`; đóng task rồi chọn/mở task mới nếu workspace set sai.                                                     |
 
 ## Low-Level CLI
 

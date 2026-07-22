@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import {
   assertRepositoryIntact,
   createIsolatedTestRoot,
+  safeRemove,
   snapshotRepositoryState
 } from "../helpers/test-guard.mjs";
 import { startTestServer, stopTestProcess } from "../helpers/test-runtime.mjs";
@@ -40,7 +41,8 @@ try {
   console.error(error?.stack || error?.message || error);
 } finally {
   await assertRepositoryIntact(repositoryRoot, before);
-  console.log(`Security fixture retained for inspection: ${context.testRoot}`);
+  await safeRemove(context.fixtureDir, context, { recursive: true, force: true });
+  await safeRemove(context.dataDir, context, { recursive: true, force: true });
 }
 
 process.exit(failed ? 1 : 0);
@@ -62,7 +64,7 @@ async function runPhase({ name, workspace, dataDir, script }) {
   try {
     await runNode(script, {
       TEST_ENDPOINT: `http://127.0.0.1:${runtime.port}/mcp`,
-      AUDIT_LOG: path.join(dataDir, "audit.log"),
+      AUDIT_LOG: path.join(dataDir, "runtime", "audit.log"),
       LCA_TEST_ROOT: context.testRoot,
       LCA_TEST_FIXTURE: workspace,
       LCA_TEST_DATA_DIR: dataDir,

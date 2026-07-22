@@ -3,7 +3,7 @@
 
 // Fields whose values may carry secrets or large payloads. Keep these out of
 // audit logs and compact summaries.
-const AUDIT_REDACT = /^(content|body|diff|patch|old_text|new_text|command|token|approval_token|mcp_auth_token|control_plane_api_key|key|secret|password|authorization|auth|api[_-]?key)$/i;
+const AUDIT_REDACT = /^(?:content|body|diff|patch|old_text|new_text|command|key|auth|.*(?:token|secret|password|authorization|api[_-]?key|nonce).*)$/i;
 
 export function redactDeep(value, depth = 0) {
   if (depth > 8) return "…";
