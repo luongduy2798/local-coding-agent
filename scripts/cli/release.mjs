@@ -730,7 +730,7 @@ async function updateSelfUnlocked(flags) {
     });
     state = await completeUpdateTransaction(state, opts);
     console.log("\nUpdate complete.");
-    console.log("Refresh the ChatGPT connector once and open a new chat for the current 35-tool catalog.");
+    console.log("Refresh the ChatGPT connector once and open a new chat for the current 36-tool catalog.");
   } catch (error) {
     state = await writeMigrationStage(state, "update_failed", {
       failure: error?.message || String(error),

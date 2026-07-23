@@ -37,12 +37,46 @@ export interface WorkspaceDescriptor {
   };
 }
 
+export type TaskComplexityProfile = "quick_edit" | "normal" | "complex";
+
+export interface TaskOrchestrationDescriptor {
+  suggested_profile?: TaskComplexityProfile | null;
+  scope_signal?: "expanded" | "reduced" | "aligned" | null;
+  scope_reasons?: string[];
+  phase?: "opened" | "discovering" | "decision_ready" | "mutating" | "confirming" | "blocked" | "closing";
+  evidence_status?: "not_started" | "insufficient" | "likely_sufficient" | "target_confirmed" | "mutation_applied" | "confirmation_complete";
+  budgets?: {
+    discovery_soft_limit?: number | null;
+    total_soft_limit?: number | null;
+  };
+  counters?: {
+    total_calls?: number;
+    unique_calls?: number;
+    duplicate_calls?: number;
+    discovery_calls?: number;
+    status_only_calls?: number;
+    failed_calls?: number;
+    mutations?: number;
+  };
+  last_notice?: {
+    code?: string;
+    severity?: "info" | "warning" | "error";
+    message?: string;
+    recommended_transition?: string | null;
+  } | null;
+}
+
 export interface TaskDescriptor {
   task_id?: string;
   routingTaskId?: string;
   routing_task_id?: string;
   id?: string;
   title?: string;
+  objective?: string | null;
+  requested_profile?: TaskComplexityProfile | null;
+  effective_profile?: TaskComplexityProfile;
+  profile_confidence?: number;
+  orchestration?: TaskOrchestrationDescriptor | null;
   status?: "open" | "active" | "completed" | "closed" | "failed";
   primary_workspace_id?: string;
   workspace_ids?: string[];

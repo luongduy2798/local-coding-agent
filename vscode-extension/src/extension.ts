@@ -14,7 +14,7 @@ import { ReviewChangesWebviewProvider } from "./review-changes/review-changes-we
 export function activate(context: vscode.ExtensionContext): void {
   const connection = new ConnectionManager(context);
   const controlStore = new ControlCenterStore(connection);
-  const controlActions = new ControlCenterActions(controlStore);
+  const controlActions = new ControlCenterActions(connection, controlStore);
   const store = new ReviewChangesStore(connection);
   const actions = new ReviewChangesActions(connection, store);
   const webviewProvider = new ReviewChangesWebviewProvider(

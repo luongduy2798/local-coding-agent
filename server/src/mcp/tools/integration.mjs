@@ -164,9 +164,9 @@ function registerSkillsTool(mcp) {
     "skills",
     {
       title: "Skills",
-      description: "List or read skills visible to one task workspace; create/delete are journaled patch transactions.",
+      description: "Use a workspace skill only when the user names one or a relevant skill has already been identified. Do not list skills for ordinary repository browsing or localized code edits; create/delete are journaled patch transactions.",
       inputSchema: {
-        action: z.enum(["list", "read", "create", "delete"]).optional(),
+        action: z.enum(["list", "read", "create", "delete"]),
         name: z.string().optional(),
         description: z.string().optional(),
         body: z.string().optional(),
@@ -176,7 +176,7 @@ function registerSkillsTool(mcp) {
       }
     },
     async ({
-      action = "list",
+      action,
       name,
       description,
       body = "",

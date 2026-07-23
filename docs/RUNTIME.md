@@ -13,15 +13,15 @@ Local Coding Agent runs one local supervisor for one server/tunnel pair. A works
 
 Do not edit SQLite files while LCA is running. Index data can be rebuilt with `index_control`; task, journal, and transaction data should be treated as durable state.
 
-## Fixed 35-tool catalog
+## Fixed 36-tool catalog
 
 The runtime always publishes the same model-visible catalog:
 
 ```text
 System/task
 lca_status, workspace_list, workspace_register, workspace_select,
-workspace_attach, workspace_detach, task_open, task_state, task_plan,
-task_checkpoint, task_close
+workspace_attach, workspace_detach, task_open, task_reclassify, task_state,
+task_plan, task_checkpoint, task_close
 
 Context
 workspace_snapshot, code_query, search_text, find_files, list_files,
@@ -35,7 +35,7 @@ Utilities/integration
 skills, notes, figma, lca_input
 ```
 
-The catalog does not change when mode or policy changes. Legacy tool names are not registered or callable; stale clients receive an unknown-tool/catalog-refresh error. `lca_status` reports `catalog_version=5` and `catalog_hash`.
+The catalog does not change when mode or policy changes. Legacy tool names are not registered or callable; stale clients receive an unknown-tool/catalog-refresh error. `lca_status` reports `catalog_version=7` and `catalog_hash`.
 
 After a catalog upgrade:
 
@@ -74,16 +74,31 @@ workspace_select(workspace_id)
 task_open(primary_workspace_id, attached_workspace_ids[])
 ```
 
+`task_open` accepts a concise `objective` that preserves the requested behavior and constraints, an optional short `title` for UI display, and a model-selected `complexity_hint` (`quick_edit`, `normal`, or `complex`). If the model omits the hint, the effective profile defaults to `normal`.
+
 `task_open` returns:
 
 - a stable `task_id`;
 - a secret `task_token` for reconnect/resume;
 - the primary workspace and attached workspace IDs;
+- the selected effective profile and advisory orchestration state;
 - base Git/dirty state and workspace-set version.
 
 An MCP session binds to its task automatically. Pass `task_token` again only after reconnecting or when using the stateless compatibility path. Missing or ambiguous task context fails closed.
 
-A task has exactly one primary workspace and at most eight attached workspaces. `workspace_attach` and `workspace_detach` are allowed only before the first mutation. The first mutation freezes the workspace set; close the task and open another one if its scope must change.
+A task has exactly one primary workspace and at most eight attached workspaces. `workspace_attach` and `workspace_detach` are allowed only before the first mutation. The first mutation freezes the workspace set; close the task and open another one if its workspace scope must change.
+
+## Task orchestration and complexity profiles
+
+The model, not LCA, selects the effective profile. `quick_edit` is intended for localized direct edits, `normal` for bounded multi-step work, and `complex` for architectural, migration, or broad cross-workspace work. Profile budgets are soft guidance rather than hard execution limits. The default quick-edit guidance is five discovery calls and nine work calls. `task_open` and `task_close` remain visible in telemetry but do not consume the work-call budget. Exceeding a threshold produces a notice only while the task is still discovering and recent discovery calls are repeated or add no evidence; it does not stop the task or change its profile.
+
+LCA updates an orchestration phase independently from the routing lifecycle: `opened`, `discovering`, `decision_ready`, `mutating`, `confirming`, `blocked`, and `closing`. It also tracks evidence status, call counters, mutation epochs, and fingerprints for repeated discovery requests. Routing status remains `open`, `closed`, or `failed`; orchestration phases do not replace it.
+
+LCA may report `suggested_profile`, `scope_signal`, and `scope_reasons` from objective scope evidence such as multiple attached workspaces or the model creating a persistent multi-step plan. Discovery-call count and raw search-result path count do not by themselves trigger a profile suggestion. These are advisory signals only. LCA never updates `effective_profile` from those signals. After evaluating the actual request and code context, the model may keep the current profile or call `task_reclassify(complexity, reason)` to confirm a change.
+
+Repeated unchanged discovery calls are fingerprinted. For supported reads, LCA checks the source version before reusing cached evidence; changed files are read again. Repeated requests without new evidence can return advisory notices and eventually a loop guard. A model that genuinely needs a similar read should state the concrete unresolved evidence gap rather than narrating progress through repeated `task_state` calls.
+
+A typical quick edit is `task_open` → one targeted search → one targeted read or `read_many` → optionally one or two evidence-driven discovery calls → model decision → `apply_patch` → source/diff confirmation → `task_close`. Persistent `task_plan`, progress narration, and unrelated `skills` discovery are normally unnecessary for this profile. When verification is intentionally skipped, call `task_close(status=incomplete)` once rather than attempting `complete` and retrying.
 
 Every path returned by runtime coding tools is qualified by `workspace_id` and is relative to that workspace. Two sessions can therefore work on different repositories concurrently without changing each other's reads, writes, process handles, journals, or task selection.
 
@@ -128,7 +143,7 @@ Both commands avoid destructive Git cleanup by default. Recovery never passes Gi
 
 ## Measured release status and known limits
 
-The local release gates on 2026-07-18 cover catalog/session, storage, task isolation, cross-workspace transaction, task-close recovery, shell-mutation detection, journal, coding intelligence, agent, performance, hardening, Figma, security, CLI/supervisor, and VS Code extension checks. The eval suite passes 25/25 golden assertions. CLI passes 20/20. The fixed catalog measures exactly 35 tools, 24,652 bytes raw, 4,139 bytes with equivalent compression, and hash `96a7ec1d5fdf41d7`. The focused performance gate measured stateful dispatch p95 0.006 ms, `lca_status` handler/server-total p95 0.3/1.3 ms, warm `workspace_snapshot` p95 40.02 ms, warm `code_query` p95 2.31 ms, widget autocomplete backend/end-to-end p95 36.3/37.82 ms, and compose 1.5/2.50 ms.
+The local release gates on 2026-07-18 cover catalog/session, storage, task isolation, cross-workspace transaction, task-close recovery, shell-mutation detection, journal, coding intelligence, agent, performance, hardening, Figma, security, CLI/supervisor, and VS Code extension checks. The eval suite passes 25/25 golden assertions. CLI passes 20/20. The measured catalog figures—35 tools, 24,652 bytes raw, 4,139 bytes with equivalent compression, and hash `96a7ec1d5fdf41d7`—belong to the 5.0.0 release before `task_reclassify` raised the current catalog to 36 tools/version 7. The 36-tool catalog must be measured again before publishing replacement size/hash claims. The focused performance gate measured stateful dispatch p95 0.006 ms, `lca_status` handler/server-total p95 0.3/1.3 ms, warm `workspace_snapshot` p95 40.02 ms, warm `code_query` p95 2.31 ms, widget autocomplete backend/end-to-end p95 36.3/37.82 ms, and compose 1.5/2.50 ms.
 
 The release-scale cold-builder benchmark creates 10 registered workspaces, keeps two hot, runs 1,000 warm queries, mutates a watched file, and commits a two-workspace patch. The latest 10k run measured index 1.15 seconds, query p95 0.04 ms, freshness 43.5 ms, post-GC RSS 111.77 MB, cache 2.33 MB, forced-GC heap growth 1.26%, and event-loop p99 18.73 ms. The final 100k run measured index 9.89 seconds, warm snapshot 0.04 ms, query p95 0.04 ms, freshness 238.80 ms, post-GC RSS 120.17 MB, cache 23.46 MB, heap growth 3.00%, and event-loop p99 11.96 ms. Every measured 10k and 100k SLA is true. Runtime timing starts after isolated fixture generation so synthetic file creation is not misreported as LCA event-loop work.
 

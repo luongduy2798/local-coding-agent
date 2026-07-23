@@ -94,7 +94,7 @@ export function registerContextTools(mcp, dependencies) {
     "read_file",
     {
       title: "Read file",
-      description: "Read one UTF-8 file, optionally by line range. Use read_many for several files.",
+      description: "Read one targeted UTF-8 file or range. Use read_many for several files. Avoid repeating an unchanged range; when another read is necessary after a repetition notice, provide evidence_gap describing the unresolved question.",
       inputSchema: {
         path: z.string().min(1),
         workspace_id: z.string().optional(),
@@ -103,7 +103,8 @@ export function registerContextTools(mcp, dependencies) {
         line_count: z.number().int().min(1).max(20000).optional(),
         max_chars: z.number().int().min(1).max(MAX_READ_CHARS).optional(),
         known_version: z.string().optional(),
-        skip_if_unchanged: z.boolean().optional()
+        skip_if_unchanged: z.boolean().optional(),
+        evidence_gap: z.string().max(1000).optional().describe("Concrete unresolved question that justifies another similar evidence request.")
       }
     },
     async ({ path: rel, workspace_id, task_token, start_line, line_count, max_chars = READ_DEFAULT, known_version, skip_if_unchanged = false }) => {
@@ -155,7 +156,7 @@ export function registerContextTools(mcp, dependencies) {
     "search_text",
     {
       title: "Search text",
-      description: "Search text with ripgrep, git or scan fallback; supports glob and context lines.",
+      description: "Search text with ripgrep, git or scan fallback. Prefer one focused query with context; avoid repeating an unchanged query unless evidence_gap states what new question remains.",
       inputSchema: {
         query: z.string().min(1),
         patterns: z.array(z.string().min(1)).max(16).optional().describe("Additional patterns searched in the same ripgrep process."),
@@ -167,7 +168,8 @@ export function registerContextTools(mcp, dependencies) {
         context: z.number().int().min(0).max(10).optional().describe("Lines of context before/after each match."),
         limit: z.number().int().min(1).max(500).optional(),
         cursor: z.string().max(2048).optional(),
-        max_output_chars: z.number().int().min(1000).max(200000).optional().describe(`Approximate JSON budget for matches (default ${SEARCH_OUTPUT_DEFAULT}).`)
+        max_output_chars: z.number().int().min(1000).max(200000).optional().describe(`Approximate JSON budget for matches (default ${SEARCH_OUTPUT_DEFAULT}).`),
+        evidence_gap: z.string().max(1000).optional().describe("Concrete unresolved question that justifies another similar evidence request.")
       }
     },
     async ({ query, patterns = [], path: rel = ".", workspace_id, task_token, regex = false, glob, context = 0, limit = 100, cursor, max_output_chars = SEARCH_OUTPUT_DEFAULT }, extra) => {
@@ -315,7 +317,7 @@ export function registerContextTools(mcp, dependencies) {
     "read_many",
     {
       title: "Read many files",
-      description: "Read up to 100 files or line ranges concurrently with a bounded output budget.",
+      description: "Read up to 100 targeted files or line ranges concurrently. Avoid rereading the same unchanged requests; use evidence_gap when a repeated batch is needed for a specific unresolved question.",
       inputSchema: {
         paths: z.array(z.string().min(1)).min(1).max(100).optional(),
         workspace_id: z.string().optional(),
@@ -331,7 +333,8 @@ export function registerContextTools(mcp, dependencies) {
         })).min(1).max(100).optional(),
         max_chars_per_file: z.number().int().min(1).max(MAX_READ_CHARS).optional(),
         max_total_chars: z.number().int().min(1000).max(MAX_BATCH_READ_CHARS).optional(),
-        concurrency: z.number().int().min(1).max(16).optional()
+        concurrency: z.number().int().min(1).max(16).optional(),
+        evidence_gap: z.string().max(1000).optional().describe("Concrete unresolved question that justifies another similar evidence request.")
       }
     },
     async ({ paths, requests, workspace_id, task_token, max_chars_per_file = READ_MANY_FILE_DEFAULT, max_total_chars = MAX_BATCH_READ_CHARS, concurrency = 8 }) => {

@@ -5,6 +5,8 @@ import type {
   HealthResponse,
   ProcessDescriptor,
   TaskDescriptor,
+  TaskOrchestrationDescriptor,
+  TaskComplexityProfile,
   WorkspaceDescriptor,
 } from "../api/api-types.js";
 import {
@@ -14,6 +16,9 @@ import {
 } from "../activity/audit-reader.js";
 import { ConnectionManager } from "../connection/connection-manager.js";
 import { readLcaStatus, type LcaCliStatus } from "../connection/lca-cli.js";
+
+const CONTROL_REFRESH_INTERVAL_MS = 2_000;
+const CLI_STATUS_REFRESH_INTERVAL_MS = 10_000;
 
 export interface ControlWorkspace {
   id: string;
@@ -31,6 +36,11 @@ export interface ControlWorkspace {
 export interface ControlTask {
   id: string;
   title: string;
+  objective: string | null;
+  requestedProfile: TaskComplexityProfile | null;
+  effectiveProfile: TaskComplexityProfile | null;
+  profileConfidence: number | null;
+  orchestration: TaskOrchestrationDescriptor | null;
   status: string;
   primaryWorkspaceId: string | null;
   workspaceIds: string[];
@@ -80,6 +90,9 @@ export class ControlCenterStore implements vscode.Disposable {
   private timer: NodeJS.Timeout | undefined;
   private refreshPromise: Promise<void> | undefined;
   private revision = 0;
+  private cliStatus: LcaCliStatus | undefined;
+  private cliStatusError: string | undefined;
+  private cliStatusCheckedAt = 0;
 
   constructor(private readonly connection: ConnectionManager) {
     this.auditReader.onDidChange((audit) => {
@@ -104,7 +117,8 @@ export class ControlCenterStore implements vscode.Disposable {
     if (visible) void this.refresh();
   }
 
-  refresh(): Promise<void> {
+  refresh({ refreshCli = false }: { refreshCli?: boolean } = {}): Promise<void> {
+    if (refreshCli) this.cliStatusCheckedAt = 0;
     if (this.refreshPromise) return this.refreshPromise;
     this.refreshPromise = this.load().finally(() => {
       this.refreshPromise = undefined;
@@ -122,13 +136,34 @@ export class ControlCenterStore implements vscode.Disposable {
   private async load(): Promise<void> {
     this.state = { ...this.state, loading: true };
     this.emit();
-    const [statusResult, connectionResult] = await Promise.allSettled([
-      readLcaStatus(this.connection.preferredWorkspaceFolder?.uri.fsPath),
+    const refreshCli = Date.now() - this.cliStatusCheckedAt >= CLI_STATUS_REFRESH_INTERVAL_MS;
+    if (refreshCli) this.cliStatusCheckedAt = Date.now();
+    const [connectionResult, statusResult] = await Promise.allSettled([
       this.connection.check(),
+      refreshCli
+        ? readLcaStatus(this.connection.preferredWorkspaceFolder?.uri.fsPath)
+        : Promise.resolve(this.cliStatus),
     ]);
-    const cliStatus = statusResult.status === "fulfilled" ? statusResult.value : undefined;
+    if (refreshCli) {
+      if (statusResult.status === "fulfilled") {
+        this.cliStatus = statusResult.value;
+        this.cliStatusError = undefined;
+      } else {
+        this.cliStatusError = statusResult.reason instanceof Error
+          ? statusResult.reason.message
+          : "LCA CLI status is unavailable.";
+      }
+    }
+    const cliStatus = statusResult.status === "fulfilled" ? statusResult.value : this.cliStatus;
     const connectionState = connectionResult.status === "fulfilled" ? connectionResult.value : undefined;
     const health = connectionState?.kind === "connected" ? connectionState.health : undefined;
+    const connectionError = connectionState && connectionState.kind !== "connected"
+      ? connectionState.message
+      : connectionResult.status === "rejected"
+        ? connectionResult.reason instanceof Error
+          ? connectionResult.reason.message
+          : "Unable to connect to LCA."
+        : undefined;
     const serverOnline = Boolean(health || cliStatus?.pids?.server_alive);
     const auditStatus = health?.audit || cliStatus?.audit;
     const workspaceFolders = await openFolderRoots();
@@ -156,9 +191,7 @@ export class ControlCenterStore implements vscode.Disposable {
       tasks,
       processes: health?.processes || [],
       storageError: cliStatus?.storage_error || undefined,
-      error: statusResult.status === "rejected" && !health
-        ? statusResult.reason instanceof Error ? statusResult.reason.message : "LCA CLI status is unavailable."
-        : undefined,
+      error: !health ? this.cliStatusError || connectionError : undefined,
     };
     this.emit();
   }
@@ -167,7 +200,7 @@ export class ControlCenterStore implements vscode.Disposable {
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
     if (!this.visible || this.disposed) return;
-    this.timer = setInterval(() => void this.refresh(), 2_000);
+    this.timer = setInterval(() => void this.refresh(), CONTROL_REFRESH_INTERVAL_MS);
     this.timer.unref?.();
   }
 
@@ -234,6 +267,11 @@ function normalizeTasks(health: HealthResponse | undefined, status: LcaCliStatus
   return [...descriptors.entries()].map(([id, task]) => ({
     id,
     title: task.title || `Task ${id.slice(0, 12)}`,
+    objective: task.objective || null,
+    requestedProfile: task.requested_profile || null,
+    effectiveProfile: task.effective_profile || null,
+    profileConfidence: Number.isFinite(Number(task.profile_confidence)) ? Number(task.profile_confidence) : null,
+    orchestration: task.orchestration || null,
     status: task.status || "unknown",
     primaryWorkspaceId: task.primary_workspace_id || task.workspace_ids?.[0] || null,
     workspaceIds: task.workspace_ids || (task.primary_workspace_id ? [task.primary_workspace_id] : []),

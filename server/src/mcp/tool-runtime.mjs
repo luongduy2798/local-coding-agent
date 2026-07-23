@@ -4,6 +4,11 @@
 
 import { randomUUID } from "node:crypto";
 import { TaskRouterError } from "../workspace/task-router.mjs";
+import {
+  advanceTaskOrchestration,
+  inspectTaskTool,
+  publicTaskOrchestration
+} from "../workspace/task-orchestration.mjs";
 
 export function createToolRegistrar({
   audit,
@@ -25,11 +30,14 @@ export function createToolRegistrar({
   storageRequiredTools,
   taskActivityTools,
   taskContextTools,
+  taskRouter,
   testRuntimeDiagnostics,
   toolMetrics,
   truncateUtf8
 }) {
   const taskOperations = new Map();
+  const evidenceCache = new Map();
+  const evidenceCacheLimit = 128;
 
   function enforceResultBudget(result, maxBytes) {
     const boundedMax = Math.max(1_024, Math.min(
@@ -58,10 +66,7 @@ export function createToolRegistrar({
         preview: truncateUtf8(source, previewBytes),
         guidance: "Narrow the query or request the next page with a cursor."
       };
-      replacement = {
-        content: [{ type: "text", text: JSON.stringify(payload) }],
-        ...(result?.isError ? { isError: true } : {})
-      };
+      replacement = structuredResult(payload, result?.isError === true);
       if (resultBytes(replacement) <= resultMax) break;
       previewBytes = Math.floor(previewBytes * 0.75);
     } while (previewBytes > 0);
@@ -131,7 +136,17 @@ export function createToolRegistrar({
       const startedAt = isoNow();
       const startedMs = performance.now();
       const invocationId = randomUUID();
-      const taskBefore = await resolveCurrentTask(currentTask, args);
+      const taskBefore = await resolveCurrentTask(currentTask, taskRouter, name, args);
+      if (name === "task_close" && taskBefore && taskBefore.status !== "open") {
+        return structuredResult({
+          ok: true,
+          status: "already_closed",
+          idempotent: true,
+          task: taskBefore,
+          review_changes_tasks: []
+        });
+      }
+      let inspection = taskBefore ? inspectTaskTool({ task: taskBefore, tool: name, args: args ?? {} }) : null;
       const initialWorkspaceIds = collectWorkspaceIds(args, taskBefore);
       if (auditEnabled) {
         audit({
@@ -142,13 +157,40 @@ export function createToolRegistrar({
           runtime_id: runtimeId,
           request_id: requestContext.getStore()?.requestId || null,
           tool: name,
+          tool_class: inspection?.tool_class || null,
+          fingerprint: inspection?.fingerprint || null,
+          duplicate: inspection?.duplicate === true,
           task_id: taskBefore?.id || null,
+          effective_profile: taskBefore?.effective_profile || null,
+          orchestration_phase_before: taskBefore?.orchestration?.phase || null,
           workspace_ids: initialWorkspaceIds,
           started_at: startedAt
         });
       }
       let result;
       let ok = true;
+      let skipped = false;
+      let cacheHit = false;
+      let observation = null;
+      if (taskBefore && name === "task_close") {
+        observation = advanceTaskOrchestration({
+          task: taskBefore,
+          tool: name,
+          args: args ?? {},
+          success: true,
+          resultPayload: null,
+          invocationId,
+          finishedAt: startedAt,
+          inspection,
+          skipped: false
+        });
+        await taskRouter?.updateOrchestration({
+          taskId: taskBefore.id,
+          orchestration: observation.state,
+          effectiveProfile: observation.state.effective_profile,
+          profileConfidence: observation.state.confidence
+        }).catch(() => {});
+      }
       try {
         const storageError = getStorageError();
         if (storageError && storageRequiredTools.has(name)) {
@@ -172,15 +214,99 @@ export function createToolRegistrar({
             ? Math.min(maxResponseBytes, requestedBudget)
             : defaultResponseBytes;
         }
-        await enforcePolicy(name, args ?? {});
-        result = await withTaskOperation(name, args ?? {}, () => handler(args ?? {}, extra));
+        const cacheKey = taskBefore && inspection
+          ? `${taskBefore.id}:${inspection.fingerprint}`
+          : null;
+        const cached = cacheKey && inspection?.duplicate && !inspection.evidence_gap && isVersionedEvidenceTool(name)
+          ? evidenceCache.get(cacheKey)
+          : null;
+        if (inspection?.skip) {
+          skipped = true;
+          result = structuredResult({
+            ok: true,
+            skipped: true,
+            code: inspection.notice?.code || "TASK_ORCHESTRATION_SKIP",
+            message: inspection.notice?.message || "The repeated operation was skipped.",
+            previous_invocation_id: inspection.previous?.invocation_id || null
+          });
+        } else if (cached) {
+          await enforcePolicy(name, args ?? {});
+          const validationArgs = cachedEvidenceValidationArgs(name, args ?? {}, cached, firstText);
+          const validationResult = validationArgs
+            ? await withTaskOperation(name, validationArgs, () => handler(validationArgs, extra))
+            : null;
+          if (validationResult && cachedEvidenceUnchanged(name, validationResult, firstText)) {
+            skipped = true;
+            if (inspection.notice?.code === "TASK_LOOP_DETECTED") {
+              result = structuredResult({
+                ok: true,
+                skipped: true,
+                code: inspection.notice.code,
+                message: inspection.notice.message,
+                previous_invocation_id: inspection.previous?.invocation_id || null
+              });
+            } else {
+              cacheHit = true;
+              result = appendPayloadMetadata(cloneToolResult(cached), {
+                cached: true,
+                duplicate: true,
+                previous_invocation_id: inspection.previous?.invocation_id || null
+              }, firstText);
+            }
+          } else if (validationResult) {
+            inspection = { ...inspection, duplicate: false, previous: null, notice: null, skip: false, source_changed: true };
+            result = mergeValidatedEvidence(name, cached, validationResult, firstText);
+            if (!result?.isError) rememberEvidence(evidenceCache, cacheKey, result, evidenceCacheLimit);
+          } else {
+            result = await withTaskOperation(name, args ?? {}, () => handler(args ?? {}, extra));
+            rememberEvidence(evidenceCache, cacheKey, result, evidenceCacheLimit);
+          }
+        } else {
+          await enforcePolicy(name, args ?? {});
+          result = await withTaskOperation(name, args ?? {}, () => handler(args ?? {}, extra));
+          if (cacheKey && isVersionedEvidenceTool(name) && !result?.isError) {
+            rememberEvidence(evidenceCache, cacheKey, result, evidenceCacheLimit);
+          }
+        }
       } catch (error) {
         ok = false;
-        result = {
-          content: [{ type: "text", text: JSON.stringify(await modelSafeError(error)) }],
-          isError: true
-        };
+        result = structuredResult(await modelSafeError(error), true);
       }
+
+      const finishedAt = isoNow();
+      let payload = parseStructuredPayload(result, firstText);
+      if (taskBefore && name !== "task_close") {
+        observation = advanceTaskOrchestration({
+          task: taskBefore,
+          tool: name,
+          args: args ?? {},
+          success: ok && !result?.isError,
+          resultPayload: payload,
+          invocationId,
+          finishedAt,
+          inspection,
+          skipped
+        });
+        await taskRouter?.updateOrchestration({
+          taskId: taskBefore.id,
+          orchestration: observation.state,
+          effectiveProfile: observation.state.effective_profile,
+          profileConfidence: observation.state.confidence
+        }).catch(() => {});
+        result = appendOrchestration(result, observation.public, firstText);
+        payload = parseStructuredPayload(result, firstText);
+      } else if (taskBefore && name === "task_close" && observation) {
+        result = appendOrchestration(result, observation.public, firstText);
+        payload = parseStructuredPayload(result, firstText);
+      } else if (name === "task_open" && payload?.task?.orchestration) {
+        result = appendOrchestration(
+          result,
+          publicTaskOrchestration(payload.task.orchestration, payload.task.effective_profile),
+          firstText
+        );
+        payload = parseStructuredPayload(result, firstText);
+      }
+
       const requestMetrics = requestContext.getStore();
       const responseBudget = Math.min(
         maxResponseBytes,
@@ -191,7 +317,6 @@ export function createToolRegistrar({
       const outChars = resultLen(result);
       const outBytes = resultBytes(result);
       const durationMs = roundMs(performance.now() - startedMs);
-      const finishedAt = isoNow();
       const resultMetadata = toolResultMetadata(result, {
         args,
         firstText,
@@ -219,6 +344,8 @@ export function createToolRegistrar({
         toolMetrics.largestOutputBytes = outBytes;
         toolMetrics.largestOutputTool = name;
       }
+      const resultTask = objectValue(payload?.task) || objectValue(payload?.checkpoint?.task);
+      const publicOrchestration = observation?.public || resultTask?.orchestration || payload?.orchestration || null;
       audit({
         ts: finishedAt,
         kind: "tool",
@@ -227,8 +354,18 @@ export function createToolRegistrar({
         runtime_id: runtimeId,
         request_id: requestMetrics?.requestId || null,
         tool: name,
-        ok: success && resultMetadata.operationalOk,
-        transport_ok: success,
+        tool_class: observation?.tool_class || inspection?.tool_class || null,
+        fingerprint: observation?.fingerprint || inspection?.fingerprint || null,
+        duplicate: observation?.duplicate === true || inspection?.duplicate === true,
+        status_only: observation?.status_only === true,
+        policy_skip: !cacheHit && (observation?.policy_skip === true || skipped),
+        cache_hit: cacheHit,
+        evidence_delta: observation?.evidence_delta === true,
+        orchestration_notice_code: observation?.notice?.code || inspection?.notice?.code || null,
+        orchestration_phase_before: observation?.phase_before || taskBefore?.orchestration?.phase || null,
+        orchestration_phase_after: observation?.phase_after || publicOrchestration?.phase || null,
+        effective_profile: observation?.state?.effective_profile || resultTask?.effective_profile || taskBefore?.effective_profile || null,
+        evidence_status: publicOrchestration?.evidence_status || null,
         task_id: resultMetadata.taskId,
         workspace_ids: resultMetadata.workspaceIds,
         started_at: startedAt,
@@ -246,12 +383,129 @@ export function createToolRegistrar({
   };
 }
 
-async function resolveCurrentTask(currentTask, args) {
+async function resolveCurrentTask(currentTask, taskRouter, toolName, args) {
   try {
-    return await currentTask({ taskToken: args?.task_token, required: false });
+    const task = await currentTask({ taskToken: args?.task_token, required: false });
+    if (task) return task;
+  } catch {
+    // A closed task token is no longer session-bound; task_close handles it idempotently below.
+  }
+  if (toolName === "task_close" && args?.task_token && taskRouter?.getTaskByToken) {
+    return taskRouter.getTaskByToken(args.task_token).catch(() => null);
+  }
+  return null;
+}
+
+function isVersionedEvidenceTool(tool) {
+  return tool === "read_file" || tool === "read_many";
+}
+
+function cachedEvidenceValidationArgs(tool, args, cachedResult, firstText) {
+  const payload = parseStructuredPayload(cachedResult, firstText);
+  if (tool === "read_file" && payload?.version) {
+    return { ...args, known_version: payload.version, skip_if_unchanged: true };
+  }
+  if (tool !== "read_many" || !Array.isArray(payload?.files)) return null;
+  const sourceRequests = Array.isArray(args.requests)
+    ? args.requests
+    : Array.isArray(args.paths)
+      ? args.paths.map((path) => ({ path }))
+      : [];
+  if (!sourceRequests.length || sourceRequests.length !== payload.files.length) return null;
+  const requests = sourceRequests.map((request, index) => ({
+    ...request,
+    known_version: payload.files[index]?.version,
+    skip_if_unchanged: Boolean(payload.files[index]?.version)
+  }));
+  if (requests.some((request) => !request.known_version)) return null;
+  const { paths: _paths, ...rest } = args;
+  return { ...rest, requests };
+}
+
+function cachedEvidenceUnchanged(tool, result, firstText) {
+  const payload = parseStructuredPayload(result, firstText);
+  if (tool === "read_file") return payload?.unchanged === true;
+  return tool === "read_many" && Array.isArray(payload?.files) && payload.files.length > 0 &&
+    payload.files.every((file) => file?.unchanged === true);
+}
+
+function mergeValidatedEvidence(tool, cachedResult, validationResult, firstText) {
+  if (tool !== "read_many") return validationResult;
+  const cachedPayload = parseStructuredPayload(cachedResult, firstText);
+  const validationPayload = parseStructuredPayload(validationResult, firstText);
+  if (!Array.isArray(cachedPayload?.files) || !Array.isArray(validationPayload?.files)) return validationResult;
+  const files = validationPayload.files.map((file, index) => file?.unchanged === true
+    ? cachedPayload.files[index]
+    : file);
+  const charsReturned = files.reduce((total, file) => total + String(file?.content || "").length, 0);
+  return replaceFirstText(validationResult, JSON.stringify({
+    ...validationPayload,
+    chars_returned: charsReturned,
+    files
+  }));
+}
+
+function appendPayloadMetadata(result, metadata, firstText) {
+  const payload = parseStructuredPayload(result, firstText);
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return result;
+  return replaceFirstText(result, JSON.stringify({ ...payload, ...metadata }));
+}
+
+function cloneToolResult(result) {
+  return {
+    ...result,
+    content: Array.isArray(result?.content)
+      ? result.content.map((entry) => entry && typeof entry === "object" ? { ...entry } : entry)
+      : result?.content
+  };
+}
+
+function rememberEvidence(cache, key, result, limit) {
+  if (cache.has(key)) cache.delete(key);
+  cache.set(key, cloneToolResult(result));
+  while (cache.size > limit) cache.delete(cache.keys().next().value);
+}
+
+function appendOrchestration(result, orchestration, firstText) {
+  const payload = parseStructuredPayload(result, firstText);
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return result;
+  return replaceFirstText(result, JSON.stringify({
+    ...payload,
+    orchestration: {
+      ...(payload.orchestration && typeof payload.orchestration === "object" ? payload.orchestration : {}),
+      ...orchestration
+    }
+  }));
+}
+
+function parseStructuredPayload(result, firstText) {
+  try {
+    const payload = JSON.parse(firstText(result));
+    return payload && typeof payload === "object" && !Array.isArray(payload) ? payload : null;
   } catch {
     return null;
   }
+}
+
+function replaceFirstText(result, text) {
+  let replaced = false;
+  return {
+    ...result,
+    content: Array.isArray(result?.content) ? result.content.map((entry) => {
+      if (!replaced && entry?.type === "text") {
+        replaced = true;
+        return { ...entry, text };
+      }
+      return entry;
+    }) : [{ type: "text", text }]
+  };
+}
+
+function structuredResult(payload, isError = false) {
+  return {
+    content: [{ type: "text", text: JSON.stringify(payload) }],
+    ...(isError ? { isError: true } : {})
+  };
 }
 
 function toolResultMetadata(result, { args, firstText, taskBefore, transportSuccess }) {

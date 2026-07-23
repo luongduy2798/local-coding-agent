@@ -6,6 +6,7 @@ import { realpath } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import { WorkspaceRegistryError } from "../../workspace/registry.mjs";
+import { confirmTaskComplexity } from "../../workspace/task-orchestration.mjs";
 
 export function registerWorkspaceTools(mcp, dependencies) {
   const {
@@ -157,15 +158,18 @@ export function registerWorkspaceTools(mcp, dependencies) {
     "task_open",
     {
       title: "Open task",
-      description: "Open or resume a task whose primary and attached workspaces are frozen on the first mutation.",
+      description: "Open or resume a task. Provide a concise objective and a model-selected complexity_hint; title is only a short UI label. LCA may report advisory scope signals but does not change the effective profile automatically.",
       inputSchema: {
-        title: z.string().max(180).optional(),
+        objective: z.string().max(4000).optional().describe("Concise task objective preserving the user's requested behavior and constraints; do not include unrelated conversation text."),
+        title: z.string().max(180).optional().describe("Optional short UI label. Defaults from objective when omitted."),
+        complexity_hint: z.enum(["quick_edit", "normal", "complex"]).optional().describe("Model-selected effective complexity. Defaults to normal when omitted."),
+        complexity_override: z.boolean().optional().describe("Compatibility field; LCA no longer changes the effective profile automatically."),
         primary_workspace_id: z.string().optional(),
         attached_workspace_ids: z.array(z.string()).max(8).optional(),
         task_token: z.string().optional().describe("Resume an existing task after reconnect.")
       }
     },
-    async ({ title = "LCA task", primary_workspace_id, attached_workspace_ids = [], task_token }) => {
+    async ({ objective, title, complexity_hint, complexity_override = false, primary_workspace_id, attached_workspace_ids = [], task_token }) => {
       if (!taskRouter || !registry) {
         throw new Error(`Multi-workspace task storage unavailable: ${storageError?.message || "unknown error"}`);
       }
@@ -197,13 +201,51 @@ export function registerWorkspaceTools(mcp, dependencies) {
         workspaceBaselines.push(await captureTaskWorkspaceBaseline(workspaceId));
       }
       const task = await taskRouter.openTask({
-        title,
+        title: title || objective || "LCA task",
+        objective,
+        complexityHint: complexity_hint,
+        complexityOverride: complexity_override,
         primaryWorkspaceId: primaryId,
         attachedWorkspaceIds: workspaceIds.slice(1),
         ownerSessionId: sessionId,
         workspaceBaselines
       });
       return jsonResult({ ok: true, resumed: false, task: await taskOpenPayload(task) });
+    }
+  );
+
+  reg(
+    mcp,
+    "task_reclassify",
+    {
+      title: "Reclassify task",
+      description: "Confirm a new effective task profile after the model evaluates LCA's advisory scope signals. LCA never calls this decision automatically.",
+      inputSchema: {
+        task_token: z.string().min(1),
+        complexity: z.enum(["quick_edit", "normal", "complex"]),
+        reason: z.string().min(1).max(1000).describe("Model rationale for changing or reaffirming the effective profile.")
+      }
+    },
+    async ({ task_token, complexity, reason }) => {
+      if (!taskRouter) throw new Error("Task storage unavailable.");
+      const current = await taskRouter.getTask({
+        taskToken: task_token,
+        sessionId: currentMcpSessionId(),
+        required: true
+      });
+      const orchestration = confirmTaskComplexity(current.orchestration, complexity, reason);
+      const updated = await taskRouter.updateOrchestration({
+        taskId: current.id,
+        orchestration,
+        effectiveProfile: complexity,
+        profileConfidence: current.profile_confidence
+      });
+      return jsonResult({
+        ok: true,
+        previous_profile: current.effective_profile,
+        effective_profile: updated.effective_profile,
+        task: await taskOpenPayload(updated)
+      });
     }
   );
 

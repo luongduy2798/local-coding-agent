@@ -387,6 +387,7 @@ const {
   modelSafePersistenceStatus,
   modelSafeSemanticAdapterStatus,
   modelSafeWatcherStatus,
+  onDidChange: onRuntimeChange,
   sanitizeGraphSnapshot,
   taskOpenPayload,
   taskWorkspaceBaseline
@@ -571,6 +572,7 @@ const reg = createToolRegistrar({
   storageRequiredTools: STORAGE_REQUIRED_TOOLS,
   taskActivityTools: TASK_ACTIVITY_TOOLS,
   taskContextTools: TASK_CONTEXT_TOOLS,
+  taskRouter: TASK_ROUTER,
   testRuntimeDiagnostics: TEST_RUNTIME_DIAGNOSTICS,
   toolMetrics: TOOL_RUNTIME_METRICS,
   truncateUtf8
@@ -725,6 +727,7 @@ function detectRg() {
 
 const CHANGE_ROUTES = createChangeRoutes({
   getChangeJournal: getChangeJournal,
+  subscribeToChangeEvents: onRuntimeChange,
   getPrimaryWorkspaceId: () => PRIMARY_WORKSPACE_ID,
   getRegistry: () => WORKSPACE_REGISTRY,
   getTaskRouter: () => TASK_ROUTER,

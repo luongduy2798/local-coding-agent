@@ -2,6 +2,26 @@
 
 All notable changes to Local Coding Agent are documented in this file.
 
+## [Unreleased]
+
+### Task orchestration
+
+- Added task complexity profiles (`quick_edit`, `normal`, and `complex`) selected by the model when opening a task. When omitted, the runtime defaults the effective profile to `normal`.
+- Added advisory orchestration state with phases, evidence status, soft discovery/total-call budgets, duplicate-call fingerprints, version-checked evidence caching, and repeated-evidence loop guards.
+- Added `objective` as the concise behavior-and-constraints summary for a task while keeping `title` as an optional short UI label.
+- Made scope classification advisory-only: LCA records observable `suggested_profile`, `scope_signal`, and reasons, but never changes `effective_profile` automatically.
+- Added `task_reclassify`, which changes the effective profile only after the model explicitly confirms the decision and provides a reason.
+- Updated model instructions so quick edits normally avoid persistent plans, progress narration, unrelated skill discovery, and repeated unchanged reads.
+- Updated Control Center task cards and activity rows to show effective profile, advisory suggestions, phase, redundant calls, cached duplicates, and policy skips without presenting them as tool failures.
+- Tuned `quick_edit` guidance to five discovery calls and nine work calls, excluding `task_open`/`task_close` from the work budget. Budget notices now require stalled discovery rather than firing on call count alone.
+- Removed discovery volume and raw returned-path count as automatic profile-review signals; multi-workspace scope and an explicit persistent plan remain advisory signals.
+- Made repeated close requests with the same closed task token idempotent, and instructed the model to close directly as `incomplete` when verification is intentionally skipped instead of issuing two close calls.
+
+### Catalog and upgrade notes
+
+- Added `task_reclassify` to the fixed model-visible catalog, raising the catalog to 36 tools and `catalog_version=7`.
+- Refresh the ChatGPT custom MCP connector and open a new chat after upgrading so the new schema and orchestration instructions are loaded.
+
 ## [5.0.0-pro] - 2026-07-22
 
 ### Runtime and lifecycle

@@ -276,6 +276,10 @@ function App(): React.JSX.Element {
           unassigned={unassigned}
           workspaceLabel={currentWorkspace?.label || "Current workspace"}
           workspaceKey={currentWorkspaceId || currentWorkspace?.key}
+          workspaceId={currentWorkspaceId}
+          busyAction={state.busyAction}
+          onDeleteTask={(taskId) => post("deleteTask", undefined, undefined, taskId, currentWorkspaceId)}
+          onDeleteAll={() => post("deleteWorkspaceTasks", undefined, undefined, undefined, currentWorkspaceId)}
           renderChanges={(item) => (
             <div className="change-list inline-change-list" aria-label={`Changes for ${item.task.title}`}>
               {item.changes.map((change) => (

@@ -1,4 +1,4 @@
-// Local Coding Agent fixed 35-tool MCP catalog.
+// Local Coding Agent fixed 36-tool MCP catalog.
 // Copyright (c) 2026 Lương Duy
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
@@ -375,12 +375,14 @@ function serverInstructions(policy) {
   return [
     "Local Coding Agent is task-scoped and may operate across explicitly attached workspaces. File tools are root-confined; command execution is audited but is not an OS sandbox.",
     "ENTRYPOINT: a bare `lca` or `call lca` request means lca_status. Use lca_input only when the user explicitly asks for the input widget, composer or PiP.",
-    "START: call workspace_list, optionally workspace_select for future tasks, then task_open. workspace_select never reroutes an existing task. A task has one primary workspace and at most eight attached workspaces.",
+    "START: call workspace_list, optionally workspace_select for future tasks, then task_open with a concise objective and model-selected complexity_hint. workspace_select never reroutes an existing task. A task has one primary workspace and at most eight attached workspaces.",
     "ISOLATION: every context, mutation, execution and review call belongs to the current task. Attach or detach workspaces before the first mutation; the workspace set freezes afterwards. Never infer another repository. If context is missing or ambiguous, stop on TASK_CONTEXT_REQUIRED.",
     "PATHS: results use {workspace_id,path}; paths are relative to that workspace. Always pass workspace_id when a task contains more than one workspace.",
-    "CONTEXT: start with workspace_snapshot. Use code_query for symbols, definitions, references, imports and call relationships; use search_text/find_files/read_many only for missing evidence. Prefer bounded, targeted reads and a few substantial calls.",
+    "CONTEXT: use the lightest targeted discovery needed for the objective. Use code_query for symbols and references; use search_text/find_files/read_many only for missing evidence. Prefer a few substantial calls, do not repeat unchanged evidence, and provide evidence_gap when a similar call is genuinely needed again.",
+    "ORCHESTRATION: the model selects the effective quick_edit, normal or complex profile. LCA only reports advisory suggested_profile and scope_signal from observable tool evidence; it never changes the effective profile automatically. Use task_reclassify with a reason only after the model confirms a profile change. For quick edits, normally skip task_plan, task_state narration and skills.",
     "MUTATION: use apply_patch with expected_version for related file changes, including cross-workspace batches. A transaction reported in_doubt blocks further mutation until recovery. Shell changes are not atomic or undoable; tracked source changed by a command is marked unmanaged and must be adopted/reviewed.",
     "VERIFICATION: use run_changed_tests or verify_changes, then review_diff/security_scan as appropriate. PASS or CLEAN is forbidden when any workspace, changed file, transaction, unmanaged change, or required gate is incomplete.",
+    "CLOSING: when verification was intentionally skipped or remains incomplete, call task_close once with status=incomplete. Do not first request complete and then retry. Repeating task_close with the same closed task token is idempotent.",
     "EXECUTION: reserve run_command/run_commands/process for builds, tests, installs and programs that dedicated tools cannot perform. Set cwd instead of embedding cd, and bound output.",
     policy === "balanced"
       ? "POLICY: risky actions can return Approval required. Use the local approval UI or CLI to review and authorize the exact action."

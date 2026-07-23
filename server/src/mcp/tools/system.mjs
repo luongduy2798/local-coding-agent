@@ -110,7 +110,7 @@ export function registerSystemTools(mcp, dependencies) {
     "task_close",
     {
       title: "Close task",
-      description: "Close the active Review Changes task after verification and return its final summary.",
+      description: "Close the active Review Changes task and return its final summary. When verification was intentionally skipped or remains incomplete, pass status=incomplete directly instead of attempting complete and retrying.",
       inputSchema: {
         title: z.string().max(180).optional(),
         status: z.enum(["complete", "incomplete", "failed"]).optional(),

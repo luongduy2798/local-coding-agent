@@ -14,7 +14,7 @@ Mục tiêu:
 - Chạy setup wizard chính.
 - Cài global command lca.
 - Kiểm tra tôi có thể cd vào repo bất kỳ và chạy lca.
-- Xác minh runtime fixed 35-tool catalog và multi-workspace registry.
+- Xác minh runtime fixed 36-tool catalog, advisory task orchestration và multi-workspace registry.
 
 Quy tắc:
 - Không commit secret, API key, Tunnel ID, .env.local, tools/ hoặc generated profiles.
@@ -39,7 +39,7 @@ Các bước:
    `lca stop`. Không kỳ vọng root/PID/task từ `/healthz`, không in instance nonce;
    `/healthz/details` chỉ dành cho local companion đã xác thực.
 9. Hướng dẫn tạo ChatGPT connector với `No auth`, refresh connector nếu nó
-   từng dùng legacy, mở chat mới và gọi `lca_status` để xác minh `catalog_version=5`.
+   từng dùng legacy, mở chat mới và gọi `lca_status` để xác minh `catalog_version=7`.
 ```
 
 ## Setup Map

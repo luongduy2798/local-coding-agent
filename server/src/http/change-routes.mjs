@@ -9,6 +9,7 @@ import { TaskRouterError } from "../workspace/task-router.mjs";
 
 export function createChangeRoutes({
   getChangeJournal,
+  subscribeToChangeEvents,
   getPrimaryWorkspaceId,
   getRegistry,
   getTaskRouter,
@@ -19,6 +20,9 @@ export function createChangeRoutes({
   testRuntimeDiagnostics
 }) {
   async function handle(req, res, url) {
+    if (url.pathname === "/tasks" || url.pathname.startsWith("/tasks/")) {
+      return mutateTasks(req, res, url);
+    }
     if (req.method === "GET" && url.pathname === "/changes/events") {
       const workspaceId = url.searchParams.get("workspace_id") || getPrimaryWorkspaceId();
       const taskId = url.searchParams.get("task_id") || null;
@@ -31,37 +35,56 @@ export function createChangeRoutes({
       let previousRevision = String(req.headers["last-event-id"] || "") ||
         String(url.searchParams.get("since_revision") || "");
       let running = false;
+      let pending = false;
       const emit = async () => {
-        if (running || res.destroyed) return;
+        if (running) {
+          pending = true;
+          return;
+        }
+        if (res.destroyed) return;
         running = true;
         try {
-          const snapshot = workspaceId === "all"
-            ? await listAllWorkspaceChanges({ limit: 200, offset: 0, taskId })
-            : await listOneWorkspaceChanges(workspaceId, { limit: 200, offset: 0, taskId });
-          const revision = snapshot.revision;
-          if (revision !== previousRevision) {
-            previousRevision = revision;
-            res.write(`id: ${revision}\nevent: revision\ndata: ${JSON.stringify({
-              workspace_id: workspaceId,
-              task_id: taskId,
-              revision,
-              ...(workspaceId === "all" ? {
-                workspace_revisions: snapshot.workspaces.map((item) => ({
-                  workspace_id: item.workspace_id,
-                  revision: item.revision
-                }))
-              } : {})
-            })}\n\n`);
-          } else {
-            res.write(": keepalive\n\n");
-          }
+          do {
+            pending = false;
+            const snapshot = workspaceId === "all"
+              ? await listAllWorkspaceChanges({ limit: 200, offset: 0, taskId })
+              : await listOneWorkspaceChanges(workspaceId, { limit: 200, offset: 0, taskId });
+            const revision = snapshot.revision;
+            if (revision !== previousRevision) {
+              previousRevision = revision;
+              res.write(`id: ${revision}\nevent: revision\ndata: ${JSON.stringify({
+                workspace_id: workspaceId,
+                task_id: taskId,
+                revision,
+                ...(workspaceId === "all" ? {
+                  workspace_revisions: snapshot.workspaces.map((item) => ({
+                    workspace_id: item.workspace_id,
+                    revision: item.revision
+                  }))
+                } : {})
+              })}\n\n`);
+            }
+          } while (pending && !res.destroyed);
         } finally {
           running = false;
         }
       };
-      const timer = setInterval(() => emit().catch(() => {}), 1_000);
-      timer.unref?.();
-      req.once("close", () => clearInterval(timer));
+      const unsubscribe = subscribeToChangeEvents((event) => {
+        if (workspaceId !== "all" && event.workspaceId !== workspaceId) return;
+        if (taskId && event.taskId && event.taskId !== taskId) return;
+        pending = true;
+        void emit().catch(() => {});
+      });
+      const heartbeat = setInterval(() => {
+        if (!res.destroyed) res.write(": keepalive\n\n");
+      }, 15_000);
+      heartbeat.unref?.();
+      const cleanup = () => {
+        clearInterval(heartbeat);
+        unsubscribe();
+      };
+      req.once("close", cleanup);
+      res.write(": ready\n\n");
       await emit();
       return;
     }
@@ -69,6 +92,91 @@ export function createChangeRoutes({
       return listChanges(req, res, url);
     }
     return mutateOrReadChange(req, res, url);
+  }
+
+  async function mutateTasks(req, res, url) {
+    if (req.method !== "DELETE") return sendJson(res, 405, { error: "method_not_allowed" });
+    const taskRouter = getTaskRouter();
+    if (!taskRouter) return sendJson(res, 503, { error: "task_storage_unavailable" });
+    const workspaceId = url.searchParams.get("workspace_id") || getPrimaryWorkspaceId();
+    try {
+      const match = url.pathname.match(/^\/tasks\/([^/]+)$/);
+      if (match) {
+        const taskId = decodeURIComponent(match[1]);
+        const task = await taskRouter.getTaskById(taskId);
+        if (!task.workspace_ids.includes(workspaceId)) {
+          throw new ChangeJournalError("TASK_NOT_FOUND", "Task not found for this workspace.", {}, 404);
+        }
+        assertTaskDeletable(task);
+        const historyDeleted = await clearTaskHistory(task);
+        const deleted = await taskRouter.deleteTask({ taskId: task.id });
+        return sendJson(res, 200, {
+          ok: true,
+          workspace_id: workspaceId,
+          task_id: task.id,
+          deleted: deleted.deleted,
+          history_deleted: historyDeleted
+        });
+      }
+      if (url.pathname !== "/tasks") return sendJson(res, 404, { error: "not_found" });
+      const tasks = await taskRouter.listTasksForWorkspace({ workspaceId });
+      const openTasks = tasks.filter((task) => task.status === "open");
+      if (openTasks.length) {
+        throw new ChangeJournalError(
+          "TASKS_OPEN",
+          `Close ${openTasks.length} open task(s) before deleting workspace task history.`,
+          { task_ids: openTasks.map((task) => task.id) },
+          409
+        );
+      }
+      let historyDeleted = 0;
+      let deleted = 0;
+      for (const task of tasks) {
+        historyDeleted += await clearTaskHistory(task);
+        deleted += Number((await taskRouter.deleteTask({ taskId: task.id })).deleted || 0);
+      }
+      return sendJson(res, 200, {
+        ok: true,
+        workspace_id: workspaceId,
+        deleted,
+        history_deleted: historyDeleted
+      });
+    } catch (error) {
+      if (error instanceof TaskRouterError) {
+        const status = error.code === "TASK_NOT_FOUND"
+          ? 404
+          : error.code === "INVALID_TASK_ID" || error.code === "INVALID_WORKSPACE_ID"
+            ? 400
+            : 409;
+        throw new ChangeJournalError(error.code, error.message, error.details, status);
+      }
+      throw error;
+    }
+  }
+
+  function assertTaskDeletable(task) {
+    if (task.status !== "open") return;
+    throw new ChangeJournalError(
+      "TASK_OPEN",
+      "Close this task before deleting it.",
+      { task_id: task.id },
+      409
+    );
+  }
+
+  async function clearTaskHistory(task) {
+    let deleted = 0;
+    for (const workspaceId of task.workspace_ids) {
+      const journal = await getChangeJournal(workspaceId, { allowArchived: true });
+      try {
+        const result = await journal.clear({ taskId: task.id });
+        deleted += Number(result?.deleted || 0);
+      } catch (error) {
+        if (error instanceof ChangeJournalError && error.code === "change_not_found") continue;
+        throw error;
+      }
+    }
+    return deleted;
   }
 
   async function listChanges(req, res, url) {

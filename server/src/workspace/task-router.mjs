@@ -10,6 +10,12 @@ import {
   assertSqliteCapability,
   openRegistryDatabase
 } from "../storage/database.mjs";
+import {
+  classifyTaskComplexity,
+  createTaskOrchestration,
+  normalizeTaskObjective,
+  normalizeTaskOrchestration
+} from "./task-orchestration.mjs";
 
 const MAX_WORKSPACES_PER_TASK = 9;
 
@@ -44,6 +50,9 @@ export class TaskRouter {
 
   async openTask({
     title = "LCA task",
+    objective,
+    complexityHint,
+    complexityOverride = false,
     primaryWorkspaceId,
     attachedWorkspaceIds = [],
     ownerSessionId = null,
@@ -55,6 +64,16 @@ export class TaskRouter {
     if (workspaceIds.length > MAX_WORKSPACES_PER_TASK) {
       throw new TaskRouterError("TOO_MANY_WORKSPACES", `A task supports at most ${MAX_WORKSPACES_PER_TASK} workspaces.`);
     }
+    const normalizedObjective = normalizeTaskObjective(objective, title);
+    const normalizedTitle = normalizeTitle(title || normalizedObjective || "LCA task");
+    const classification = classifyTaskComplexity({
+      objective: normalizedObjective,
+      title: normalizedTitle,
+      complexityHint,
+      complexityOverride,
+      workspaceCount: workspaceIds.length
+    });
+    const orchestration = createTaskOrchestration(classification);
     const taskId = `task_${randomUUID().replaceAll("-", "")}`;
     const taskToken = randomBytes(32).toString("base64url");
     const tokenHash = hashToken(taskToken);
@@ -64,15 +83,23 @@ export class TaskRouter {
       mode: "run",
       sql: `
         INSERT INTO task_router_tasks(
-          id, token_hash, owner_session_id, title, status, version,
+          id, token_hash, owner_session_id, title, objective,
+          requested_profile, effective_profile, complexity_override,
+          profile_confidence, orchestration_json, status, version,
           workspace_set_frozen, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, 'open', 1, 0, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', 1, 0, ?, ?)
       `,
       params: [
         taskId,
         tokenHash,
         ownerSessionId ? String(ownerSessionId) : null,
-        normalizeTitle(title),
+        normalizedTitle,
+        normalizedObjective || null,
+        classification.requested_profile,
+        classification.effective_profile,
+        classification.complexity_override ? 1 : 0,
+        classification.confidence,
+        JSON.stringify(orchestration),
         timestamp,
         timestamp
       ]
@@ -349,6 +376,72 @@ export class TaskRouter {
     return this.getTaskById(task.id);
   }
 
+  async updateOrchestration({ taskId, orchestration, effectiveProfile, profileConfidence } = {}) {
+    const id = String(taskId || "");
+    if (!/^task_[A-Za-z0-9_-]{8,160}$/.test(id)) {
+      throw new TaskRouterError("INVALID_TASK_ID", `Invalid task ID: ${id}`);
+    }
+    const current = await this.getTaskById(id);
+    if (current.status !== "open") return current;
+    const normalized = normalizeTaskOrchestration(
+      orchestration,
+      effectiveProfile || current.effective_profile
+    );
+    const timestamp = isoNow();
+    await this.database.run(
+      `
+        UPDATE task_router_tasks
+        SET effective_profile = ?, profile_confidence = ?, orchestration_json = ?, updated_at = ?
+        WHERE id = ? AND status = 'open'
+      `,
+      [
+        normalized.effective_profile,
+        Number.isFinite(Number(profileConfidence)) ? Number(profileConfidence) : normalized.confidence,
+        JSON.stringify(normalized),
+        timestamp,
+        id
+      ]
+    );
+    return this.getTaskById(id);
+  }
+
+  async listTasksForWorkspace({ workspaceId } = {}) {
+    const workspace = validateWorkspaceId(workspaceId);
+    const rows = await this.database.all(
+      `
+        SELECT t.*
+        FROM task_router_tasks t
+        JOIN task_router_workspaces w ON w.task_id = t.id
+        WHERE w.workspace_id = ?
+        ORDER BY t.updated_at DESC
+      `,
+      [workspace]
+    );
+    return Promise.all(rows.map((row) => this.hydrate(row)));
+  }
+
+  async deleteTask({ taskId } = {}) {
+    const id = validateTaskId(taskId);
+    const task = await this.getTaskById(id);
+    if (task.status === "open") {
+      throw new TaskRouterError(
+        "TASK_OPEN",
+        `Close task ${task.id} before deleting it.`,
+        { task_id: task.id }
+      );
+    }
+    const result = await this.database.run(
+      "DELETE FROM task_router_tasks WHERE id = ? AND status <> 'open'",
+      [id]
+    );
+    return {
+      ok: true,
+      deleted: Number(result?.changes || 0),
+      task_id: id,
+      workspace_ids: task.workspace_ids
+    };
+  }
+
   async listTasks({ limit = 100, status } = {}) {
     const bounded = Math.max(1, Math.min(500, Number(limit) || 100));
     const rows = status
@@ -383,9 +476,22 @@ export class TaskRouter {
       [row.id]
     );
     const hydratedWorkspaces = workspaces.map(hydrateWorkspace);
+    let orchestrationSource = null;
+    try {
+      orchestrationSource = JSON.parse(row.orchestration_json || "{}");
+    } catch {}
+    const orchestration = normalizeTaskOrchestration(orchestrationSource, row.effective_profile || "normal");
     return {
       id: row.id,
       title: row.title,
+      objective: row.objective || null,
+      requested_profile: row.requested_profile || null,
+      effective_profile: orchestration.effective_profile,
+      complexity_override: Boolean(row.complexity_override),
+      profile_confidence: Number.isFinite(Number(row.profile_confidence))
+        ? Number(row.profile_confidence)
+        : orchestration.confidence,
+      orchestration,
       status: row.status,
       version: Number(row.version),
       owner_session_id: row.owner_session_id || null,
@@ -663,6 +769,14 @@ function assertWorkspaceSetMutable(task) {
       "Workspace attachments cannot change after the first mutation. Open a new task."
     );
   }
+}
+
+function validateTaskId(value) {
+  const id = String(value || "");
+  if (!/^task_[A-Za-z0-9_-]{8,160}$/.test(id)) {
+    throw new TaskRouterError("INVALID_TASK_ID", `Invalid task ID: ${id}`);
+  }
+  return id;
 }
 
 function validateWorkspaceId(value) {

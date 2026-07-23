@@ -85,7 +85,7 @@ Trong ChatGPT, hỏi:
 call lca
 ```
 
-Prompt ngắn `call lca` phải chọn `lca_status`. Kết quả phải trả `catalog_version=5`, `catalog_hash`, workspace/task và trạng thái session. Dùng `workspace_list`, sau đó `workspace_select` và `task_open` để bind task mới vào repo trước khi gọi các coding/mutation tool. Task đang mở không tự đổi theo lần `workspace_select` sau đó.
+Prompt ngắn `call lca` phải chọn `lca_status`. Kết quả phải trả `catalog_version=7`, `catalog_hash`, workspace/task và trạng thái session. Dùng `workspace_list`, sau đó `workspace_select` và `task_open` để bind task mới vào repo trước khi gọi các coding/mutation tool. Khi mở task, ChatGPT chọn `complexity_hint`; LCA chỉ trả scope signal tư vấn và không tự đổi effective profile. Khi phạm vi thực sự thay đổi, ChatGPT xác nhận bằng `task_reclassify` kèm lý do. Task đang mở không tự đổi theo lần `workspace_select` sau đó.
 
 Để kiểm tra Apps SDK và PiP, gọi:
 
@@ -118,7 +118,7 @@ Hai chat có thể mở hai task trên hai workspace khác nhau cùng lúc. Mộ
 
 ## 6. Refresh Connector Khi Nâng Cấp
 
-Runtime publish catalog cố định 35 tool. Khi catalog thay đổi:
+Runtime publish catalog cố định 36 tool. Khi catalog thay đổi:
 
 1. Chạy `lca update`.
 2. Refresh custom MCP connector một lần.

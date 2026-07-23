@@ -1083,23 +1083,35 @@ button {
   flex: 1;
 }
 
-.workspace-title-row {
-  display: flex;
-  min-width: 0;
+.workspace-heading > .eyebrow {
+  position: relative;
+  display: inline-flex;
   align-items: center;
-  gap: 7px;
-  margin: 3px 0 6px;
+  margin-bottom: 7px;
+  color: #67e8f9;
+  background: linear-gradient(90deg, #67e8f9 0%, #818cf8 52%, #c084fc 100%);
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-shadow:
+    0 0 8px color-mix(in srgb, #22d3ee 38%, transparent),
+    0 0 18px color-mix(in srgb, #8b5cf6 22%, transparent);
 }
 
-.workspace-title-row h1 {
-  min-width: 0;
-  margin: 0;
-  overflow: hidden;
-  font-size: 16px;
-  font-weight: 650;
-  line-height: 1.25;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.workspace-heading > .eyebrow::after {
+  content: "";
+  position: absolute;
+  right: 0;
+  bottom: -3px;
+  left: 0;
+  height: 1px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #22d3ee, #6366f1 55%, transparent);
+  box-shadow: 0 0 7px color-mix(in srgb, #22d3ee 55%, transparent);
+  opacity: 0.8;
 }
 
 .header-warning {
@@ -1523,6 +1535,10 @@ button {
   color: var(--vscode-testing-iconPassed, #3fb950);
 }
 
+.task-state-icon.state-incomplete {
+  color: var(--vscode-editorWarning-foreground);
+}
+
 .task-state-icon.state-failed {
   color: var(--vscode-testing-iconFailed, #f85149);
 }
@@ -1716,6 +1732,18 @@ button {
   color: var(--vscode-progressBar-background);
 }
 
+.timeline-skipped .timeline-marker,
+.timeline-duplicate .timeline-marker {
+  color: var(--vscode-descriptionForeground);
+  border-style: dashed;
+  opacity: 0.75;
+}
+
+.timeline-skipped .timeline-copy,
+.timeline-duplicate .timeline-copy {
+  opacity: 0.78;
+}
+
 .timeline-copy {
   display: flex;
   min-width: 0;
@@ -1846,10 +1874,6 @@ button {
   border-bottom: 0;
 }
 
-.task-card.is-expanded {
-  background: color-mix(in srgb, var(--vscode-list-hoverBackground) 42%, transparent);
-}
-
 .task-card-header {
   display: grid;
   min-width: 0;
@@ -1859,7 +1883,7 @@ button {
   padding: 9px 8px;
 }
 
-.task-card:hover:not(.is-expanded) {
+.task-card:hover {
   background: var(--vscode-list-hoverBackground);
 }
 
@@ -1895,35 +1919,16 @@ button {
   font-size: 8px;
 }
 
-.changes-toggle {
-  display: inline-flex;
-  min-height: 27px;
-  align-items: center;
-  gap: 5px;
-  padding: 4px 7px;
-  border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
-  border-radius: 5px;
-  color: var(--vscode-foreground);
-  background: transparent;
-  cursor: pointer;
-  font-size: 9px;
-  font-weight: 600;
+.task-card-meta .redundant-count,
+.task-card-meta .orchestration-notice {
+  color: var(--vscode-editorWarning-foreground);
+}
+
+.task-card-meta .orchestration-notice {
+  overflow: hidden;
+  max-width: 220px;
+  text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.changes-toggle:hover,
-.changes-toggle[aria-expanded="true"] {
-  background: var(--vscode-toolbar-hoverBackground);
-}
-
-.changes-toggle .icon {
-  width: 12px;
-  height: 12px;
-  transition: transform 120ms ease;
-}
-
-.changes-toggle[aria-expanded="true"] .icon {
-  transform: rotate(180deg);
 }
 
 .inline-changes-panel {
@@ -1982,10 +1987,6 @@ button {
     grid-template-columns: 26px minmax(0, 1fr);
   }
 
-  .changes-toggle {
-    width: fit-content;
-  }
-
   .inline-changes-panel {
     padding-left: 8px;
   }
@@ -2025,6 +2026,22 @@ button {
   gap: 12px;
 }
 
+.task-feed-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.task-feed-actions > span {
+  color: var(--vscode-descriptionForeground);
+  font-size: 9px;
+}
+
+.task-feed-actions .icon-button {
+  width: 27px;
+  height: 27px;
+}
+
 .task-thread .task-card {
   overflow: hidden;
   border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
@@ -2037,37 +2054,37 @@ button {
   border-bottom: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
 }
 
-.task-thread .task-card.is-latest {
+.task-thread .task-card.is-running {
   border-color: color-mix(in srgb, var(--vscode-focusBorder) 72%, transparent);
   background: color-mix(in srgb, var(--vscode-list-activeSelectionBackground) 34%, var(--vscode-editorWidget-background));
   box-shadow: inset 3px 0 0 var(--vscode-focusBorder);
 }
 
-.task-thread .task-card.is-running {
-  border-color: color-mix(in srgb, var(--vscode-progressBar-background) 66%, var(--vscode-widget-border));
-}
-
-.task-thread .task-card.is-expanded {
-  background: color-mix(in srgb, var(--vscode-list-hoverBackground) 52%, var(--vscode-editorWidget-background));
-}
-
 .task-thread .task-card-header {
+  position: relative;
   align-items: start;
-  padding: 10px 9px 8px;
+  padding: 10px 42px 8px 9px;
 }
 
-.task-thread .task-card:hover:not(.is-expanded) {
+.task-card-actions {
+  position: absolute;
+  top: 7px;
+  right: 7px;
+}
+
+.task-card-actions .icon-button {
+  width: 27px;
+  height: 27px;
+}
+
+.task-thread .task-card:hover {
   background: color-mix(in srgb, var(--vscode-list-hoverBackground) 68%, transparent);
 }
 
-.task-activity-scroll {
-  max-height: 274px;
-  overflow: auto;
-  overscroll-behavior: contain;
+.task-activity {
   margin: 0 8px 9px 42px;
   padding: 3px 7px;
   border-left: 1px solid color-mix(in srgb, var(--vscode-widget-border, var(--vscode-panel-border)) 78%, transparent);
-  scrollbar-gutter: stable;
 }
 
 .task-tool-timeline {
@@ -2076,6 +2093,41 @@ button {
 
 .task-tool-timeline::before {
   left: 10px;
+}
+
+.task-summary-item {
+  color: var(--vscode-descriptionForeground);
+}
+
+.task-summary-button {
+  display: grid;
+  width: 100%;
+  grid-template-columns: 21px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  padding: 6px 2px;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.task-summary-button:hover {
+  color: var(--vscode-foreground);
+}
+
+.task-summary-button:focus-visible {
+  border-radius: 4px;
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 1px;
+}
+
+.task-summary-marker {
+  border-style: dashed;
+  font-size: 12px;
+  font-weight: 700;
 }
 
 .task-waiting {
@@ -2090,16 +2142,15 @@ button {
   padding: 0 8px 9px 42px;
 }
 
-.task-changes > .changes-toggle {
-  margin-bottom: 0;
-}
-
-.task-changes > .changes-toggle[aria-expanded="true"] {
-  margin-bottom: 7px;
-}
-
 .task-changes .inline-changes-panel {
   padding: 0;
+}
+
+.task-changes .inline-changes-scroll {
+  max-height: none;
+  overflow: visible;
+  overscroll-behavior: auto;
+  scrollbar-gutter: auto;
 }
 
 .jump-to-latest {
@@ -2155,7 +2206,7 @@ button {
     gap: 4px;
   }
 
-  .task-activity-scroll,
+  .task-activity,
   .task-changes {
     margin-left: 8px;
     padding-left: 7px;

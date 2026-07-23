@@ -5,6 +5,7 @@ import * as vscode from "vscode";
 
 const MAX_EVENTS = 20_000;
 const RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+const AUDIT_FALLBACK_INTERVAL_MS = 10_000;
 
 export type ActivityStatus = "started" | "finished" | "failed" | "interrupted";
 
@@ -23,6 +24,18 @@ export interface ToolActivity {
   verification: "PASS" | "INCOMPLETE" | "FAIL" | null;
   changeCount: number | null;
   fileCount: number | null;
+  toolClass: string | null;
+  fingerprint: string | null;
+  duplicate: boolean;
+  statusOnly: boolean;
+  policySkip: boolean;
+  cacheHit: boolean;
+  evidenceDelta: boolean;
+  orchestrationNoticeCode: string | null;
+  orchestrationPhaseBefore: string | null;
+  orchestrationPhaseAfter: string | null;
+  effectiveProfile: string | null;
+  evidenceStatus: string | null;
 }
 
 export interface AuditActivitySnapshot {
@@ -51,6 +64,18 @@ interface ProjectedEvent {
   verification?: "PASS" | "INCOMPLETE" | "FAIL" | null;
   changeCount?: number | null;
   fileCount?: number | null;
+  toolClass?: string | null;
+  fingerprint?: string | null;
+  duplicate?: boolean;
+  statusOnly?: boolean;
+  policySkip?: boolean;
+  cacheHit?: boolean;
+  evidenceDelta?: boolean;
+  orchestrationNoticeCode?: string | null;
+  orchestrationPhaseBefore?: string | null;
+  orchestrationPhaseAfter?: string | null;
+  effectiveProfile?: string | null;
+  evidenceStatus?: string | null;
 }
 
 interface FileCursor {
@@ -129,7 +154,7 @@ export class AuditReader implements vscode.Disposable {
     } catch {
       this.watcher = undefined;
     }
-    this.timer = setInterval(() => void this.refresh(), 1_000);
+    this.timer = setInterval(() => void this.refresh(), AUDIT_FALLBACK_INTERVAL_MS);
     this.timer.unref?.();
   }
 
@@ -278,6 +303,18 @@ function projectAuditEvent(raw: unknown): ProjectedEvent | null {
     verification: safeVerification(value.verification),
     changeCount: safeCount(value.change_count),
     fileCount: safeCount(value.file_count),
+    toolClass: safeLowerIdentifier(value.tool_class),
+    fingerprint: safeIdentifier(value.fingerprint, 80),
+    duplicate: value.duplicate === true,
+    statusOnly: value.status_only === true,
+    policySkip: value.policy_skip === true,
+    cacheHit: value.cache_hit === true,
+    evidenceDelta: value.evidence_delta === true,
+    orchestrationNoticeCode: safeEnumCode(value.orchestration_notice_code),
+    orchestrationPhaseBefore: safeLowerIdentifier(value.orchestration_phase_before),
+    orchestrationPhaseAfter: safeLowerIdentifier(value.orchestration_phase_after),
+    effectiveProfile: safeLowerIdentifier(value.effective_profile),
+    evidenceStatus: safeLowerIdentifier(value.evidence_status),
   };
 }
 
@@ -310,6 +347,18 @@ function buildActivities(events: Iterable<ProjectedEvent>): ToolActivity[] {
         verification: null,
         changeCount: null,
         fileCount: null,
+        toolClass: event.toolClass || null,
+        fingerprint: event.fingerprint || null,
+        duplicate: event.duplicate === true,
+        statusOnly: event.statusOnly === true,
+        policySkip: event.policySkip === true,
+        cacheHit: event.cacheHit === true,
+        evidenceDelta: event.evidenceDelta === true,
+        orchestrationNoticeCode: event.orchestrationNoticeCode || null,
+        orchestrationPhaseBefore: event.orchestrationPhaseBefore || null,
+        orchestrationPhaseAfter: event.orchestrationPhaseAfter || null,
+        effectiveProfile: event.effectiveProfile || null,
+        evidenceStatus: event.evidenceStatus || null,
       });
       continue;
     }
@@ -331,7 +380,19 @@ function buildActivities(events: Iterable<ProjectedEvent>): ToolActivity[] {
       errorCode: event.errorCode || null,
       verification: event.verification || null,
       changeCount: event.changeCount ?? null,
-      fileCount: event.fileCount ?? null,
+      fileCount: event.fileCount ?? existing?.fileCount ?? null,
+      toolClass: event.toolClass || existing?.toolClass || null,
+      fingerprint: event.fingerprint || existing?.fingerprint || null,
+      duplicate: event.duplicate === true || existing?.duplicate === true,
+      statusOnly: event.statusOnly === true || existing?.statusOnly === true,
+      policySkip: event.policySkip === true || existing?.policySkip === true,
+      cacheHit: event.cacheHit === true || existing?.cacheHit === true,
+      evidenceDelta: event.evidenceDelta === true || existing?.evidenceDelta === true,
+      orchestrationNoticeCode: event.orchestrationNoticeCode || existing?.orchestrationNoticeCode || null,
+      orchestrationPhaseBefore: event.orchestrationPhaseBefore || existing?.orchestrationPhaseBefore || null,
+      orchestrationPhaseAfter: event.orchestrationPhaseAfter || existing?.orchestrationPhaseAfter || null,
+      effectiveProfile: event.effectiveProfile || existing?.effectiveProfile || null,
+      evidenceStatus: event.evidenceStatus || existing?.evidenceStatus || null,
     });
   }
   const newestRuntime = [...runtimeStarts.entries()].sort(
@@ -372,6 +433,11 @@ function safeTimestamp(value: unknown): string | null {
 function safeIdentifier(value: unknown, max: number): string | null {
   const source = String(value || "");
   return source && source.length <= max && /^[A-Za-z0-9_.:-]+$/.test(source) ? source : null;
+}
+
+function safeLowerIdentifier(value: unknown): string | null {
+  const identifier = String(value || "");
+  return /^[a-z][a-z0-9_]{0,79}$/.test(identifier) ? identifier : null;
 }
 
 function safeTool(value: unknown): string | null {

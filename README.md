@@ -110,16 +110,18 @@ Runtime API key nằm ở `.env.local` và chỉ dùng cho local tunnel-client. 
 
 ## ChatGPT Tools
 
-runtime có catalog cố định 35 tool. Sau khi connector hoạt động, hai entry point thường dùng là:
+runtime có catalog cố định 36 tool. Sau khi connector hoạt động, hai entry point thường dùng là:
 
 ```text
 lca_status # mặc định cho `lca` / `call lca`; kiểm tra runtime, catalog, workspace/task và output limits
 lca_input  # chỉ mở Apps SDK widget khi yêu cầu rõ widget/composer/PiP
 ```
 
-`lca_status` trả `catalog_version=5` và `catalog_hash`. Khi catalog thay đổi, hãy refresh connector một lần và mở chat mới; tên tool cũ không còn callable và client stale sẽ nhận lỗi kèm hướng dẫn refresh.
+`lca_status` trả `catalog_version=7` và `catalog_hash`. Khi catalog thay đổi, hãy refresh connector một lần và mở chat mới; tên tool cũ không còn callable và client stale sẽ nhận lỗi kèm hướng dẫn refresh.
 
-Trước khi dùng tool đọc/sửa/chạy code, mở context bằng `workspace_select` rồi `task_open`. Session stateful tự bind vào `task_id`; chỉ dùng lại `task_token` khi reconnect/resume. Nếu thiếu hoặc mơ hồ task context, coding tool fail closed thay vì tự chọn repo.
+Trước khi dùng tool đọc/sửa/chạy code, mở context bằng `workspace_select` rồi `task_open`. ChatGPT truyền một `objective` ngắn giữ đủ behavior/constraint, `title` chỉ là nhãn UI tùy chọn, và chọn `complexity_hint` là `quick_edit`, `normal` hoặc `complex`. Nếu không truyền profile, runtime dùng `normal`. Session stateful tự bind vào `task_id`; chỉ dùng lại `task_token` khi reconnect/resume. Nếu thiếu hoặc mơ hồ task context, coding tool fail closed thay vì tự chọn repo.
+
+ChatGPT là bên quyết định effective profile. LCA chỉ theo dõi các tín hiệu khách quan như số workspace, số discovery call, số path quan sát được và thao tác lặp. Nếu scope có vẻ rộng hơn, response có thể chứa `suggested_profile` và `scope_signal`, nhưng profile không tự đổi. Chỉ khi ChatGPT xác nhận phạm vi thực sự đã thay đổi thì mới gọi `task_reclassify` kèm lý do.
 
 Danh sách catalog và semantics task/multi-workspace: [docs/RUNTIME.md](docs/RUNTIME.md).
 
@@ -207,11 +209,11 @@ Mỗi task khóa một primary workspace và tối đa 8 attached workspaces. At
 
 Kết quả mutation có `change_id`, `task_id`, `workspace_id` và path tương đối. Nhiều lần `apply_patch` trong cùng task được gom thành một change set. `read_file` và từng file đọc thành công qua `read_many` trả SHA-256 `version`; mutation có `expected_version` sai sẽ bị chặn thay vì ghi đè thay đổi bên ngoài.
 
-LCA runtime dùng catalog cố định 35 tool, không đổi theo mode/policy. Các thao tác file, preview và validate được hợp nhất trong `apply_patch`; repo map/symbol trong `workspace_snapshot` và `code_query`; test/lint/build trong `verify_changes`; Figma và notes dùng action trong tool tổng hợp tương ứng.
+LCA runtime dùng catalog cố định 36 tool, không đổi theo mode/policy. Các thao tác file, preview và validate được hợp nhất trong `apply_patch`; repo map/symbol trong `workspace_snapshot` và `code_query`; thay đổi profile được xác nhận qua `task_reclassify`; test/lint/build trong `verify_changes`; Figma và notes dùng action trong tool tổng hợp tương ứng.
 
 `workspace_snapshot` gom repo context; `code_query` truy vấn text, symbol, definition, reference, import và call graph theo fast-first. Runtime có parser structural chạy trong worker, hard-timeout được, cho JavaScript/TypeScript/TSX, Python, Go, Rust, Java/Kotlin, C# và Dart; artifact parser được materialize trong data dir từ manifest đã pin SHA-256. JSON/YAML/Shell dùng structural/lexical fallback. Nếu workspace có `<workspace>/node_modules/typescript`, Language Service project-local sẽ cung cấp semantic sâu hơn cho JavaScript/TypeScript; LCA không tự cài hoặc dùng compiler global/ancestor. Mọi fallback đều trả `engine`, `completeness`, `confidence` và `fallback_reason` rõ ràng. `verify_changes` chỉ trả `PASS` khi tất cả gate bắt buộc đã chạy; gate thiếu/không hỗ trợ hoặc source bị sửa ngoài `apply_patch` trả `INCOMPLETE`.
 
-Trạng thái release được ghi theo số đo, không hiểu “10/10” là không bao giờ sai: catalog cố định 35 tool đạt 24.652 byte raw/4.139 byte nén. Benchmark cold-builder mới nhất trên 100k file đạt index 9,89 giây, snapshot warm 0,04 ms, query warm p95 0,04 ms, freshness 238,80 ms, RSS sau GC 120,17 MB, cache hai workspace hot 23,46 MB và event-loop p99 11,96 ms; toàn bộ SLA 100k trong benchmark đều pass. Performance fixture đo dispatch p95 0,006 ms và `lca_status` server-total p95 1,3 ms. Xem bằng chứng, phạm vi và các giới hạn semantic còn lại tại [docs/RUNTIME.md](docs/RUNTIME.md#measured-release-status-and-known-limits).
+Trạng thái release được ghi theo số đo, không hiểu “10/10” là không bao giờ sai. Số đo catalog 24.652 byte raw/4.139 byte nén thuộc release 5.0.0 với 35 tool, trước khi thêm `task_reclassify`; catalog 36 tool/version 7 phải được đo lại trước khi dùng làm số liệu phát hành mới. Benchmark cold-builder gần nhất trên 100k file đạt index 9,89 giây, snapshot warm 0,04 ms, query warm p95 0,04 ms, freshness 238,80 ms, RSS sau GC 120,17 MB, cache hai workspace hot 23,46 MB và event-loop p99 11,96 ms; toàn bộ SLA 100k trong benchmark đều pass. Performance fixture đo dispatch p95 0,006 ms và `lca_status` server-total p95 1,3 ms. Xem bằng chứng, phạm vi và các giới hạn semantic còn lại tại [docs/RUNTIME.md](docs/RUNTIME.md#measured-release-status-and-known-limits).
 
 `run_command`, `run_commands`, `process` và Git có thể làm thay đổi filesystem nhưng không được tuyên bố atomic/undoable. LCA so sánh before/after manifest; nếu shell sửa tracked source, workspace bị đánh dấu `unmanaged_changes` cho đến khi thay đổi được review/adopt.
 

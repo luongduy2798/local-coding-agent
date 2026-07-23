@@ -32,11 +32,52 @@ export interface ToolActivityView {
   verification: "PASS" | "INCOMPLETE" | "FAIL" | null;
   changeCount: number | null;
   fileCount: number | null;
+  toolClass: string | null;
+  fingerprint: string | null;
+  duplicate: boolean;
+  statusOnly: boolean;
+  policySkip: boolean;
+  cacheHit: boolean;
+  evidenceDelta: boolean;
+  orchestrationNoticeCode: string | null;
+  orchestrationPhaseBefore: string | null;
+  orchestrationPhaseAfter: string | null;
+  effectiveProfile: string | null;
+  evidenceStatus: string | null;
+}
+
+export interface TaskOrchestrationView {
+  suggested_profile?: "quick_edit" | "normal" | "complex" | null;
+  scope_signal?: "expanded" | "reduced" | "aligned" | null;
+  scope_reasons?: string[];
+  phase?: string;
+  evidence_status?: string;
+  budgets?: { discovery_soft_limit?: number | null; total_soft_limit?: number | null };
+  counters?: {
+    total_calls?: number;
+    unique_calls?: number;
+    duplicate_calls?: number;
+    discovery_calls?: number;
+    status_only_calls?: number;
+    failed_calls?: number;
+    mutations?: number;
+  };
+  last_notice?: {
+    code?: string;
+    severity?: string;
+    message?: string;
+    recommended_transition?: string | null;
+  } | null;
 }
 
 export interface ControlTaskView {
   id: string;
   title: string;
+  objective: string | null;
+  requestedProfile: "quick_edit" | "normal" | "complex" | null;
+  effectiveProfile: "quick_edit" | "normal" | "complex" | null;
+  profileConfidence: number | null;
+  orchestration: TaskOrchestrationView | null;
   status: string;
   primaryWorkspaceId: string | null;
   workspaceIds: string[];
@@ -134,13 +175,11 @@ export function WorkspaceHeader({
   useDismiss(workspacesOpen, () => setWorkspacesOpen(false), workspaceRef);
 
   const registered = currentWorkspace?.registered;
-  const title = currentWorkspace?.label || "No workspace";
   const connectionLabel = control.serverOnline ? "Connected" : "Offline";
   const runtimeError = control.storageError || control.error;
   const runtimeTitle = runtimeError || [
     connectionLabel,
     control.version ? `v${control.version}` : null,
-    `Sessions ${control.sessions.active}/${control.sessions.max}`,
     syncMode === "sse" ? "Live" : syncMode === "polling" ? "Polling" : null,
   ].filter(Boolean).join(" · ");
 
@@ -148,16 +187,11 @@ export function WorkspaceHeader({
     <header className="workspace-header">
       <div className="workspace-heading">
         <div className="eyebrow">LOCAL CODING AGENT</div>
-        <div className="workspace-title-row">
-          <h1 title={currentWorkspace?.root}>{title}</h1>
-          {currentWorkspace && !registered && <span className="header-warning">Not connected</span>}
-        </div>
         <div className="header-status-row">
           <div className="status-chip status-summary" role="status" title={runtimeTitle}>
             <span className={`status-dot ${control.serverOnline ? "connected" : "disconnected"}`} />
             <span>{connectionLabel}</span>
             {control.version && <span className="muted">v{control.version}</span>}
-            <span className="muted">Sessions {control.sessions.active}/{control.sessions.max}</span>
             {syncMode !== "idle" && (
               <span className={syncMode === "sse" ? "sync-sse" : "muted"}>
                 {syncMode === "sse" ? "Live" : "Polling"}
@@ -187,7 +221,6 @@ export function WorkspaceHeader({
                 currentWorkspace={currentWorkspace}
                 trusted={trusted}
                 busyAction={busyAction}
-                onConnect={onConnect}
                 onSelect={(key) => {
                   setWorkspacesOpen(false);
                   onSelectWorkspace(key);
@@ -200,6 +233,19 @@ export function WorkspaceHeader({
               />
             )}
           </div>
+          {currentWorkspace && !registered && (
+            <>
+              <span className="header-warning">Not connected</span>
+              <button
+                className="compact-action primary"
+                type="button"
+                disabled={!trusted || Boolean(busyAction)}
+                onClick={onConnect}
+              >
+                <Icon name="plug" /> Connect
+              </button>
+            </>
+          )}
         </div>
       </div>
 
@@ -228,7 +274,6 @@ function WorkspacePopover({
   currentWorkspace,
   trusted,
   busyAction,
-  onConnect,
   onSelect,
   onAction,
   onViewHistory,
@@ -237,7 +282,6 @@ function WorkspacePopover({
   currentWorkspace?: WorkspaceOptionView;
   trusted: boolean;
   busyAction?: string;
-  onConnect: () => void;
   onSelect: (key: string) => void;
   onAction: (type: string, workspaceId?: string) => void;
   onViewHistory: (workspaceId: string) => void;
@@ -255,16 +299,6 @@ function WorkspacePopover({
           <div className="popover-title">Workspaces</div>
           <div className="popover-subtitle">{control.workspaces.length} registered</div>
         </div>
-        {currentWorkspace && !currentWorkspace.registered && (
-          <button
-            className="compact-action primary"
-            type="button"
-            disabled={!trusted || Boolean(busyAction)}
-            onClick={onConnect}
-          >
-            <Icon name="plug" /> Connect
-          </button>
-        )}
       </div>
       <WorkspaceGroup
         title="Current window"
@@ -402,6 +436,9 @@ export interface TaskPresentation {
   fileCount: number;
   latestAt: string | null;
   verification: "PASS" | "INCOMPLETE" | "FAIL" | null;
+  toolCallCount: number;
+  redundantCallCount: number;
+  usefulCallCount: number;
 }
 
 export function buildWorkspaceTasks(
@@ -433,6 +470,13 @@ export function buildWorkspaceTasks(
       const verification = [...activities]
         .sort((left, right) => activityTimestamp(right) - activityTimestamp(left))
         .find((activity) => activity.verification)?.verification || null;
+      const observedRedundantCallCount = activities.filter(isRedundantActivity).length;
+      const orchestrationCalls = task.orchestration?.counters?.total_calls || 0;
+      const toolCallCount = Math.max(activities.length, orchestrationCalls);
+      const redundantCallCount = Math.max(
+        observedRedundantCallCount,
+        task.orchestration?.counters?.duplicate_calls || 0,
+      );
       return {
         task,
         activities,
@@ -443,6 +487,9 @@ export function buildWorkspaceTasks(
         fileCount: Math.max(visibleFileCount, observedFileCount),
         latestAt: latestActivity?.finishedAt || latestActivity?.startedAt || task.updatedAt,
         verification,
+        toolCallCount,
+        redundantCallCount,
+        usefulCallCount: Math.max(0, toolCallCount - redundantCallCount),
       };
     })
     .sort(compareTaskFeedItems);
@@ -453,12 +500,20 @@ export function ChronologicalTaskFeed({
   unassigned,
   workspaceLabel,
   workspaceKey,
+  workspaceId,
+  busyAction,
+  onDeleteTask,
+  onDeleteAll,
   renderChanges,
 }: {
   tasks: TaskPresentation[];
   unassigned?: TaskPresentation;
   workspaceLabel: string;
   workspaceKey?: string;
+  workspaceId?: string;
+  busyAction?: string;
+  onDeleteTask: (taskId: string) => void;
+  onDeleteAll: () => void;
   renderChanges: (item: TaskPresentation) => React.ReactNode;
 }): React.JSX.Element {
   const [, setClock] = useState(0);
@@ -469,9 +524,7 @@ export function ChronologicalTaskFeed({
       .sort((left, right) => taskFeedTimestamp(left) - taskFeedTimestamp(right)),
     [tasks, unassigned],
   );
-  const latestTaskId = [...tasks]
-    .reverse()
-    .find((item) => isOpenTask(item.task.status))?.task.id || tasks[tasks.length - 1]?.task.id || null;
+  const latestTaskId = tasks[tasks.length - 1]?.task.id || null;
   const running = items.some((item) => item.activities.some((activity) => activity.status === "started"));
   const contentRevision = items.map((item) => {
     const latestActivity = item.activities[item.activities.length - 1];
@@ -517,7 +570,18 @@ export function ChronologicalTaskFeed({
           <h2>Activity</h2>
           <p>{workspaceLabel}</p>
         </div>
-        <span>{items.length}</span>
+        <div className="task-feed-actions">
+          <span>{items.length}</span>
+          <IconButton
+            title={tasks.some((item) => isOpenTask(item.task.status))
+              ? "Close open tasks before deleting all"
+              : "Delete all tasks for this workspace"}
+            icon="trash"
+            danger
+            disabled={!workspaceId || tasks.length === 0 || Boolean(busyAction) || tasks.some((item) => isOpenTask(item.task.status))}
+            onClick={onDeleteAll}
+          />
+        </div>
       </div>
       <div className="task-feed-frame">
         <div className="task-feed-scroll" ref={scrollRef} onScroll={handleScroll}>
@@ -528,11 +592,9 @@ export function ChronologicalTaskFeed({
                   key={item.task.id}
                   item={item}
                   latest={item.task.id === latestTaskId}
+                  deleteDisabled={Boolean(busyAction) || isOpenTask(item.task.status)}
+                  onDelete={item.task.id === "__unassigned__" ? undefined : () => onDeleteTask(item.task.id)}
                   renderChanges={renderChanges}
-                  onLayoutChange={() => {
-                    if (!followingLatest) return;
-                    window.requestAnimationFrame(() => scrollToLatest());
-                  }}
                 />
               ))}
             </div>
@@ -564,101 +626,135 @@ export function ChronologicalTaskFeed({
 function TaskBlock({
   item,
   latest,
+  deleteDisabled,
+  onDelete,
   renderChanges,
-  onLayoutChange,
 }: {
   item: TaskPresentation;
   latest: boolean;
+  deleteDisabled: boolean;
+  onDelete?: () => void;
   renderChanges: (item: TaskPresentation) => React.ReactNode;
-  onLayoutChange: () => void;
 }): React.JSX.Element {
   const [expanded, setExpanded] = useState(false);
-  const [followingActivity, setFollowingActivity] = useState(true);
-  const activityRef = useRef<HTMLDivElement>(null);
   const running = item.activities.some((activity) => activity.status === "started");
-  const latestActivity = item.activities[item.activities.length - 1];
   const changeCount = item.changes.length;
-
-  useEffect(() => {
-    const node = activityRef.current;
-    if (!node || !followingActivity) return;
-    node.scrollTop = node.scrollHeight;
-  }, [item.activities.length, latestActivity?.invocationId, latestActivity?.status, followingActivity]);
+  const groupedActivities = groupRepeatedActivities(item.activities);
+  const showAllActivities = latest || expanded;
+  const visibleActivities = showAllActivities ? groupedActivities : groupedActivities.slice(-3);
+  const hiddenActivityCount = Math.max(0, groupedActivities.length - visibleActivities.length);
+  const earlierCallCount = groupedActivities
+    .slice(0, hiddenActivityCount)
+    .reduce((count, activity) => count + (activity.repeatCount || 1), 0);
+  const profile = item.task.effectiveProfile;
+  const displayStatus = taskDisplayStatus(item.task.status, running);
+  const suggestedProfile = item.task.orchestration?.suggested_profile;
+  const notice = item.task.orchestration?.last_notice;
+  const showNotice = isUserVisibleOrchestrationNoticeCode(notice?.code);
 
   return (
-    <article className={`task-card ${latest ? "is-latest" : ""} ${running ? "is-running" : ""} ${expanded ? "is-expanded" : ""}`}>
+    <article className={`task-card ${latest ? "is-latest" : ""} ${displayStatus.stateTone === "running" ? "is-running" : ""}`}>
       <div className="task-card-header">
-        <span className={`task-state-icon state-${taskTone(item.task.status, running)}`}>
-          <Icon name={running ? "spinner" : isOpenTask(item.task.status) ? "task" : "check"} />
+        <span className={`task-state-icon state-${displayStatus.stateTone}`}>
+          <Icon name={displayStatus.icon} />
         </span>
         <div className="task-card-copy">
           <div className="task-card-title-row">
             <strong>{item.task.title}</strong>
-            <Badge value={item.task.status} />
-            {latest && <Badge value="Latest" tone="accent" />}
-            {item.verification && <Badge value={item.verification} tone={item.verification.toLowerCase()} />}
+            {profile && <Badge value={profileLabel(profile)} tone={profile === "quick_edit" ? "accent" : ""} />}
+            <Badge value={displayStatus.label} tone={displayStatus.badgeTone} />
           </div>
           <div className="task-card-meta">
             {item.task.createdAt && <span>Started {relativeTime(item.task.createdAt)}</span>}
             {item.runningProcessCount > 0 && <span>{item.runningProcessCount} running process{item.runningProcessCount === 1 ? "" : "es"}</span>}
+            {item.toolCallCount > 0 && <span>{item.toolCallCount} call{item.toolCallCount === 1 ? "" : "s"}</span>}
+            {item.redundantCallCount > 0 && <span className="redundant-count">{item.redundantCallCount} redundant</span>}
+            {item.task.orchestration?.phase && <span>{humanizeTool(item.task.orchestration.phase)}</span>}
+            {suggestedProfile && suggestedProfile !== profile && (
+              <span className="orchestration-notice" title={item.task.orchestration?.scope_reasons?.join(" · ")}>
+                Suggested {profileLabel(suggestedProfile)}
+              </span>
+            )}
             {item.task.workspaceIds.length > 1 && <span>Multi-workspace</span>}
+            {showNotice && notice?.code && <span className="orchestration-notice" title={notice.message}>{humanizeTool(notice.code)}</span>}
           </div>
         </div>
-      </div>
-
-      <div
-        className="task-activity-scroll"
-        ref={activityRef}
-        onScroll={() => {
-          const node = activityRef.current;
-          if (node) setFollowingActivity(isScrollNearBottom(node, 24));
-        }}
-      >
-        {item.activities.length > 0 ? (
-          <ol className="tool-timeline task-tool-timeline">
-            {item.activities.map((activity) => (
-              <li className={`timeline-item timeline-${activity.status}`} key={activity.invocationId}>
-                <span className="timeline-marker">
-                  <Icon name={activity.status === "started" ? "spinner" : activity.status === "finished" ? "check" : "warning"} />
-                </span>
-                <div className="timeline-copy">
-                  <strong>{activityLabel(activity.tool)}</strong>
-                  <span title={activity.tool}>{activity.tool}</span>
-                  <span>
-                    {activity.status === "started"
-                      ? `Running ${formatDuration(liveDuration(activity))} · started ${relativeTime(activity.startedAt)}`
-                      : `${formatDuration(activity.durationMs || 0)} · completed ${relativeTime(activity.finishedAt || activity.startedAt)}`}
-                    {activity.verification ? ` · ${activity.verification}` : ""}
-                    {activity.errorCode ? ` · ${activity.errorCode}` : ""}
-                  </span>
-                </div>
-              </li>
-            ))}
-          </ol>
-        ) : (
-          <p className="task-waiting">Waiting for task activity…</p>
+        {onDelete && (
+          <div className="task-card-actions">
+            <IconButton
+              title={isOpenTask(item.task.status) ? "Close task before deleting it" : `Delete ${item.task.title}`}
+              icon="trash"
+              danger
+              disabled={deleteDisabled}
+              onClick={onDelete}
+            />
+          </div>
         )}
       </div>
 
+      {(latest || groupedActivities.length > 0) && (
+        <div className="task-activity">
+          {visibleActivities.length > 0 ? (
+            <ol className="tool-timeline task-tool-timeline" id={`task-activity-${item.task.id}`}>
+              {visibleActivities.map((activity) => (
+                <li className={`timeline-item timeline-${activity.status} ${activity.policySkip ? "timeline-skipped" : ""} ${activity.duplicate ? "timeline-duplicate" : ""}`} key={activity.invocationId}>
+                  <span className="timeline-marker">
+                    <Icon name={activity.status === "started" ? "spinner" : activity.status === "finished" ? "check" : "warning"} />
+                  </span>
+                  <div className="timeline-copy">
+                    <strong>{activityLabel(activity.tool)}{activity.repeatCount > 1 ? ` ×${activity.repeatCount}` : ""}</strong>
+                    <span title={activity.tool}>{activity.tool}</span>
+                    <span>
+                      {activity.cacheHit
+                        ? `Cached duplicate · ${relativeTime(activity.finishedAt || activity.startedAt)}`
+                        : activity.policySkip
+                          ? `Skipped · ${relativeTime(activity.finishedAt || activity.startedAt)}`
+                          : activity.duplicate
+                            ? `Repeated evidence · ${formatDuration(activity.durationMs || 0)} · ${relativeTime(activity.finishedAt || activity.startedAt)}`
+                          : activity.status === "started"
+                            ? `Running ${formatDuration(liveDuration(activity))} · started ${relativeTime(activity.startedAt)}`
+                            : `${formatDuration(activity.durationMs || 0)} · completed ${relativeTime(activity.finishedAt || activity.startedAt)}`}
+                      {isUserVisibleOrchestrationNoticeCode(activity.orchestrationNoticeCode) ? ` · ${activity.orchestrationNoticeCode}` : ""}
+                      {activity.verification ? ` · ${activity.verification}` : ""}
+                      {activity.errorCode ? ` · ${activity.errorCode}` : ""}
+                    </span>
+                  </div>
+                </li>
+              ))}
+              {!latest && groupedActivities.length > 3 && (
+                <li className="task-summary-item">
+                  <button
+                    className="task-summary-button"
+                    type="button"
+                    aria-controls={`task-activity-${item.task.id}`}
+                    aria-expanded={expanded}
+                    onClick={() => setExpanded((value) => !value)}
+                  >
+                    <span className="timeline-marker task-summary-marker" aria-hidden="true">
+                      {expanded ? "−" : "+"}
+                    </span>
+                    <span className="timeline-copy">
+                      <strong>
+                        {expanded
+                          ? "Show fewer calls"
+                          : `${earlierCallCount} earlier call${earlierCallCount === 1 ? "" : "s"}`}
+                      </strong>
+                    </span>
+                  </button>
+                </li>
+              )}
+            </ol>
+          ) : (
+            <p className="task-waiting">Waiting for task activity…</p>
+          )}
+        </div>
+      )}
+
       {changeCount > 0 && (
         <div className="task-changes">
-          <button
-            className="changes-toggle"
-            type="button"
-            aria-expanded={expanded}
-            onClick={() => {
-              setExpanded((value) => !value);
-              window.requestAnimationFrame(onLayoutChange);
-            }}
-          >
-            <span>Changes {changeCount}</span>
-            <Icon name="chevronDown" />
-          </button>
-          {expanded && (
-            <div className="inline-changes-panel">
-              <div className="inline-changes-scroll">{renderChanges(item)}</div>
-            </div>
-          )}
+          <div className="inline-changes-panel">
+            <div className="inline-changes-scroll">{renderChanges(item)}</div>
+          </div>
         </div>
       )}
     </article>
@@ -671,6 +767,7 @@ export function activityLabel(tool: string): string {
     workspace_list: "List workspaces",
     workspace_select: "Select workspace",
     task_open: "Open task",
+    task_reclassify: "Reclassify task",
     task_plan: "Plan the work",
     task_state: "Update task progress",
     task_checkpoint: "Save task checkpoint",
@@ -719,6 +816,11 @@ export function makeUnassignedPresentation(
       status: activities.some((activity) => activity.status === "started") ? "open" : "observed",
       primaryWorkspaceId: workspaceId,
       workspaceIds: [workspaceId],
+      objective: null,
+      requestedProfile: null,
+      effectiveProfile: null,
+      profileConfidence: null,
+      orchestration: null,
       createdAt: null,
       updatedAt: now,
       closedAt: null,
@@ -731,6 +833,9 @@ export function makeUnassignedPresentation(
     fileCount: unassignedChanges.reduce((count, change) => count + change.files.length, 0),
     latestAt: [...activities].sort((left, right) => activityTimestamp(right) - activityTimestamp(left))[0]?.finishedAt || now,
     verification: null,
+    toolCallCount: activities.length,
+    redundantCallCount: activities.filter(isRedundantActivity).length,
+    usefulCallCount: activities.filter((activity) => !isRedundantActivity(activity)).length,
   };
 }
 
@@ -837,6 +942,60 @@ export function formatDuration(milliseconds: number): string {
   return `${minutes}m ${seconds}s`;
 }
 
+interface GroupedToolActivity extends ToolActivityView {
+  repeatCount: number;
+}
+
+function groupRepeatedActivities(activities: ToolActivityView[]): GroupedToolActivity[] {
+  const grouped: GroupedToolActivity[] = [];
+  for (const activity of activities) {
+    const previous = grouped[grouped.length - 1];
+    const groupable = isRedundantActivity(activity) && previous && isRedundantActivity(previous) &&
+      previous.tool === activity.tool &&
+      previous.orchestrationNoticeCode === activity.orchestrationNoticeCode;
+    if (!groupable) {
+      grouped.push({ ...activity, repeatCount: 1 });
+      continue;
+    }
+    previous.repeatCount++;
+    previous.finishedAt = activity.finishedAt || previous.finishedAt;
+    previous.durationMs = (previous.durationMs || 0) + (activity.durationMs || 0);
+    previous.status = activity.status;
+    previous.ok = activity.ok;
+    previous.errorCode = activity.errorCode || previous.errorCode;
+    previous.policySkip = previous.policySkip || activity.policySkip;
+    previous.cacheHit = previous.cacheHit || activity.cacheHit;
+    previous.duplicate = previous.duplicate || activity.duplicate;
+  }
+  return grouped;
+}
+
+function isRedundantActivity(activity: Pick<ToolActivityView, "duplicate" | "policySkip" | "cacheHit">): boolean {
+  return activity.duplicate || activity.policySkip || activity.cacheHit;
+}
+
+function profileLabel(profile: "quick_edit" | "normal" | "complex"): string {
+  return profile === "quick_edit" ? "Quick edit" : profile === "complex" ? "Complex" : "Normal";
+}
+
+function taskDisplayStatus(
+  status: string,
+  hasRunningActivity: boolean,
+): { label: string; badgeTone: string; stateTone: "running" | "complete" | "failed"; icon: IconName } {
+  const normalized = status.toLowerCase();
+  if (hasRunningActivity || isOpenTask(normalized)) {
+    return { label: "Running", badgeTone: "accent", stateTone: "running", icon: "spinner" };
+  }
+  if (normalized === "failed") {
+    return { label: "Failed", badgeTone: "fail", stateTone: "failed", icon: "warning" };
+  }
+  return { label: "Completed", badgeTone: "pass", stateTone: "complete", icon: "check" };
+}
+
+function isUserVisibleOrchestrationNoticeCode(code: string | null | undefined): boolean {
+  return Boolean(code) && !String(code).endsWith("_BUDGET_EXCEEDED");
+}
+
 function activityTimestamp(activity: ToolActivityView): number {
   return Date.parse(activity.finishedAt || activity.startedAt || "") || 0;
 }
@@ -884,13 +1043,6 @@ function isOpenTask(status: string): boolean {
   return ["open", "active", "running"].includes(status.toLowerCase());
 }
 
-function taskTone(status: string, running: boolean): string {
-  if (running) return "running";
-  const normalized = status.toLowerCase();
-  if (["failed", "incomplete"].includes(normalized)) return "failed";
-  if (isOpenTask(normalized)) return "open";
-  return "complete";
-}
 
 function shortId(value: string): string {
   return value.length > 12 ? value.slice(0, 10) : value;

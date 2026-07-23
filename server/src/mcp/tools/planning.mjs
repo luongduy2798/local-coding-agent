@@ -25,7 +25,7 @@ export function registerPlanningTools(mcp, dependencies) {
     "task_plan",
     {
       title: "Task plan",
-      description: "Create or update the current task plan. Stores goal + steps in .agent/state/current-task.json.",
+      description: "Create a persistent plan for multi-step, ambiguous, multi-workspace, or long-running work. Do not call for a localized direct edit affecting one or two known files unless it has meaningful independent steps.",
       inputSchema: {
         goal: z.string().min(1).describe("High-level goal description."),
         steps: z.array(z.string()).min(1).describe("Ordered list of steps to complete the goal."),
@@ -64,7 +64,7 @@ export function registerPlanningTools(mcp, dependencies) {
     "task_state",
     {
       title: "Task state",
-      description: "Get or update the current task plan. Call with no args to read; pass set_step_done/add_steps/status to update.",
+      description: "Read or update meaningful plan milestones. Use status only for a real phase transition or blocker; do not narrate each tool call or repeatedly restate equivalent progress.",
       inputSchema: {
         task_token: z.string().optional().describe("Resume or inspect a V5 task after reconnect."),
         set_step_done: z.number().int().min(0).optional().describe("Mark step N (0-indexed) as done."),

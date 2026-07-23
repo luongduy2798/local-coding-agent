@@ -18,6 +18,7 @@ import { prewarmWorkspaceGraphInChild } from "../workspace/graph/prewarm.mjs";
 import { recoverWorkspacePurges } from "../workspace/purge.mjs";
 import { WorkspaceRegistry, WorkspaceRegistryError } from "../workspace/registry.mjs";
 import { TaskRouter, TaskRouterError } from "../workspace/task-router.mjs";
+import { publicTaskOrchestration } from "../workspace/task-orchestration.mjs";
 
 export function createRuntimeManager({
   canonicalize,
@@ -34,6 +35,7 @@ export function createRuntimeManager({
   const runtimeInits = new Map();
   const runtimeEvictions = new Map();
   const journals = new Map();
+  const changeListeners = new Set();
   let registry = null;
   let taskRouter = null;
   let patchCoordinator = null;
@@ -358,6 +360,7 @@ export function createRuntimeManager({
       deferLineStatsBytes: boundedNumber(process.env.AGENT_DEFER_LINE_STATS_BYTES, 512_000, 32_000, 100 * 1024 * 1024)
     });
     await journal.init();
+    journal.onDidChange((event) => emitChange(event));
     journals.set(workspaceId, journal);
     return journal;
   }
@@ -409,14 +412,36 @@ export function createRuntimeManager({
         captured_at: baseline.captured_at || null
       };
     });
-    return { ...task, workspace_set_version: task.version, workspace_state: workspaceState };
+    return {
+      ...task,
+      orchestration: publicTaskOrchestration(task.orchestration, task.effective_profile),
+      workspace_set_version: task.version,
+      workspace_state: workspaceState
+    };
   }
 
   async function close() {
     await closeWorkspaceRuntimes();
     await Promise.allSettled([...journals.values()].map((journal) => journal.close?.()));
+    changeListeners.clear();
     await taskRouter?.close().catch(() => {});
     await registry?.close().catch(() => {});
+  }
+
+  function onDidChange(listener) {
+    if (typeof listener !== "function") {
+      throw new TypeError("Runtime change listener must be a function.");
+    }
+    changeListeners.add(listener);
+    return () => changeListeners.delete(listener);
+  }
+
+  function emitChange(event) {
+    for (const listener of changeListeners) {
+      try {
+        listener(event);
+      } catch {}
+    }
   }
 
   function state() {
@@ -445,6 +470,7 @@ export function createRuntimeManager({
     modelSafePersistenceStatus,
     modelSafeSemanticAdapterStatus,
     modelSafeWatcherStatus,
+    onDidChange,
     sanitizeGraphSnapshot,
     state,
     taskOpenPayload,

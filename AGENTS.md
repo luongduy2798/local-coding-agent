@@ -70,6 +70,16 @@ lca doctor
 
 Chi tiết: [docs/CHATGPT_WEB_CONNECTOR.md](docs/CHATGPT_WEB_CONNECTOR.md).
 
+## Task Orchestration Rules
+
+- Khi mở task, agent phải chọn `complexity_hint`: `quick_edit`, `normal` hoặc `complex`. Nếu chưa đủ căn cứ, dùng `normal` thay vì giao quyết định cho LCA.
+- `objective` là bản tóm tắt trung thực behavior và constraint; `title` chỉ là nhãn UI ngắn.
+- LCA không hiểu intent như model và không được tự đổi `effective_profile`. `suggested_profile`, `scope_signal` và `scope_reasons` chỉ là telemetry/advisory dựa trên tool evidence.
+- Chỉ gọi `task_reclassify` sau khi agent tự đánh giá context và xác nhận profile mới, luôn kèm lý do cụ thể.
+- Với `quick_edit`, ưu tiên flow ngắn: mở task, tìm đúng vị trí, đọc evidence mục tiêu, quyết định nội bộ, patch, xác nhận và đóng task. Không mặc định gọi `task_plan`, kể tiến độ bằng `task_state`, hoặc list `skills`.
+- Soft budget chỉ tạo cảnh báo. Không được coi việc vượt budget là bằng chứng đủ để đổi profile, dừng task hoặc ép mutation.
+- Không đọc/search lặp cùng evidence nếu không có câu hỏi mới. Khi cần đọc tương tự, nêu rõ evidence gap cụ thể.
+
 ## URLs
 
 - MCP local: `http://127.0.0.1:8789/mcp`

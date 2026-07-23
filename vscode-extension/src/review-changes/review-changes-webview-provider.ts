@@ -36,6 +36,8 @@ const REVISION_FENCED_MESSAGES = new Set([
   "archiveWorkspace",
   "restoreWorkspace",
   "removeWorkspace",
+  "deleteTask",
+  "deleteWorkspaceTasks",
   "viewWorkspaceHistory",
 ]);
 
@@ -157,7 +159,7 @@ export class ReviewChangesWebviewProvider implements vscode.WebviewViewProvider,
         await this.run(message.type, async () => {
           await Promise.all([
             this.store.refresh({ cancelCurrent: true }),
-            this.controlStore.refresh(),
+            this.controlStore.refresh({ refreshCli: true }),
           ]);
         });
         return;
@@ -187,6 +189,18 @@ export class ReviewChangesWebviewProvider implements vscode.WebviewViewProvider,
         return;
       case "removeWorkspace":
         await this.run(`remove:${workspaceId || ""}`, () => this.controlActions.removePermanently(workspaceId || ""));
+        return;
+      case "deleteTask":
+        await this.run(`deleteTask:${message.value || ""}`, async () => {
+          await this.controlActions.deleteTask(message.value || "", workspaceId || "");
+          await this.store.refresh({ cancelCurrent: true });
+        });
+        return;
+      case "deleteWorkspaceTasks":
+        await this.run(`deleteWorkspaceTasks:${workspaceId || ""}`, async () => {
+          await this.controlActions.deleteWorkspaceTasks(workspaceId || "");
+          await this.store.refresh({ cancelCurrent: true });
+        });
         return;
       case "viewWorkspaceHistory":
         await this.run(`history:${workspaceId || ""}`, async () => {

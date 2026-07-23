@@ -105,6 +105,7 @@ export function createChangeJournal({
   const withOperationLock = createSerialLock();
   const withActivityLock = createSerialLock();
   const withIndexLock = createSerialLock();
+  const changeListeners = new Set();
   let initialized = false;
   let initPromise = null;
   let indexRecoveryPromise = null;
@@ -139,14 +140,7 @@ export function createChangeJournal({
     await initPromise;
   }
 
-  const {
-    beginTask,
-    completeTask,
-    ensureActiveTaskUnlocked,
-    ensureRoutedTaskUnlocked,
-    prepareTaskCompletion,
-    reopenTask
-  } = createJournalTaskService({
+  const taskService = createJournalTaskService({
     indexPath,
     init,
     readIndex,
@@ -156,6 +150,23 @@ export function createChangeJournal({
     withOperationLock,
     workspaceId
   });
+  const {
+    ensureActiveTaskUnlocked,
+    ensureRoutedTaskUnlocked,
+    prepareTaskCompletion
+  } = taskService;
+  const beginTask = (options) => notifyTaskChange(
+    "task.begin",
+    () => taskService.beginTask(options)
+  );
+  const completeTask = (options) => notifyTaskChange(
+    "task.complete",
+    () => taskService.completeTask(options)
+  );
+  const reopenTask = (options) => notifyTaskChange(
+    "task.reopen",
+    () => taskService.reopenTask(options)
+  );
 
   async function runMutation({
     source,
@@ -231,12 +242,20 @@ export function createChangeJournal({
           await rm(path.join(snapshotsDir, changeId), { recursive: true, force: true }).catch(() => {});
         }
 
-        return {
+        const outcome = {
           result: mutationResult,
           change: record.files.length > 0 ? publicRecord(record) : null,
           task: record.files.length > 0 ? aggregateTask(task, [...await readTaskOperations(task)]) : publicTask(task),
           journalError: null
         };
+        if (outcome.change) {
+          notifyChange({
+            kind: "change.recorded",
+            changeId: outcome.change.id,
+            taskId: outcome.task?.id || routingTaskId || null
+          });
+        }
+        return outcome;
       } catch (error) {
         if (!allowCommittedJournalFailure) throw error;
         return {
@@ -500,6 +519,7 @@ export function createChangeJournal({
       task.updatedAt = now;
       task.lastOperation = { kind: operation, status: "conflict", at: now, conflicts };
       await saveTask(task);
+      notifyChange({ kind: "change.conflict", taskId: task.id });
       throw conflictError(task.id, conflicts);
     }
 
@@ -532,7 +552,7 @@ export function createChangeJournal({
   }
 
   async function undo(id, { paths, taskId = null } = {}) {
-    return withOperationLock(async () => {
+    const change = await withOperationLock(async () => {
       await init();
       await resolveChangeView(id, { taskId });
       if (String(id || "").startsWith("task_")) return mutateTask(id, { paths }, "undo");
@@ -553,10 +573,16 @@ export function createChangeJournal({
       await saveRecord(record, { updateIndex: false });
       return publicRecordWithStats(record, readSnapshotText);
     });
+    notifyChange({
+      kind: "change.undo",
+      changeId: change?.id || id,
+      taskId: taskId || (String(id || "").startsWith("task_") ? id : null)
+    });
+    return change;
   }
 
   async function reapply(id, { paths, taskId = null } = {}) {
-    return withOperationLock(async () => {
+    const change = await withOperationLock(async () => {
       await init();
       await resolveChangeView(id, { taskId });
       if (String(id || "").startsWith("task_")) return mutateTask(id, { paths }, "reapply");
@@ -578,10 +604,16 @@ export function createChangeJournal({
       await saveRecord(record, { updateIndex: false });
       return publicRecordWithStats(record, readSnapshotText);
     });
+    notifyChange({
+      kind: "change.reapply",
+      changeId: change?.id || id,
+      taskId: taskId || (String(id || "").startsWith("task_") ? id : null)
+    });
+    return change;
   }
 
   async function undoAll({ taskId = null } = {}) {
-    return withOperationLock(async () => {
+    const result = await withOperationLock(async () => {
       await init();
       if (taskId) return mutateTask(taskId, {}, "undo");
       const index = await readIndex();
@@ -621,10 +653,12 @@ export function createChangeJournal({
       }
       return { ok: true, undone };
     });
+    notifyChange({ kind: "change.undo_all", taskId });
+    return result;
   }
 
   async function clear({ taskId = null } = {}) {
-    return withOperationLock(async () => {
+    const result = await withOperationLock(async () => {
       await init();
       return withIndexLock(async () => {
         const index = await readIndex();
@@ -667,6 +701,8 @@ export function createChangeJournal({
         return { ok: true, deleted };
       });
     });
+    notifyChange({ kind: "change.clear", taskId });
+    return result;
   }
 
   async function saveRecord(record, { updateIndex = true } = {}) {
@@ -709,6 +745,11 @@ export function createChangeJournal({
         record.statsPending = false;
         record.updatedAt = new Date().toISOString();
         await saveRecord(record, { updateIndex: false });
+        notifyChange({
+          kind: "change.stats",
+          changeId: record.id,
+          taskId: record.routingTaskId || record.taskId || null
+        });
       })
       .catch(() => {});
   }
@@ -968,10 +1009,55 @@ export function createChangeJournal({
     record.updatedAt = new Date().toISOString();
     record.lastOperation = { kind, status: "conflict", at: record.updatedAt, conflicts };
     await saveRecord(record, { updateIndex: false });
+    notifyChange({
+      kind: "change.conflict",
+      changeId: record.id,
+      taskId: record.routingTaskId || record.taskId || null
+    });
+  }
+
+  function onDidChange(listener) {
+    if (typeof listener !== "function") {
+      throw new TypeError("Change journal listener must be a function.");
+    }
+    changeListeners.add(listener);
+    return () => changeListeners.delete(listener);
+  }
+
+  function notifyChange({ kind, taskId = null, changeId = null } = {}) {
+    const event = {
+      workspaceId,
+      kind: String(kind || "change"),
+      taskId,
+      changeId,
+      at: new Date().toISOString()
+    };
+    for (const listener of changeListeners) {
+      try {
+        listener(event);
+      } catch {}
+    }
+  }
+
+  async function notifyTaskChange(kind, operation) {
+    const result = await operation();
+    if (result) {
+      notifyChange({
+        kind,
+        taskId: result.id || result.taskId || null
+      });
+    }
+    return result;
+  }
+
+  function close() {
+    changeListeners.clear();
   }
 
   return {
     init,
+    close,
+    onDidChange,
     rememberRead,
     forgetRead,
     beginTask,

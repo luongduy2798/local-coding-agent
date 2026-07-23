@@ -70,7 +70,10 @@ export function createApplicationHttpServer({
       if (req.method === "GET" && url.pathname === "/.well-known/oauth-protected-resource") {
         return sendJson(res, 200, oauthProtectedResourceMetadata());
       }
-      if (url.pathname === "/changes" || url.pathname.startsWith("/changes/")) {
+      if (
+        url.pathname === "/changes" || url.pathname.startsWith("/changes/") ||
+        url.pathname === "/tasks" || url.pathname.startsWith("/tasks/")
+      ) {
         if (!checkCompanionAuth(req)) return sendJson(res, 401, { error: "unauthorized" });
         return await changeRoutes.handle(req, res, url);
       }
@@ -128,6 +131,17 @@ export function createApplicationHttpServer({
       ? (await taskRouter.listTasks({ limit: 100 })).map((task) => ({
           task_id: task.id,
           title: task.title,
+          objective: task.objective,
+          requested_profile: task.requested_profile,
+          effective_profile: task.effective_profile,
+          profile_confidence: task.profile_confidence,
+          orchestration: task.orchestration ? {
+            phase: task.orchestration.phase,
+            evidence_status: task.orchestration.evidence_status,
+            budgets: task.orchestration.budgets,
+            counters: task.orchestration.counters,
+            last_notice: task.orchestration.last_notice
+          } : null,
           status: task.status,
           workspace_ids: task.workspace_ids,
           primary_workspace_id: task.primary_workspace_id,

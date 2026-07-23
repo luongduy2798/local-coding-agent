@@ -120,6 +120,23 @@ export class LcaClient {
     return this.request(`/changes?${query.toString()}`, { method: "DELETE" });
   }
 
+  deleteTask(
+    taskId: string,
+    workspaceId: string,
+  ): Promise<{ ok: boolean; task_id: string; deleted: number; history_deleted: number }> {
+    const query = new URLSearchParams({ workspace_id: workspaceId });
+    return this.request(`/tasks/${encodeURIComponent(taskId)}?${query.toString()}`, {
+      method: "DELETE",
+    });
+  }
+
+  deleteWorkspaceTasks(
+    workspaceId: string,
+  ): Promise<{ ok: boolean; workspace_id: string; deleted: number; history_deleted: number }> {
+    const query = new URLSearchParams({ workspace_id: workspaceId });
+    return this.request(`/tasks?${query.toString()}`, { method: "DELETE" });
+  }
+
   async watchChangeEvents(
     {
       scope = {},

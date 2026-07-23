@@ -8,11 +8,15 @@ import {
   startLca,
   stopLca,
 } from "../connection/lca-cli.js";
+import { ConnectionManager } from "../connection/connection-manager.js";
 import type { ControlWorkspace } from "./control-center-store.js";
 import { ControlCenterStore } from "./control-center-store.js";
 
 export class ControlCenterActions {
-  constructor(private readonly store: ControlCenterStore) {}
+  constructor(
+    private readonly connection: ConnectionManager,
+    private readonly store: ControlCenterStore,
+  ) {}
 
   async start(): Promise<void> {
     this.assertTrusted();
@@ -25,6 +29,7 @@ export class ControlCenterActions {
       async () => {
         await startLca(this.cwd());
         await this.waitFor((state) => state.serverOnline);
+        await this.store.refresh({ refreshCli: true });
       },
     );
   }
@@ -40,7 +45,7 @@ export class ControlCenterActions {
       if (answer !== "Stop LCA") return;
     }
     await stopLca(this.cwd());
-    await this.store.refresh();
+    await this.store.refresh({ refreshCli: true });
   }
 
   async makeDefault(workspaceId: string): Promise<void> {
@@ -50,7 +55,7 @@ export class ControlCenterActions {
       throw new Error("Only an active, available workspace can become the default for new tasks.");
     }
     await makeDefaultWorkspace(workspace.id, this.cwd(workspace));
-    await this.store.refresh();
+    await this.store.refresh({ refreshCli: true });
   }
 
   async archive(workspaceId: string): Promise<void> {
@@ -72,7 +77,7 @@ export class ControlCenterActions {
     if (!answer) return;
     if (this.store.current.serverOnline) await this.stop({ confirm: false });
     await archiveWorkspace(workspace.id, this.cwd(workspace));
-    await this.store.refresh();
+    await this.store.refresh({ refreshCli: true });
   }
 
   async restore(workspaceId: string): Promise<void> {
@@ -80,7 +85,7 @@ export class ControlCenterActions {
     const workspace = this.workspace(workspaceId);
     if (workspace.registrationState === "active") return;
     await restoreWorkspace(workspace.id, this.cwd(workspace));
-    await this.store.refresh();
+    await this.store.refresh({ refreshCli: true });
   }
 
   async removePermanently(workspaceId: string): Promise<void> {
@@ -119,7 +124,51 @@ export class ControlCenterActions {
       workspace.label,
       this.cwd(workspace),
     );
-    await this.store.refresh();
+    await this.store.refresh({ refreshCli: true });
+  }
+
+  async deleteTask(taskId: string, workspaceId: string): Promise<void> {
+    this.assertTrusted();
+    const workspace = this.workspace(workspaceId);
+    const task = this.store.current.tasks.find((item) => item.id === taskId);
+    if (!task || !task.workspaceIds.includes(workspace.id)) {
+      throw new Error("This task is no longer available in the selected workspace.");
+    }
+    if (task.status === "open") throw new Error("Close this task before deleting it.");
+    const crossWorkspaceNote = task.workspaceIds.length > 1
+      ? ` It will also disappear from ${task.workspaceIds.length - 1} other attached workspace(s).`
+      : "";
+    const answer = await vscode.window.showWarningMessage(
+      `Delete task “${task.title}”? Its task activity and Review Changes history will be removed.${crossWorkspaceNote} Source files and Git state remain unchanged.`,
+      { modal: true },
+      "Delete Task",
+    );
+    if (answer !== "Delete Task") return;
+    await this.connection.client.deleteTask(task.id, workspace.id);
+    await this.store.refresh({ refreshCli: true });
+  }
+
+  async deleteWorkspaceTasks(workspaceId: string): Promise<void> {
+    this.assertTrusted();
+    const workspace = this.workspace(workspaceId);
+    const tasks = this.store.current.tasks.filter((task) => task.workspaceIds.includes(workspace.id));
+    if (!tasks.length) return;
+    const openTasks = tasks.filter((task) => task.status === "open");
+    if (openTasks.length) {
+      throw new Error(`Close ${openTasks.length} open task(s) before deleting all task history for this workspace.`);
+    }
+    const multiWorkspaceCount = tasks.filter((task) => task.workspaceIds.length > 1).length;
+    const crossWorkspaceNote = multiWorkspaceCount
+      ? ` ${multiWorkspaceCount} multi-workspace task(s) will also disappear from their other attached workspaces.`
+      : "";
+    const answer = await vscode.window.showWarningMessage(
+      `Delete all task history for ${workspace.label}? Task activity and Review Changes history will be removed.${crossWorkspaceNote} Source files and Git state remain unchanged.`,
+      { modal: true },
+      "Delete All Tasks",
+    );
+    if (answer !== "Delete All Tasks") return;
+    await this.connection.client.deleteWorkspaceTasks(workspace.id);
+    await this.store.refresh({ refreshCli: true });
   }
 
   private workspace(workspaceId: string): ControlWorkspace {
