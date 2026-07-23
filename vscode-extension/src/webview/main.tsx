@@ -278,6 +278,7 @@ function App(): React.JSX.Element {
           workspaceKey={currentWorkspaceId || currentWorkspace?.key}
           workspaceId={currentWorkspaceId}
           busyAction={state.busyAction}
+          onCloseDetachedTask={(taskId) => post("closeDetachedTask", undefined, undefined, taskId, currentWorkspaceId)}
           onDeleteTask={(taskId) => post("deleteTask", undefined, undefined, taskId, currentWorkspaceId)}
           onDeleteAll={() => post("deleteWorkspaceTasks", undefined, undefined, undefined, currentWorkspaceId)}
           renderChanges={(item) => (

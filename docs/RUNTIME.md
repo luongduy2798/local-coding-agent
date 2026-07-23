@@ -6,7 +6,7 @@ Local Coding Agent runs one local supervisor for one server/tunnel pair. A works
 
 - Node.js `>=22.13.0` is required. SQLite runs through storage workers rather than doing synchronous database work on the MCP event loop.
 - Runtime state lives outside the repository by default, beside the CLI config: `~/Library/Application Support/LocalCodingAgent/data/runtime` on macOS, `%APPDATA%\LocalCodingAgent\data\runtime` on Windows, and `${XDG_CONFIG_HOME:-~/.config}/LocalCodingAgent/data/runtime` on Linux. An explicit `AGENT_DATA_DIR` uses `<AGENT_DATA_DIR>/runtime`.
-- `registry.sqlite` stores workspace registration/selection, task/session bindings, and the durable cross-workspace transaction coordinator view.
+- `registry.sqlite` stores workspace registration/selection, task/session bindings, detached/closed lifecycle metadata, and the durable cross-workspace transaction coordinator view.
 - Each workspace has an isolated `state.sqlite` and change-journal storage keyed by its workspace ID; durable patch intents and locks live in the transaction namespace.
 - SQLite is opened with WAL, foreign keys, a busy timeout, transactional migrations, and integrity checks.
 - If only a legacy `data/v5` directory exists, startup copies it transactionally into `data/runtime`, verifies it, activates the copy, and retains the source as a backup. If both directories exist without a valid activation marker, startup fails closed instead of merging them.
@@ -75,6 +75,8 @@ task_open(primary_workspace_id, attached_workspace_ids[])
 ```
 
 `task_open` accepts an optional short `title` for UI display, an optional durable and user-visible `objective` describing the intended result and task-specific constraints, and a model-selected `complexity_hint` (`quick_edit`, `normal`, or `complex`). Objective is task metadata, not private reasoning or an instruction channel for LCA; it must not contain secrets, unrelated conversation text, or general agent policy. Providing only title leaves objective `null`; when title is omitted, it may be derived from objective. If the model omits the complexity hint, the effective profile defaults to `normal`.
+
+Session bindings are runtime-scoped. Startup clears bindings left by an earlier process and marks still-open tasks detached at their last durable update. Removing one of several bindings keeps the task active; only removal of the final binding sets `detached_at`. Resuming by task token clears detached state. The Control Center may close a detached task through a guarded HTTP action only when no process or incomplete patch transaction remains; this closes the routing task but deliberately preserves Review Changes journals and snapshots.
 
 `task_open` returns:
 

@@ -166,10 +166,39 @@ test("TaskRouter locks an explicit multi-workspace set and resumes by token", {
     assert.equal((await router.getTask({ sessionId: "session-b" })).id, opened.id);
     assert.equal(await router.unbindSession("session-b"), true);
     assert.equal(await router.getTask({ sessionId: "session-b", required: false }), null);
-    assert.equal((await router.getTaskById(opened.id)).owner_session_id, null);
+    const stillBound = await router.getTaskById(opened.id);
+    assert.equal(stillBound.session_bound, true, "another bound session must keep the task active");
+    assert.equal(stillBound.detached_at, null);
+    assert.equal(await router.unbindSession("session-a"), true);
+    const detached = await router.getTaskById(opened.id);
+    assert.equal(detached.owner_session_id, null);
+    assert.equal(detached.session_bound, false);
+    assert.ok(detached.detached_at);
     assert.equal(await router.unbindSession("session-b"), false);
+    await assert.rejects(
+      () => router.closeDetachedTask({ taskId: otherTask.id }),
+      (error) => error instanceof TaskRouterError && error.code === "TASK_NOT_DETACHED"
+    );
+    const rebound = await router.resumeTask({ taskToken: opened.task_token, sessionId: "session-c" });
+    assert.equal(rebound.session_bound, true);
+    assert.equal(rebound.detached_at, null);
+    await router.unbindSession("session-c");
+    const abandoned = await router.closeDetachedTask({ taskId: opened.id });
+    assert.equal(abandoned.status, "closed");
+    assert.equal(abandoned.closed_reason, "abandoned");
 
-    const closed = await router.closeTask({ taskToken: opened.task_token });
+    const resetCandidate = await router.openTask({
+      title: "Reset stale binding",
+      primaryWorkspaceId: "ws_aaaaaaaaaaaaaaaa",
+      ownerSessionId: "session-stale"
+    });
+    const reset = await router.resetSessionBindings();
+    assert.ok(reset.bindings_deleted >= 1);
+    const resetState = await router.getTaskById(resetCandidate.id);
+    assert.equal(resetState.session_bound, false);
+    assert.ok(resetState.detached_at);
+
+    const closed = await router.closeTask({ taskToken: resetCandidate.task_token });
     assert.equal(closed.status, "closed");
 
     const raced = await router.openTask({

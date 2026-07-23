@@ -1584,8 +1584,13 @@ button {
   color: var(--vscode-testing-iconPassed, #3fb950);
 }
 
+.task-state-icon.state-detached,
 .task-state-icon.state-incomplete {
   color: var(--vscode-editorWarning-foreground);
+}
+
+.task-card.is-detached {
+  border-color: color-mix(in srgb, var(--vscode-editorWarning-foreground) 55%, var(--vscode-panel-border));
 }
 
 .task-state-icon.state-failed {

@@ -62,6 +62,7 @@ export function createRuntimeManager({
         await registry.selectWorkspace(primaryWorkspaceId, { scope: "default", fallback: false });
       }
       taskRouter = await TaskRouter.open({ dataDir: runtimeDataDir, busyTimeoutMs: 5_000 });
+      await taskRouter.resetSessionBindings();
       patchCoordinator = new PatchTransactionCoordinator({
         dataDir: path.join(runtimeDataDir, "patch-coordinator"),
         stateStore: {

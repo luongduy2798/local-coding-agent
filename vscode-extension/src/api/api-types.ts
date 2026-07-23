@@ -78,6 +78,9 @@ export interface TaskDescriptor {
   profile_confidence?: number;
   orchestration?: TaskOrchestrationDescriptor | null;
   status?: "open" | "active" | "completed" | "closed" | "failed";
+  session_bound?: boolean;
+  detached_at?: string | null;
+  closed_reason?: string | null;
   primary_workspace_id?: string;
   workspace_ids?: string[];
   created_at?: string;

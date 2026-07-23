@@ -79,6 +79,9 @@ export interface ControlTaskView {
   profileConfidence: number | null;
   orchestration: TaskOrchestrationView | null;
   status: string;
+  sessionBound: boolean | null;
+  detachedAt: string | null;
+  closedReason: string | null;
   primaryWorkspaceId: string | null;
   workspaceIds: string[];
   createdAt: string | null;
@@ -505,6 +508,7 @@ export function ChronologicalTaskFeed({
   workspaceKey,
   workspaceId,
   busyAction,
+  onCloseDetachedTask,
   onDeleteTask,
   onDeleteAll,
   renderChanges,
@@ -515,6 +519,7 @@ export function ChronologicalTaskFeed({
   workspaceKey?: string;
   workspaceId?: string;
   busyAction?: string;
+  onCloseDetachedTask: (taskId: string) => void;
   onDeleteTask: (taskId: string) => void;
   onDeleteAll: () => void;
   renderChanges: (item: TaskPresentation) => React.ReactNode;
@@ -528,7 +533,9 @@ export function ChronologicalTaskFeed({
     [tasks, unassigned],
   );
   const latestTaskId = tasks[tasks.length - 1]?.task.id || null;
-  const running = items.some((item) => item.activities.some((activity) => activity.status === "started"));
+  const running = items.some((item) => !taskIsDetached(item) && (
+    item.runningProcessCount > 0 || item.activities.some((activity) => activity.status === "started")
+  ));
   const contentRevision = items.map((item) => {
     const latestActivity = item.activities[item.activities.length - 1];
     return [
@@ -590,16 +597,24 @@ export function ChronologicalTaskFeed({
         <div className="task-feed-scroll" ref={scrollRef} onScroll={handleScroll}>
           {items.length > 0 ? (
             <div className="task-thread">
-              {items.map((item) => (
-                <TaskBlock
-                  key={item.task.id}
-                  item={item}
-                  latest={item.task.id === latestTaskId}
-                  deleteDisabled={Boolean(busyAction) || isOpenTask(item.task.status)}
-                  onDelete={item.task.id === "__unassigned__" ? undefined : () => onDeleteTask(item.task.id)}
-                  renderChanges={renderChanges}
-                />
-              ))}
+              {items.map((item) => {
+                const detached = taskIsDetached(item);
+                return (
+                  <TaskBlock
+                    key={item.task.id}
+                    item={item}
+                    latest={item.task.id === latestTaskId}
+                    detached={detached}
+                    closeDetachedDisabled={Boolean(busyAction)}
+                    deleteDisabled={Boolean(busyAction) || isOpenTask(item.task.status)}
+                    onCloseDetached={item.task.id === "__unassigned__" || !detached
+                      ? undefined
+                      : () => onCloseDetachedTask(item.task.id)}
+                    onDelete={item.task.id === "__unassigned__" ? undefined : () => onDeleteTask(item.task.id)}
+                    renderChanges={renderChanges}
+                  />
+                );
+              })}
             </div>
           ) : (
             <div className="task-empty">
@@ -638,13 +653,19 @@ export function taskActivitiesExpanded(
 function TaskBlock({
   item,
   latest,
+  detached,
+  closeDetachedDisabled,
   deleteDisabled,
+  onCloseDetached,
   onDelete,
   renderChanges,
 }: {
   item: TaskPresentation;
   latest: boolean;
+  detached: boolean;
+  closeDetachedDisabled: boolean;
   deleteDisabled: boolean;
+  onCloseDetached?: () => void;
   onDelete?: () => void;
   renderChanges: (item: TaskPresentation) => React.ReactNode;
 }): React.JSX.Element {
@@ -659,14 +680,14 @@ function TaskBlock({
     .slice(0, hiddenActivityCount)
     .reduce((count, activity) => count + (activity.repeatCount || 1), 0);
   const profile = item.task.effectiveProfile;
-  const displayStatus = taskDisplayStatus(item.task.status, running);
+  const displayStatus = taskDisplayStatus(item.task.status, running || item.runningProcessCount > 0, detached);
   const suggestedProfile = item.task.orchestration?.suggested_profile;
   const notice = item.task.orchestration?.last_notice;
   const showNotice = isUserVisibleOrchestrationNoticeCode(notice?.code);
   const objective = visibleTaskObjective(item.task);
 
   return (
-    <article className={`task-card ${latest ? "is-latest" : ""} ${displayStatus.stateTone === "running" ? "is-running" : ""}`}>
+    <article className={`task-card ${latest ? "is-latest" : ""} ${displayStatus.stateTone === "running" ? "is-running" : ""} ${detached ? "is-detached" : ""}`}>
       <div className="task-card-header">
         <span className={`task-state-icon state-${displayStatus.stateTone}`}>
           {displayStatus.icon
@@ -685,7 +706,9 @@ function TaskBlock({
             {item.toolCallCount > 0 && <span>{item.toolCallCount} call{item.toolCallCount === 1 ? "" : "s"}</span>}
             {item.redundantCallCount > 0 && <span className="redundant-count">{item.redundantCallCount} redundant</span>}
             {item.elapsedMs !== null && (
-              <span title="Elapsed time from task open to close, or to now while running.">Total {formatDuration(item.elapsedMs)}</span>
+              <span title={detached
+                ? "Elapsed time from task open until its session detached."
+                : "Elapsed time from task open to close, or to now while running."}>Total {formatDuration(item.elapsedMs)}</span>
             )}
             {item.activeToolTimeMs > 0 && (
               <span title="Measured time inside LCA tool handlers; overlapping calls are counted once.">Tools {formatDuration(item.activeToolTimeMs)}</span>
@@ -700,15 +723,23 @@ function TaskBlock({
             {showNotice && notice?.code && <span className="orchestration-notice" title={notice.message}>{humanizeTool(notice.code)}</span>}
           </div>
         </div>
-        {onDelete && (
+        {(onCloseDetached || onDelete) && (
           <div className="task-card-actions">
-            <IconButton
+            {onCloseDetached && (
+              <IconButton
+                title={`Close detached task ${item.task.title}`}
+                icon="stop"
+                disabled={closeDetachedDisabled}
+                onClick={onCloseDetached}
+              />
+            )}
+            {onDelete && <IconButton
               title={isOpenTask(item.task.status) ? "Close task before deleting it" : `Delete ${item.task.title}`}
               icon="trash"
               danger
               disabled={deleteDisabled}
               onClick={onDelete}
-            />
+            />}
           </div>
         )}
       </div>
@@ -728,12 +759,14 @@ function TaskBlock({
                   </div>
                 </li>
               )}
-              {visibleActivities.map((activity) => (
-                <li className={`timeline-item timeline-${activity.status} ${activity.policySkip ? "timeline-skipped" : ""} ${activity.duplicate ? "timeline-duplicate" : ""}`} key={activity.invocationId}>
+              {visibleActivities.map((activity) => {
+                const interruptedByDetach = detached && activity.status === "started";
+                return (
+                <li className={`timeline-item timeline-${interruptedByDetach ? "interrupted" : activity.status} ${activity.policySkip ? "timeline-skipped" : ""} ${activity.duplicate ? "timeline-duplicate" : ""}`} key={activity.invocationId}>
                   <span className="timeline-marker">
-                    {activity.status === "started"
+                    {activity.status === "started" && !interruptedByDetach
                       ? <RotatingDots compact label={`${activityLabel(activity.tool)} running`} />
-                      : <Icon name={activity.status === "finished" ? "check" : "warning"} />}
+                      : <Icon name={interruptedByDetach ? "stop" : activity.status === "finished" ? "check" : "warning"} />}
                   </span>
                   <div className="timeline-copy">
                     <strong>{activityLabel(activity.tool)}{activity.repeatCount > 1 ? ` ×${activity.repeatCount}` : ""}</strong>
@@ -745,6 +778,8 @@ function TaskBlock({
                           ? `Skipped · ${relativeTime(activity.finishedAt || activity.startedAt)}`
                           : activity.duplicate
                             ? `Repeated evidence · ${formatDuration(activity.durationMs || 0)} · ${relativeTime(activity.finishedAt || activity.startedAt)}`
+                          : interruptedByDetach
+                            ? `Interrupted after ${formatDuration(detachedActivityDuration(activity, item.task.detachedAt || item.task.updatedAt))} · session detached ${relativeTime(item.task.detachedAt || item.task.updatedAt || activity.startedAt)}`
                           : activity.status === "started"
                             ? `Running ${formatDuration(liveDuration(activity))} · started ${relativeTime(activity.startedAt)}`
                             : `${formatDuration(activity.durationMs || 0)} · completed ${relativeTime(activity.finishedAt || activity.startedAt)}`}
@@ -754,7 +789,8 @@ function TaskBlock({
                     </span>
                   </div>
                 </li>
-              ))}
+                );
+              })}
               {groupedActivities.length > 3 && (
                 <li className="task-summary-item">
                   <button
@@ -863,6 +899,9 @@ export function makeUnassignedPresentation(
       effectiveProfile: null,
       profileConfidence: null,
       orchestration: null,
+      sessionBound: null,
+      detachedAt: null,
+      closedReason: null,
       createdAt: null,
       updatedAt: now,
       closedAt: null,
@@ -1044,8 +1083,12 @@ function profileLabel(profile: "quick_edit" | "normal" | "complex"): string {
 function taskDisplayStatus(
   status: string,
   hasRunningActivity: boolean,
-): { label: string; badgeTone: string; stateTone: "running" | "complete" | "failed"; icon: IconName | null } {
+  detached: boolean,
+): { label: string; badgeTone: string; stateTone: "running" | "detached" | "complete" | "failed"; icon: IconName | null } {
   const normalized = status.toLowerCase();
+  if (detached) {
+    return { label: "Detached", badgeTone: "incomplete", stateTone: "detached", icon: "stop" };
+  }
   if (hasRunningActivity || isOpenTask(normalized)) {
     return { label: "Running", badgeTone: "accent", stateTone: "running", icon: null };
   }
@@ -1053,7 +1096,7 @@ function taskDisplayStatus(
     return { label: "Failed", badgeTone: "fail", stateTone: "failed", icon: "warning" };
   }
   // Internal close evidence such as `incomplete` is intentionally collapsed into
-  // Completed. The task feed exposes only Running, Completed, and Failed.
+  // Completed. Detached is a lifecycle state for an open task without a live session.
   return { label: "Completed", badgeTone: "pass", stateTone: "complete", icon: "check" };
 }
 
@@ -1077,7 +1120,6 @@ function taskTiming(
   task: ControlTaskView,
   activities: ToolActivityView[],
 ): Pick<TaskPresentation, "elapsedMs" | "activeToolTimeMs" | "betweenCallsMs"> {
-  const activeToolTimeMs = mergedActivityDurationMs(activities);
   const activityStarts = activities
     .map((activity) => Date.parse(activity.startedAt))
     .filter(Number.isFinite);
@@ -1085,7 +1127,18 @@ function taskTiming(
   const closedAt = finiteTimestamp(task.closedAt) ?? (
     !isOpenTask(task.status) ? finiteTimestamp(task.updatedAt) : null
   );
-  const endedAt = closedAt ?? (startedAt !== null ? Date.now() : null);
+  const detachedAt = finiteTimestamp(task.detachedAt);
+  const latestActivityAt = activities.reduce<number | null>((latest, activity) => {
+    const timestamp = finiteTimestamp(activity.finishedAt || activity.startedAt);
+    if (timestamp === null) return latest;
+    return latest === null ? timestamp : Math.max(latest, timestamp);
+  }, null);
+  const detachedFallback = isOpenTask(task.status) && task.sessionBound === false
+    ? latestActivityAt ?? finiteTimestamp(task.updatedAt)
+    : null;
+  const effectiveDetachedAt = detachedAt ?? detachedFallback;
+  const activeToolTimeMs = mergedActivityDurationMs(activities, effectiveDetachedAt);
+  const endedAt = closedAt ?? effectiveDetachedAt ?? (startedAt !== null ? Date.now() : null);
   const elapsedMs = startedAt !== null && endedAt !== null
     ? Math.max(0, endedAt - startedAt)
     : null;
@@ -1096,7 +1149,10 @@ function taskTiming(
   };
 }
 
-function mergedActivityDurationMs(activities: ToolActivityView[]): number {
+function mergedActivityDurationMs(
+  activities: ToolActivityView[],
+  detachedAt: number | null = null,
+): number {
   const now = Date.now();
   const intervals = activities.flatMap((activity) => {
     const start = Date.parse(activity.startedAt);
@@ -1105,7 +1161,7 @@ function mergedActivityDurationMs(activities: ToolActivityView[]): number {
     const durationEnd = activity.durationMs !== null && Number.isFinite(activity.durationMs)
       ? start + Math.max(0, activity.durationMs)
       : null;
-    const end = finished ?? durationEnd ?? (activity.status === "started" ? now : start);
+    const end = finished ?? durationEnd ?? (activity.status === "started" ? detachedAt ?? now : start);
     return [[start, Math.max(start, end)] as const];
   }).sort((left, right) => left[0] - right[0]);
   if (!intervals.length) return 0;
@@ -1173,6 +1229,24 @@ function humanizeTool(value: string): string {
     .filter(Boolean)
     .map((part, index) => index === 0 ? part[0]?.toUpperCase() + part.slice(1) : part)
     .join(" ");
+}
+
+export function taskIsDetached(item: Pick<TaskPresentation, "task" | "runningProcessCount">): boolean {
+  return isOpenTask(item.task.status)
+    && item.task.sessionBound === false
+    && item.runningProcessCount === 0;
+}
+
+function detachedActivityDuration(
+  activity: ToolActivityView,
+  detachedAt: string | null | undefined,
+): number {
+  if (activity.durationMs !== null && Number.isFinite(activity.durationMs)) {
+    return Math.max(0, activity.durationMs);
+  }
+  const start = finiteTimestamp(activity.startedAt);
+  const end = finiteTimestamp(detachedAt);
+  return start !== null && end !== null ? Math.max(0, end - start) : 0;
 }
 
 function isOpenTask(status: string): boolean {

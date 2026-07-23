@@ -143,6 +143,9 @@ export function createApplicationHttpServer({
             last_notice: task.orchestration.last_notice
           } : null,
           status: task.status,
+          session_bound: task.session_bound,
+          detached_at: task.detached_at,
+          closed_reason: task.closed_reason,
           workspace_ids: task.workspace_ids,
           primary_workspace_id: task.primary_workspace_id,
           workspace_set_version: task.version,

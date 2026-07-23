@@ -190,6 +190,12 @@ export class ReviewChangesWebviewProvider implements vscode.WebviewViewProvider,
       case "removeWorkspace":
         await this.run(`remove:${workspaceId || ""}`, () => this.controlActions.removePermanently(workspaceId || ""));
         return;
+      case "closeDetachedTask":
+        await this.run(`closeDetachedTask:${message.value || ""}`, async () => {
+          await this.controlActions.closeDetachedTask(message.value || "", workspaceId || "");
+          await this.store.refresh({ cancelCurrent: true });
+        });
+        return;
       case "deleteTask":
         await this.run(`deleteTask:${message.value || ""}`, async () => {
           await this.controlActions.deleteTask(message.value || "", workspaceId || "");

@@ -12,6 +12,7 @@ import {
   ChronologicalTaskFeed,
   isScrollNearBottom,
   taskActivitiesExpanded,
+  taskIsDetached,
   visibleActivityVerification,
   visibleTaskObjective,
 } from "../src/webview/control-center.js";
@@ -303,6 +304,7 @@ async function main(): Promise<void> {
     tasks: renderTasks,
     workspaceLabel: "local-coding-agent",
     workspaceId: "ws_cccccccccccccccc",
+    onCloseDetachedTask: () => undefined,
     onDeleteTask: () => undefined,
     onDeleteAll: () => undefined,
     renderChanges: () => null,
@@ -321,6 +323,29 @@ async function main(): Promise<void> {
     2,
     "running task and running tool rows must both render RotatingDots",
   );
+
+  const detachedItem = {
+    ...renderTasks[0],
+    task: {
+      ...renderTasks[0].task,
+      sessionBound: false,
+      detachedAt: "2026-07-22T03:00:04.000Z",
+    },
+  };
+  assert.equal(taskIsDetached(detachedItem), true, "an open task without a session or live work must be detached");
+  const detachedTaskFeed = renderToStaticMarkup(React.createElement(ChronologicalTaskFeed, {
+    tasks: [detachedItem],
+    workspaceLabel: "local-coding-agent",
+    workspaceId: "ws_cccccccccccccccc",
+    onCloseDetachedTask: () => undefined,
+    onDeleteTask: () => undefined,
+    onDeleteAll: () => undefined,
+    renderChanges: () => null,
+  }));
+  assert.match(detachedTaskFeed, />Detached</, "detached tasks must not appear as running");
+  assert.match(detachedTaskFeed, /Close detached task Rendered latest task/, "detached tasks must expose a safe close action");
+  assert.doesNotMatch(detachedTaskFeed, /Task running|rotating-dots/, "detached tasks and stale started calls must not render running indicators");
+  assert.match(detachedTaskFeed, /Interrupted after/, "a stale started call must freeze as interrupted when its task detaches");
 
   assert.equal(
     isScrollNearBottom({ scrollHeight: 1_000, scrollTop: 764, clientHeight: 200 }),

@@ -120,6 +120,16 @@ export class LcaClient {
     return this.request(`/changes?${query.toString()}`, { method: "DELETE" });
   }
 
+  closeDetachedTask(
+    taskId: string,
+    workspaceId: string,
+  ): Promise<{ ok: boolean; task_id: string; status: string; closed_at: string; closed_reason: string }> {
+    const query = new URLSearchParams({ workspace_id: workspaceId });
+    return this.request(`/tasks/${encodeURIComponent(taskId)}/close-detached?${query.toString()}`, {
+      method: "POST",
+    });
+  }
+
   deleteTask(
     taskId: string,
     workspaceId: string,

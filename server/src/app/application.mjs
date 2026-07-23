@@ -731,6 +731,7 @@ const CHANGE_ROUTES = createChangeRoutes({
   getPrimaryWorkspaceId: () => PRIMARY_WORKSPACE_ID,
   getRegistry: () => WORKSPACE_REGISTRY,
   getTaskRouter: () => TASK_ROUTER,
+  getProcesses: () => processes,
   maxBodyBytes: MAX_BODY_BYTES,
   primaryRoot: PRIMARY_ROOT,
   readJsonBody,

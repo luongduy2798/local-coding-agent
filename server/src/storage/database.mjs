@@ -14,7 +14,7 @@ import { performance } from "node:perf_hooks";
 import { Worker } from "node:worker_threads";
 
 export const MINIMUM_SQLITE_NODE_VERSION = Object.freeze({ major: 22, minor: 13, patch: 0 });
-export const REGISTRY_SCHEMA_VERSION = 6;
+export const REGISTRY_SCHEMA_VERSION = 7;
 export const WORKSPACE_SCHEMA_VERSION = 2;
 
 const STORAGE_WORKER_URL = new URL("./worker.mjs", import.meta.url);
@@ -142,6 +142,14 @@ const REGISTRY_TASK_ORCHESTRATION_SCHEMA_SQL = `
   ALTER TABLE task_router_tasks ADD COLUMN complexity_override INTEGER NOT NULL DEFAULT 0;
   ALTER TABLE task_router_tasks ADD COLUMN profile_confidence REAL NOT NULL DEFAULT 0.6;
   ALTER TABLE task_router_tasks ADD COLUMN orchestration_json TEXT NOT NULL DEFAULT '{}';
+`;
+
+const REGISTRY_TASK_DETACHED_SCHEMA_SQL = `
+  ALTER TABLE task_router_tasks ADD COLUMN detached_at TEXT;
+  ALTER TABLE task_router_tasks ADD COLUMN closed_reason TEXT;
+  UPDATE task_router_tasks
+  SET detached_at = COALESCE(detached_at, updated_at)
+  WHERE status = 'open' AND owner_session_id IS NULL;
 `;
 
 const WORKSPACE_SCHEMA_SQL = `
@@ -691,7 +699,8 @@ export async function openRegistryDatabase({
           { version: 3, sql: REGISTRY_TASK_BASELINE_SCHEMA_SQL },
           { version: 4, sql: REGISTRY_TRANSACTION_COORDINATOR_SCHEMA_SQL },
           { version: 5, sql: REGISTRY_WORKSPACE_LIFECYCLE_SCHEMA_SQL },
-          { version: 6, sql: REGISTRY_TASK_ORCHESTRATION_SCHEMA_SQL }
+          { version: 6, sql: REGISTRY_TASK_ORCHESTRATION_SCHEMA_SQL },
+          { version: 7, sql: REGISTRY_TASK_DETACHED_SCHEMA_SQL }
         ]
       }
     });

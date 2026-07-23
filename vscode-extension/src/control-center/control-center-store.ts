@@ -42,6 +42,9 @@ export interface ControlTask {
   profileConfidence: number | null;
   orchestration: TaskOrchestrationDescriptor | null;
   status: string;
+  sessionBound: boolean | null;
+  detachedAt: string | null;
+  closedReason: string | null;
   primaryWorkspaceId: string | null;
   workspaceIds: string[];
   createdAt: string | null;
@@ -273,6 +276,9 @@ function normalizeTasks(health: HealthResponse | undefined, status: LcaCliStatus
     profileConfidence: Number.isFinite(Number(task.profile_confidence)) ? Number(task.profile_confidence) : null,
     orchestration: task.orchestration || null,
     status: task.status || "unknown",
+    sessionBound: typeof task.session_bound === "boolean" ? task.session_bound : null,
+    detachedAt: task.detached_at || null,
+    closedReason: task.closed_reason || null,
     primaryWorkspaceId: task.primary_workspace_id || task.workspace_ids?.[0] || null,
     workspaceIds: task.workspace_ids || (task.primary_workspace_id ? [task.primary_workspace_id] : []),
     createdAt: task.created_at || null,

@@ -76,6 +76,10 @@ export class TaskRouter {
     const taskToken = randomBytes(32).toString("base64url");
     const tokenHash = hashToken(taskToken);
     const timestamp = isoNow();
+    const ownerSession = ownerSessionId ? String(ownerSessionId) : null;
+    const previousBinding = ownerSession
+      ? await this.database.get("SELECT task_id FROM task_router_sessions WHERE session_id = ?", [ownerSession])
+      : null;
     const baselines = normalizeWorkspaceBaselines(workspaceIds, workspaceBaselines);
     const steps = [{
       mode: "run",
@@ -84,13 +88,13 @@ export class TaskRouter {
           id, token_hash, owner_session_id, title, objective,
           requested_profile, effective_profile, complexity_override,
           profile_confidence, orchestration_json, status, version,
-          workspace_set_frozen, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', 1, 0, ?, ?)
+          workspace_set_frozen, detached_at, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', 1, 0, ?, ?, ?)
       `,
       params: [
         taskId,
         tokenHash,
-        ownerSessionId ? String(ownerSessionId) : null,
+        ownerSession,
         normalizedTitle,
         normalizedObjective || null,
         classification.requested_profile,
@@ -98,6 +102,7 @@ export class TaskRouter {
         classification.complexity_override ? 1 : 0,
         classification.confidence,
         JSON.stringify(orchestration),
+        ownerSession ? null : timestamp,
         timestamp,
         timestamp
       ]
@@ -114,7 +119,12 @@ export class TaskRouter {
       baselines.get(workspaceId),
       timestamp
     ))];
-    if (ownerSessionId) steps.push(sessionBindingStep(String(ownerSessionId), taskId, timestamp));
+    if (ownerSession) {
+      steps.push(sessionBindingStep(ownerSession, taskId, timestamp));
+      if (previousBinding?.task_id && previousBinding.task_id !== taskId) {
+        steps.push(refreshTaskSessionStateStep(previousBinding.task_id, timestamp));
+      }
+    }
     await this.database.batch(steps);
     return { ...(await this.getTaskById(taskId)), task_token: taskToken };
   }
@@ -126,14 +136,17 @@ export class TaskRouter {
     }
     if (sessionId) {
       const timestamp = isoNow();
-      await this.database.batch([
-        sessionBindingStep(String(sessionId), task.id, timestamp),
-        {
-          mode: "run",
-          sql: "UPDATE task_router_tasks SET owner_session_id = ?, updated_at = ? WHERE id = ?",
-          params: [String(sessionId), timestamp, task.id]
-        }
-      ]);
+      const session = String(sessionId);
+      const previousBinding = await this.database.get(
+        "SELECT task_id FROM task_router_sessions WHERE session_id = ?",
+        [session]
+      );
+      const steps = [sessionBindingStep(session, task.id, timestamp)];
+      if (previousBinding?.task_id && previousBinding.task_id !== task.id) {
+        steps.push(refreshTaskSessionStateStep(previousBinding.task_id, timestamp));
+      }
+      steps.push(refreshTaskSessionStateStep(task.id, timestamp));
+      await this.database.batch(steps);
     }
     return this.getTaskById(task.id);
   }
@@ -191,24 +204,45 @@ export class TaskRouter {
   async unbindSession(sessionId) {
     const id = String(sessionId || "").trim();
     if (!id) return false;
+    const binding = await this.database.get(
+      "SELECT task_id FROM task_router_sessions WHERE session_id = ?",
+      [id]
+    );
+    if (!binding?.task_id) return false;
     const timestamp = isoNow();
-    const results = await this.database.batch([
+    await this.database.batch([
       {
         mode: "run",
         sql: "DELETE FROM task_router_sessions WHERE session_id = ?",
         params: [id]
       },
+      refreshTaskSessionStateStep(binding.task_id, timestamp)
+    ]);
+    return true;
+  }
+
+  async resetSessionBindings() {
+    const results = await this.database.batch([
+      { mode: "run", sql: "DELETE FROM task_router_sessions", params: [] },
       {
         mode: "run",
         sql: `
           UPDATE task_router_tasks
-          SET owner_session_id = NULL, updated_at = ?
-          WHERE owner_session_id = ?
+          SET owner_session_id = NULL,
+              detached_at = CASE
+                WHEN status = 'open' THEN COALESCE(detached_at, updated_at)
+                ELSE detached_at
+              END
+          WHERE owner_session_id IS NOT NULL
+             OR (status = 'open' AND detached_at IS NULL)
         `,
-        params: [timestamp, id]
+        params: []
       }
     ]);
-    return Number(results[0]?.changes || 0) > 0;
+    return {
+      bindings_deleted: Number(results[0]?.changes || 0),
+      tasks_detached: Number(results[1]?.changes || 0)
+    };
   }
 
   async getTaskByToken(taskToken) {
@@ -360,7 +394,7 @@ export class TaskRouter {
         sql: `
           UPDATE task_router_tasks
           SET status = ?, version = version + 1,
-              closed_at = ?, updated_at = ?
+              owner_session_id = NULL, closed_at = ?, updated_at = ?
           WHERE id = ? AND status = 'open'
         `,
         params: [nextStatus, timestamp, timestamp, task.id]
@@ -372,6 +406,35 @@ export class TaskRouter {
       }
     ]);
     return this.getTaskById(task.id);
+  }
+
+  async closeDetachedTask({ taskId } = {}) {
+    const id = validateTaskId(taskId);
+    const timestamp = isoNow();
+    const row = await this.database.get(
+      `
+        UPDATE task_router_tasks
+        SET status = 'closed', version = version + 1,
+            owner_session_id = NULL, closed_at = ?, updated_at = ?,
+            closed_reason = 'abandoned'
+        WHERE id = ? AND status = 'open'
+          AND detached_at IS NOT NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM task_router_sessions WHERE task_id = ?
+          )
+        RETURNING *
+      `,
+      [timestamp, timestamp, id, id]
+    );
+    if (!row) {
+      const current = await this.getTaskById(id);
+      throw new TaskRouterError(
+        "TASK_NOT_DETACHED",
+        `Task ${id} is not an open detached task.`,
+        { task_id: id, status: current.status, session_bound: current.session_bound }
+      );
+    }
+    return this.hydrate(row);
   }
 
   async updateOrchestration({ taskId, orchestration, effectiveProfile, profileConfidence } = {}) {
@@ -452,7 +515,8 @@ export class TaskRouter {
   }
 
   async hydrate(row) {
-    const workspaces = await this.database.all(
+    const [workspaces, sessionBinding] = await Promise.all([
+      this.database.all(
       `
         SELECT
           w.workspace_id,
@@ -472,7 +536,12 @@ export class TaskRouter {
         ORDER BY CASE w.role WHEN 'primary' THEN 0 ELSE 1 END, w.attached_at, w.workspace_id
       `,
       [row.id]
-    );
+      ),
+      this.database.get(
+        "SELECT session_id FROM task_router_sessions WHERE task_id = ? ORDER BY updated_at DESC LIMIT 1",
+        [row.id]
+      )
+    ]);
     const hydratedWorkspaces = workspaces.map(hydrateWorkspace);
     let orchestrationSource = null;
     try {
@@ -493,6 +562,9 @@ export class TaskRouter {
       status: row.status,
       version: Number(row.version),
       owner_session_id: row.owner_session_id || null,
+      session_bound: Boolean(sessionBinding?.session_id),
+      detached_at: row.detached_at || null,
+      closed_reason: row.closed_reason || null,
       workspace_set_frozen: Boolean(row.workspace_set_frozen),
       mutation_started_at: row.mutation_started_at || null,
       created_at: row.created_at,
@@ -609,6 +681,31 @@ async function migrateLegacyTaskRouter({ root, database, busyTimeoutMs }) {
   } finally {
     await legacy.close();
   }
+}
+
+function refreshTaskSessionStateStep(taskId, timestamp) {
+  return {
+    mode: "run",
+    sql: `
+      UPDATE task_router_tasks
+      SET owner_session_id = (
+            SELECT session_id FROM task_router_sessions
+            WHERE task_id = task_router_tasks.id
+            ORDER BY updated_at DESC, session_id
+            LIMIT 1
+          ),
+          detached_at = CASE
+            WHEN status = 'open' AND EXISTS (
+              SELECT 1 FROM task_router_sessions WHERE task_id = task_router_tasks.id
+            ) THEN NULL
+            WHEN status = 'open' THEN COALESCE(detached_at, ?)
+            ELSE detached_at
+          END,
+          updated_at = ?
+      WHERE id = ?
+    `,
+    params: [timestamp, timestamp, taskId]
+  };
 }
 
 function sessionBindingStep(sessionId, taskId, timestamp) {

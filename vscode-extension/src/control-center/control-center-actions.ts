@@ -127,6 +127,26 @@ export class ControlCenterActions {
     await this.store.refresh({ refreshCli: true });
   }
 
+  async closeDetachedTask(taskId: string, workspaceId: string): Promise<void> {
+    this.assertTrusted();
+    const workspace = this.workspace(workspaceId);
+    const task = this.store.current.tasks.find((item) => item.id === taskId);
+    if (!task || !task.workspaceIds.includes(workspace.id)) {
+      throw new Error("This task is no longer available in the selected workspace.");
+    }
+    if (task.status !== "open" || task.sessionBound !== false) {
+      throw new Error("This task is no longer detached.");
+    }
+    const answer = await vscode.window.showWarningMessage(
+      `Close detached task “${task.title}”? It can no longer be resumed, but its activity, Review Changes history, snapshots and Undo remain available.`,
+      { modal: true },
+      "Close Detached Task",
+    );
+    if (answer !== "Close Detached Task") return;
+    await this.connection.client.closeDetachedTask(task.id, workspace.id);
+    await this.store.refresh({ refreshCli: true });
+  }
+
   async deleteTask(taskId: string, workspaceId: string): Promise<void> {
     this.assertTrusted();
     const workspace = this.workspace(workspaceId);

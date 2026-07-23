@@ -13,6 +13,7 @@ export function createChangeRoutes({
   getPrimaryWorkspaceId,
   getRegistry,
   getTaskRouter,
+  getProcesses,
   maxBodyBytes,
   primaryRoot,
   readJsonBody,
@@ -95,11 +96,49 @@ export function createChangeRoutes({
   }
 
   async function mutateTasks(req, res, url) {
-    if (req.method !== "DELETE") return sendJson(res, 405, { error: "method_not_allowed" });
     const taskRouter = getTaskRouter();
     if (!taskRouter) return sendJson(res, 503, { error: "task_storage_unavailable" });
     const workspaceId = url.searchParams.get("workspace_id") || getPrimaryWorkspaceId();
     try {
+      const closeDetachedMatch = url.pathname.match(/^\/tasks\/([^/]+)\/close-detached$/);
+      if (closeDetachedMatch) {
+        if (req.method !== "POST") return sendJson(res, 405, { error: "method_not_allowed" });
+        const taskId = decodeURIComponent(closeDetachedMatch[1]);
+        const task = await taskRouter.getTaskById(taskId);
+        if (!task.workspace_ids.includes(workspaceId)) {
+          throw new ChangeJournalError("TASK_NOT_FOUND", "Task not found for this workspace.", {}, 404);
+        }
+        const runningProcesses = [...(getProcesses?.()?.values?.() || [])]
+          .filter((process) => process.taskId === task.id && process.status === "running");
+        if (runningProcesses.length) {
+          throw new ChangeJournalError(
+            "TASK_PROCESS_RUNNING",
+            "Stop every running process before closing this detached task.",
+            { task_id: task.id, process_ids: runningProcesses.map((process) => process.id) },
+            409
+          );
+        }
+        const transactions = await getRegistry()?.listTransactionStates({ incompleteOnly: true }) || [];
+        const incompleteTransactions = transactions.filter((transaction) => transaction.task_id === task.id);
+        if (incompleteTransactions.length) {
+          throw new ChangeJournalError(
+            "TASK_TRANSACTION_INCOMPLETE",
+            "Recover incomplete patch transactions before closing this detached task.",
+            { task_id: task.id, transaction_ids: incompleteTransactions.map((transaction) => transaction.id) },
+            409
+          );
+        }
+        const closed = await taskRouter.closeDetachedTask({ taskId: task.id });
+        return sendJson(res, 200, {
+          ok: true,
+          workspace_id: workspaceId,
+          task_id: closed.id,
+          status: closed.status,
+          closed_at: closed.closed_at,
+          closed_reason: closed.closed_reason
+        });
+      }
+      if (req.method !== "DELETE") return sendJson(res, 405, { error: "method_not_allowed" });
       const match = url.pathname.match(/^\/tasks\/([^/]+)$/);
       if (match) {
         const taskId = decodeURIComponent(match[1]);

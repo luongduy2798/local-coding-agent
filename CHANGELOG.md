@@ -15,10 +15,11 @@ All notable changes to Local Coding Agent are documented in this file.
 - Updated Control Center task cards to render the full non-duplicate Agent objective as the first item in the tool timeline, and activity rows to show effective profile, advisory suggestions, phase, redundant calls, cached duplicates, and policy skips without presenting them as tool failures.
 - Added explicit expand/collapse controls to every task with more than three calls: the latest task opens by default but can be collapsed, while older tasks can remain explicitly expanded. Replaced ambiguous circular running icons in task headers and tool calls with animated `RotatingDots` indicators.
 - Added task timing telemetry for total elapsed time, measured LCA tool-handler time, and time between calls so connector/model latency is distinguishable from local tool execution.
-- Kept the user-facing task state model to Running, Completed, and Failed. Internal `INCOMPLETE` close evidence is no longer shown as a fourth task status, while explicit verification results remain visible.
+- Added a user-facing Detached state for open tasks whose MCP session binding is gone. Detached tasks stop accumulating elapsed time, do not show running animation, and can be explicitly closed without deleting Review Changes history; internal `INCOMPLETE` close evidence still collapses into Completed.
 - Tuned `quick_edit` guidance to five discovery calls and nine work calls, excluding `task_open`/`task_close` from the work budget. Budget notices now require stalled discovery rather than firing on call count alone.
 - Removed discovery volume and raw returned-path count as automatic profile-review signals; multi-workspace scope and an explicit persistent plan remain advisory signals.
 - Made repeated close requests with the same closed task token idempotent, and instructed the model to close directly as `incomplete` internally when verification is intentionally skipped instead of issuing two close calls.
+- Added registry schema v7 with durable `detached_at` and `closed_reason` fields, startup cleanup for stale session bindings, multi-session-aware detach handling, and a guarded HTTP action for closing detached tasks while preserving journals, snapshots, and Undo history.
 - Clarified that lint, test, typecheck, build, security audit, and other quality gates run only when explicitly requested; source/diff review remains part of normal mutation work.
 
 ### Catalog and upgrade notes
