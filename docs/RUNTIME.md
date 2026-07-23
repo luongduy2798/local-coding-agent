@@ -35,7 +35,7 @@ Utilities/integration
 skills, notes, figma, lca_input
 ```
 
-The catalog does not change when mode or policy changes. Legacy tool names are not registered or callable; stale clients receive an unknown-tool/catalog-refresh error. `lca_status` reports `catalog_version=7` and `catalog_hash`.
+The catalog does not change when mode or policy changes. Legacy tool names are not registered or callable; stale clients receive an unknown-tool/catalog-refresh error. `lca_status` reports `catalog_version=8` and `catalog_hash`.
 
 After a catalog upgrade:
 
@@ -98,7 +98,9 @@ LCA may report `suggested_profile`, `scope_signal`, and `scope_reasons` from obj
 
 Repeated unchanged discovery calls are fingerprinted. For supported reads, LCA checks the source version before reusing cached evidence; changed files are read again. Repeated requests without new evidence can return advisory notices and eventually a loop guard. A model that genuinely needs a similar read should state the concrete unresolved evidence gap rather than narrating progress through repeated `task_state` calls.
 
-A typical quick edit is `task_open` → one targeted search → one targeted read or `read_many` → optionally one or two evidence-driven discovery calls → model decision → `apply_patch` → source/diff confirmation → `task_close`. Persistent `task_plan`, progress narration, and unrelated `skills` discovery are normally unnecessary for this profile. When verification is intentionally skipped, call `task_close(status=incomplete)` once rather than attempting `complete` and retrying.
+For ChatGPT clients that dynamically load connector tools, every tool description publishes one or more exact `discovery-group:*` tags. The initial `api_tool.list_resources` call must use one routing group: `task-mutation`, `task-investigation`, `task-planning`, `task-code-change`, `task-verification`, `task-process`, `workspace-management`, `change-management`, or `figma-workflow`. Do not invent free-form queries such as `write` and do not silently load the full catalog if a group is missing. A second group is justified only when the requested scope genuinely changes.
+
+A typical quick edit is one `task-mutation` discovery → `workspace_list`/`workspace_select` as needed → `task_open` → targeted read → model decision → `apply_patch` → `review_diff` → `task_close`. Persistent `task_plan`, progress narration, and unrelated `skills` discovery are normally unnecessary for this profile. Lint, test, typecheck, build, security audit, and other quality gates run only when explicitly requested. When they are not requested, call `task_close(status=incomplete)` once as an internal evidence state; the companion UI presents successfully closed work as Completed.
 
 Every path returned by runtime coding tools is qualified by `workspace_id` and is relative to that workspace. Two sessions can therefore work on different repositories concurrently without changing each other's reads, writes, process handles, journals, or task selection.
 

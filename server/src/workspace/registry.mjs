@@ -888,6 +888,47 @@ export class WorkspaceRegistry {
     return this.#persistSelection(requested, selectedScope);
   }
 
+  async claimWorkspaceSelection(workspaceId, { scope = DEFAULT_SELECTION_SCOPE } = {}) {
+    this.#assertOpen();
+    const id = validateWorkspaceId(workspaceId);
+    const selectedScope = validateScope(scope);
+    const requested = await this.getWorkspace(id, { refreshAvailability: true });
+    if (requested.availability !== "available") {
+      throw new WorkspaceRegistryError(
+        "WORKSPACE_UNAVAILABLE",
+        `Workspace is unavailable: ${requested.canonicalRoot}`,
+        { workspaceId: id, root: requested.canonicalRoot }
+      );
+    }
+    const timestamp = nowIso();
+    const claimed = await this.#database.get(
+      `
+        INSERT INTO workspace_selections(scope, workspace_id, selected_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(scope) DO UPDATE SET
+          selected_at = workspace_selections.selected_at
+        RETURNING workspace_id, selected_at
+      `,
+      [selectedScope, requested.id, timestamp]
+    );
+    if (claimed?.workspace_id !== requested.id) {
+      throw new WorkspaceRegistryError(
+        "WORKSPACE_SELECTION_SCOPE_CONFLICT",
+        "This workspace selection scope is already pinned to another workspace.",
+        {
+          scope: selectedScope,
+          requestedWorkspaceId: requested.id,
+          selectedWorkspaceId: claimed?.workspace_id || null
+        }
+      );
+    }
+    return {
+      workspace: requested,
+      scope: selectedScope,
+      created: claimed?.selected_at === timestamp
+    };
+  }
+
   async getSelectedWorkspace({ scope = DEFAULT_SELECTION_SCOPE } = {}) {
     this.#assertOpen();
     const selectedScope = validateScope(scope);

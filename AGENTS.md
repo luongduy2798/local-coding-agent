@@ -66,6 +66,7 @@ lca doctor
 - Không dùng OAuth.
 - Không nhập Runtime API key vào connector auth; key này nằm trong `.env.local` cho local tunnel-client.
 - Verify bằng cách hỏi ChatGPT `call lca`; prompt này phải gọi `lca_status`.
+- Khi dynamic discovery, chọn đúng một exact query `discovery-group:*` theo routing instructions; không tự nghĩ query như `write`/`edit`, không gọi catalog thiếu query và không fallback toàn bộ tool khi group bị thiếu.
 - Chỉ gọi `lca_input` khi cần mở rõ Apps SDK widget/composer/PiP.
 
 Chi tiết: [docs/CHATGPT_WEB_CONNECTOR.md](docs/CHATGPT_WEB_CONNECTOR.md).
@@ -76,7 +77,8 @@ Chi tiết: [docs/CHATGPT_WEB_CONNECTOR.md](docs/CHATGPT_WEB_CONNECTOR.md).
 - `objective` là bản tóm tắt trung thực behavior và constraint; `title` chỉ là nhãn UI ngắn.
 - LCA không hiểu intent như model và không được tự đổi `effective_profile`. `suggested_profile`, `scope_signal` và `scope_reasons` chỉ là telemetry/advisory dựa trên tool evidence.
 - Chỉ gọi `task_reclassify` sau khi agent tự đánh giá context và xác nhận profile mới, luôn kèm lý do cụ thể.
-- Với `quick_edit`, ưu tiên flow ngắn: mở task, tìm đúng vị trí, đọc evidence mục tiêu, quyết định nội bộ, patch, xác nhận và đóng task. Không mặc định gọi `task_plan`, kể tiến độ bằng `task_state`, hoặc list `skills`.
+- Với `quick_edit`, ưu tiên flow ngắn: discovery `task-mutation` một lần, mở task, đọc evidence mục tiêu, quyết định nội bộ, patch, review diff và đóng task. Không mặc định gọi `task_plan`, kể tiến độ bằng `task_state`, hoặc list `skills`.
+- Lint, test, typecheck, build, security audit và format chỉ chạy khi user yêu cầu trực tiếp. Nếu không được yêu cầu, đóng task ngay sau source/diff review; `incomplete` chỉ là evidence state nội bộ, UI vẫn hiển thị Completed.
 - Soft budget chỉ tạo cảnh báo. Không được coi việc vượt budget là bằng chứng đủ để đổi profile, dừng task hoặc ép mutation.
 - Không đọc/search lặp cùng evidence nếu không có câu hỏi mới. Khi cần đọc tương tự, nêu rõ evidence gap cụ thể.
 

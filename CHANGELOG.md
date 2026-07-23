@@ -13,13 +13,17 @@ All notable changes to Local Coding Agent are documented in this file.
 - Added `task_reclassify`, which changes the effective profile only after the model explicitly confirms the decision and provides a reason.
 - Updated model instructions so quick edits normally avoid persistent plans, progress narration, unrelated skill discovery, and repeated unchanged reads.
 - Updated Control Center task cards and activity rows to show effective profile, advisory suggestions, phase, redundant calls, cached duplicates, and policy skips without presenting them as tool failures.
+- Added task timing telemetry for total elapsed time, measured LCA tool-handler time, and time between calls so connector/model latency is distinguishable from local tool execution.
+- Kept the user-facing task state model to Running, Completed, and Failed. Internal `INCOMPLETE` close evidence is no longer shown as a fourth task status, while explicit verification results remain visible.
 - Tuned `quick_edit` guidance to five discovery calls and nine work calls, excluding `task_open`/`task_close` from the work budget. Budget notices now require stalled discovery rather than firing on call count alone.
 - Removed discovery volume and raw returned-path count as automatic profile-review signals; multi-workspace scope and an explicit persistent plan remain advisory signals.
-- Made repeated close requests with the same closed task token idempotent, and instructed the model to close directly as `incomplete` when verification is intentionally skipped instead of issuing two close calls.
+- Made repeated close requests with the same closed task token idempotent, and instructed the model to close directly as `incomplete` internally when verification is intentionally skipped instead of issuing two close calls.
+- Clarified that lint, test, typecheck, build, security audit, and other quality gates run only when explicitly requested; source/diff review remains part of normal mutation work.
 
 ### Catalog and upgrade notes
 
-- Added `task_reclassify` to the fixed model-visible catalog, raising the catalog to 36 tools and `catalog_version=7`.
+- Added `task_reclassify` to the fixed model-visible catalog and added exact discovery-group tags for task mutation, investigation, planning, code change, verification, process, workspace, history, and Figma workflows. The fixed catalog remains 36 tools and is now `catalog_version=8`.
+- Added connector routing instructions that require one exact initial discovery group, reject free-form queries such as `write`, and forbid silent fallback to the full catalog.
 - Refresh the ChatGPT custom MCP connector and open a new chat after upgrading so the new schema and orchestration instructions are loaded.
 
 ## [5.0.0-pro] - 2026-07-22

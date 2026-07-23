@@ -4,6 +4,7 @@
 
 import { randomUUID } from "node:crypto";
 import { TaskRouterError } from "../workspace/task-router.mjs";
+import { withDiscoveryGroups } from "./discovery-groups.mjs";
 import {
   advanceTaskOrchestration,
   inspectTaskTool,
@@ -132,7 +133,7 @@ export function createToolRegistrar({
   }
 
   return function reg(mcp, name, definition, handler) {
-    mcp.registerTool(name, definition, async (args, extra) => {
+    mcp.registerTool(name, withDiscoveryGroups(name, definition), async (args, extra) => {
       const startedAt = isoNow();
       const startedMs = performance.now();
       const invocationId = randomUUID();

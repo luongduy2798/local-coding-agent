@@ -4,6 +4,7 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { compactWorkspaceSnapshotForBudget, focusedWorkspaceEvidence } from "../coding/context-evidence.mjs";
+import { discoveryRoutingInstructions } from "./discovery-groups.mjs";
 import {
   attachContext,
   compareSearchMatch,
@@ -375,14 +376,15 @@ function serverInstructions(policy) {
   return [
     "Local Coding Agent is task-scoped and may operate across explicitly attached workspaces. File tools are root-confined; command execution is audited but is not an OS sandbox.",
     "ENTRYPOINT: a bare `lca` or `call lca` request means lca_status. Use lca_input only when the user explicitly asks for the input widget, composer or PiP.",
-    "START: call workspace_list, optionally workspace_select for future tasks, then task_open with a concise objective and model-selected complexity_hint. workspace_select never reroutes an existing task. A task has one primary workspace and at most eight attached workspaces.",
+    discoveryRoutingInstructions(),
+    "START: for a new conversation, call workspace_list and pass its selected_workspace_id as primary_workspace_id to the first new task_open. task_open returns conversation_workspace_token; retain and reuse that token for every later new task in the same conversation, even if the global selected workspace changes. Separate conversations use separate tokens. Never replace a conversation token by rereading the default workspace; an unknown or mismatched token is a hard stop, not permission to create a new pin. workspace_select affects only future conversations and never reroutes pinned conversations or active tasks. A task has one primary workspace and at most eight attached workspaces.",
     "ISOLATION: every context, mutation, execution and review call belongs to the current task. Attach or detach workspaces before the first mutation; the workspace set freezes afterwards. Never infer another repository. If context is missing or ambiguous, stop on TASK_CONTEXT_REQUIRED.",
     "PATHS: results use {workspace_id,path}; paths are relative to that workspace. Always pass workspace_id when a task contains more than one workspace.",
     "CONTEXT: use the lightest targeted discovery needed for the objective. Use code_query for symbols and references; use search_text/find_files/read_many only for missing evidence. Prefer a few substantial calls, do not repeat unchanged evidence, and provide evidence_gap when a similar call is genuinely needed again.",
     "ORCHESTRATION: the model selects the effective quick_edit, normal or complex profile. LCA only reports advisory suggested_profile and scope_signal from observable tool evidence; it never changes the effective profile automatically. Use task_reclassify with a reason only after the model confirms a profile change. For quick edits, normally skip task_plan, task_state narration and skills.",
-    "MUTATION: use apply_patch with expected_version for related file changes, including cross-workspace batches. A transaction reported in_doubt blocks further mutation until recovery. Shell changes are not atomic or undoable; tracked source changed by a command is marked unmanaged and must be adopted/reviewed.",
-    "VERIFICATION: use run_changed_tests or verify_changes, then review_diff/security_scan as appropriate. PASS or CLEAN is forbidden when any workspace, changed file, transaction, unmanaged change, or required gate is incomplete.",
-    "CLOSING: when verification was intentionally skipped or remains incomplete, call task_close once with status=incomplete. Do not first request complete and then retry. Repeating task_close with the same closed task token is idempotent.",
+    "MUTATION: before apply_patch, open the first task with explicit primary_workspace_id or a later task with the conversation_workspace_token already pinned by the first task. Mutation never auto-creates a task or chooses a fallback workspace. Use apply_patch with expected_version for related file changes, including cross-workspace batches. A transaction reported in_doubt blocks further mutation until recovery. Shell changes are not atomic or undoable; tracked source changed by a command is marked unmanaged and must be adopted/reviewed.",
+    "VERIFICATION: run tests, lint, typecheck, build, security audit and other quality gates only when the user explicitly requests them. Do not add gates solely to obtain PASS. When a gate is requested, PASS or CLEAN is forbidden while any required workspace, changed file, transaction, unmanaged change, or gate remains incomplete.",
+    "CLOSING: after the requested work and source/diff review are complete, close promptly. When verification was not requested or remains incomplete, call task_close once with status=incomplete as an internal evidence state; successfully closed work is still presented as Completed by the companion UI. Do not first request complete and then retry. Repeating task_close with the same closed task token is idempotent.",
     "EXECUTION: reserve run_command/run_commands/process for builds, tests, installs and programs that dedicated tools cannot perform. Set cwd instead of embedding cd, and bound output.",
     policy === "balanced"
       ? "POLICY: risky actions can return Approval required. Use the local approval UI or CLI to review and authorize the exact action."

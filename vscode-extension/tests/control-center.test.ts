@@ -8,6 +8,7 @@ import { filterAuditForRegisteredWorkspaces } from "../src/control-center/contro
 import {
   buildWorkspaceTasks,
   isScrollNearBottom,
+  visibleActivityVerification,
 } from "../src/webview/control-center.js";
 
 const roots = {
@@ -140,6 +141,16 @@ async function main(): Promise<void> {
     ],
   }, [{ id: "ws_aaaaaaaaaaaaaaaa" }]);
   assert.deepEqual(filteredAudit.activities.map((activity) => activity.invocationId), ["kept", "global"]);
+  assert.equal(
+    visibleActivityVerification({ tool: "task_close", verification: "INCOMPLETE" }),
+    null,
+    "internal incomplete close evidence must not become a fourth user-facing task state",
+  );
+  assert.equal(
+    visibleActivityVerification({ tool: "verify_changes", verification: "INCOMPLETE" }),
+    "INCOMPLETE",
+    "explicit verification results must remain visible",
+  );
 
   const taskActivities = [
     {
@@ -222,6 +233,9 @@ async function main(): Promise<void> {
     "activity must stay chronological inside its task",
   );
   assert.deepEqual(workspaceTasks[0].changes.map((change) => change.id), ["change-current"]);
+  assert.equal(workspaceTasks[0].elapsedMs, 3_000);
+  assert.equal(workspaceTasks[0].activeToolTimeMs, 2);
+  assert.equal(workspaceTasks[0].betweenCallsMs, 2_998);
   assert.equal(
     isScrollNearBottom({ scrollHeight: 1_000, scrollTop: 764, clientHeight: 200 }),
     true,

@@ -439,6 +439,9 @@ export interface TaskPresentation {
   toolCallCount: number;
   redundantCallCount: number;
   usefulCallCount: number;
+  elapsedMs: number | null;
+  activeToolTimeMs: number;
+  betweenCallsMs: number | null;
 }
 
 export function buildWorkspaceTasks(
@@ -467,9 +470,8 @@ export function buildWorkspaceTasks(
       const observedFileCount = activities.reduce((count, activity) => count + (activity.fileCount || 0), 0);
       const visibleFileCount = taskChanges.reduce((count, change) => count + change.files.length, 0);
       const latestActivity = [...activities].sort((left, right) => activityTimestamp(right) - activityTimestamp(left))[0];
-      const verification = [...activities]
-        .sort((left, right) => activityTimestamp(right) - activityTimestamp(left))
-        .find((activity) => activity.verification)?.verification || null;
+      const verification = latestVisibleVerification(activities);
+      const timing = taskTiming(task, activities);
       const observedRedundantCallCount = activities.filter(isRedundantActivity).length;
       const orchestrationCalls = task.orchestration?.counters?.total_calls || 0;
       const toolCallCount = Math.max(activities.length, orchestrationCalls);
@@ -490,6 +492,7 @@ export function buildWorkspaceTasks(
         toolCallCount,
         redundantCallCount,
         usefulCallCount: Math.max(0, toolCallCount - redundantCallCount),
+        ...timing,
       };
     })
     .sort(compareTaskFeedItems);
@@ -669,6 +672,12 @@ function TaskBlock({
             {item.runningProcessCount > 0 && <span>{item.runningProcessCount} running process{item.runningProcessCount === 1 ? "" : "es"}</span>}
             {item.toolCallCount > 0 && <span>{item.toolCallCount} call{item.toolCallCount === 1 ? "" : "s"}</span>}
             {item.redundantCallCount > 0 && <span className="redundant-count">{item.redundantCallCount} redundant</span>}
+            {item.elapsedMs !== null && (
+              <span title="Elapsed time from task open to close, or to now while running.">Total {formatDuration(item.elapsedMs)}</span>
+            )}
+            {item.activeToolTimeMs > 0 && (
+              <span title="Measured time inside LCA tool handlers; overlapping calls are counted once.">Tools {formatDuration(item.activeToolTimeMs)}</span>
+            )}
             {item.task.orchestration?.phase && <span>{humanizeTool(item.task.orchestration.phase)}</span>}
             {suggestedProfile && suggestedProfile !== profile && (
               <span className="orchestration-notice" title={item.task.orchestration?.scope_reasons?.join(" · ")}>
@@ -715,7 +724,7 @@ function TaskBlock({
                             ? `Running ${formatDuration(liveDuration(activity))} · started ${relativeTime(activity.startedAt)}`
                             : `${formatDuration(activity.durationMs || 0)} · completed ${relativeTime(activity.finishedAt || activity.startedAt)}`}
                       {isUserVisibleOrchestrationNoticeCode(activity.orchestrationNoticeCode) ? ` · ${activity.orchestrationNoticeCode}` : ""}
-                      {activity.verification ? ` · ${activity.verification}` : ""}
+                      {visibleActivityVerification(activity) ? ` · ${visibleActivityVerification(activity)}` : ""}
                       {activity.errorCode ? ` · ${activity.errorCode}` : ""}
                     </span>
                   </div>
@@ -836,6 +845,9 @@ export function makeUnassignedPresentation(
     toolCallCount: activities.length,
     redundantCallCount: activities.filter(isRedundantActivity).length,
     usefulCallCount: activities.filter((activity) => !isRedundantActivity(activity)).length,
+    elapsedMs: null,
+    activeToolTimeMs: mergedActivityDurationMs(activities),
+    betweenCallsMs: null,
   };
 }
 
@@ -989,7 +1001,80 @@ function taskDisplayStatus(
   if (normalized === "failed") {
     return { label: "Failed", badgeTone: "fail", stateTone: "failed", icon: "warning" };
   }
+  // Internal close evidence such as `incomplete` is intentionally collapsed into
+  // Completed. The task feed exposes only Running, Completed, and Failed.
   return { label: "Completed", badgeTone: "pass", stateTone: "complete", icon: "check" };
+}
+
+export function visibleActivityVerification(
+  activity: Pick<ToolActivityView, "tool" | "verification">,
+): ToolActivityView["verification"] {
+  if (activity.tool === "task_close" && activity.verification === "INCOMPLETE") return null;
+  return activity.verification;
+}
+
+function latestVisibleVerification(activities: ToolActivityView[]): ToolActivityView["verification"] {
+  const latest = [...activities].sort((left, right) => activityTimestamp(right) - activityTimestamp(left));
+  for (const activity of latest) {
+    const verification = visibleActivityVerification(activity);
+    if (verification) return verification;
+  }
+  return null;
+}
+
+function taskTiming(
+  task: ControlTaskView,
+  activities: ToolActivityView[],
+): Pick<TaskPresentation, "elapsedMs" | "activeToolTimeMs" | "betweenCallsMs"> {
+  const activeToolTimeMs = mergedActivityDurationMs(activities);
+  const activityStarts = activities
+    .map((activity) => Date.parse(activity.startedAt))
+    .filter(Number.isFinite);
+  const startedAt = finiteTimestamp(task.createdAt) ?? (activityStarts.length ? Math.min(...activityStarts) : null);
+  const closedAt = finiteTimestamp(task.closedAt) ?? (
+    !isOpenTask(task.status) ? finiteTimestamp(task.updatedAt) : null
+  );
+  const endedAt = closedAt ?? (startedAt !== null ? Date.now() : null);
+  const elapsedMs = startedAt !== null && endedAt !== null
+    ? Math.max(0, endedAt - startedAt)
+    : null;
+  return {
+    elapsedMs,
+    activeToolTimeMs,
+    betweenCallsMs: elapsedMs === null ? null : Math.max(0, elapsedMs - activeToolTimeMs),
+  };
+}
+
+function mergedActivityDurationMs(activities: ToolActivityView[]): number {
+  const now = Date.now();
+  const intervals = activities.flatMap((activity) => {
+    const start = Date.parse(activity.startedAt);
+    if (!Number.isFinite(start)) return [];
+    const finished = finiteTimestamp(activity.finishedAt);
+    const durationEnd = activity.durationMs !== null && Number.isFinite(activity.durationMs)
+      ? start + Math.max(0, activity.durationMs)
+      : null;
+    const end = finished ?? durationEnd ?? (activity.status === "started" ? now : start);
+    return [[start, Math.max(start, end)] as const];
+  }).sort((left, right) => left[0] - right[0]);
+  if (!intervals.length) return 0;
+  let total = 0;
+  let [rangeStart, rangeEnd] = intervals[0];
+  for (const [start, end] of intervals.slice(1)) {
+    if (start <= rangeEnd) {
+      rangeEnd = Math.max(rangeEnd, end);
+      continue;
+    }
+    total += rangeEnd - rangeStart;
+    rangeStart = start;
+    rangeEnd = end;
+  }
+  return total + (rangeEnd - rangeStart);
+}
+
+function finiteTimestamp(value: string | null | undefined): number | null {
+  const timestamp = Date.parse(value || "");
+  return Number.isFinite(timestamp) ? timestamp : null;
 }
 
 function isUserVisibleOrchestrationNoticeCode(code: string | null | undefined): boolean {

@@ -39,7 +39,7 @@ Các bước:
    `lca stop`. Không kỳ vọng root/PID/task từ `/healthz`, không in instance nonce;
    `/healthz/details` chỉ dành cho local companion đã xác thực.
 9. Hướng dẫn tạo ChatGPT connector với `No auth`, refresh connector nếu nó
-   từng dùng legacy, mở chat mới và gọi `lca_status` để xác minh `catalog_version=7`.
+   từng dùng legacy, mở chat mới và gọi `lca_status` để xác minh `catalog_version=8`.
 ```
 
 ## Setup Map

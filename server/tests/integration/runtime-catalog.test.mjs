@@ -20,6 +20,7 @@ const EXPECTED_TOOLS = [
   "workspace_attach",
   "workspace_detach",
   "task_open",
+  "task_reclassify",
   "task_state",
   "task_plan",
   "task_checkpoint",
@@ -54,7 +55,7 @@ const EXPECTED_CATALOG_HASH = createHash("sha256")
   .update([...EXPECTED_TOOLS].sort().join("\n"))
   .digest("hex")
   .slice(0, 16);
-const MAX_TOOLS_LIST_BYTES = 25_000;
+const MAX_TOOLS_LIST_BYTES = 30_000;
 const PROTOCOL_VERSION = "2025-06-18";
 
 const context = await createIsolatedTestRoot({
@@ -108,6 +109,10 @@ try {
   const instructions = String(initialized.message?.result?.instructions || "");
   assert.match(instructions, /task_open/);
   assert.match(instructions, /workspace_set|workspace set/i);
+  assert.match(instructions, /discovery-group:task-mutation/);
+  assert.match(instructions, /discovery-group:task-planning/);
+  assert.match(instructions, /Do not invent free-form discovery queries/);
+  assert.match(instructions, /do not fall back to the full catalog/i);
   assert.doesNotMatch(instructions, /\bworkspace_doctor\b|\brepo_symbols\b|\bsession_report\b|\brequest_approval\b/);
 
   await rpc(runtime.port, {
@@ -126,16 +131,39 @@ try {
   const tools = listed.message?.result?.tools;
   assert.ok(Array.isArray(tools), "tools/list must return a tools array");
   const names = tools.map((tool) => tool.name);
-  assert.equal(names.length, 35, `expected 35 production tools, received ${names.length}`);
+  assert.equal(names.length, 36, `expected 36 production tools, received ${names.length}`);
   assert.deepEqual([...names].sort(), [...EXPECTED_TOOLS].sort());
+  for (const tool of tools) {
+    assert.match(tool.description || "", /discovery-group:/, `${tool.name} must publish a discovery group tag`);
+  }
+  const mutationTools = tools
+    .filter((tool) => String(tool.description || "").includes("discovery-group:task-mutation"))
+    .map((tool) => tool.name)
+    .sort();
+  assert.deepEqual(mutationTools, [
+    "apply_patch",
+    "change_history",
+    "read_file",
+    "review_diff",
+    "task_checkpoint",
+    "task_close",
+    "task_open",
+    "workspace_list",
+    "workspace_select"
+  ].sort());
+  assert.equal(
+    tools.find((tool) => tool.name === "apply_patch")?.description?.includes("discovery-group:task-planning"),
+    false,
+    "planning-only discovery must not load mutation tools"
+  );
   assert.ok(
     listed.bytes < MAX_TOOLS_LIST_BYTES,
     `tools/list raw payload is ${listed.bytes} bytes; budget is < ${MAX_TOOLS_LIST_BYTES} bytes`
   );
   const compressedCatalogBytes = brotliCompressSync(Buffer.from(JSON.stringify(listed.message))).byteLength;
   assert.ok(
-    compressedCatalogBytes < 6_000,
-    `tools/list compressed payload is ${compressedCatalogBytes} bytes; budget is < 6000 bytes`
+    compressedCatalogBytes < 7_000,
+    `tools/list compressed payload is ${compressedCatalogBytes} bytes; budget is < 7000 bytes`
   );
 
   const statusResponse = await rpc(runtime.port, {
@@ -149,7 +177,7 @@ try {
   assert.equal(toolResult?.isError, undefined, toolResult?.content?.[0]?.text || "lca_status failed");
   const status = JSON.parse(toolResult?.content?.[0]?.text || "{}");
   assert.equal(status.tool_catalog, "fixed");
-  assert.equal(status.catalog_version, 5);
+  assert.equal(status.catalog_version, 8);
   assert.equal(status.catalog_hash, EXPECTED_CATALOG_HASH);
   assert.equal(status.multi_workspace.evicting_runtime_count, 0);
   const initialWorkspaceList = await callTool(runtime.port, sessionId, 31, "workspace_list", {});

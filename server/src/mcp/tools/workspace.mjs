@@ -2,11 +2,52 @@
 // Copyright (c) 2026 Lương Duy
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+import { createHash, randomBytes } from "node:crypto";
 import { realpath } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import { WorkspaceRegistryError } from "../../workspace/registry.mjs";
 import { confirmTaskComplexity } from "../../workspace/task-orchestration.mjs";
+
+const CONVERSATION_WORKSPACE_TOKEN_PATTERN = /^cws_[A-Za-z0-9_-]{32,160}$/;
+
+function createConversationWorkspaceToken() {
+  return `cws_${randomBytes(32).toString("base64url")}`;
+}
+
+function normalizeConversationWorkspaceToken(value) {
+  const token = String(value || "").trim();
+  if (!token) return null;
+  if (!CONVERSATION_WORKSPACE_TOKEN_PATTERN.test(token)) {
+    throw new WorkspaceRegistryError(
+      "WORKSPACE_CONVERSATION_TOKEN_INVALID",
+      "Invalid conversation workspace token."
+    );
+  }
+  return token;
+}
+
+function conversationWorkspaceScope(token) {
+  const digest = createHash("sha256").update(token).digest("hex");
+  return `conversation:${digest}`;
+}
+
+async function getConversationWorkspace(registry, token) {
+  return registry.getSelectedWorkspace({ scope: conversationWorkspaceScope(token) });
+}
+
+function assertConversationWorkspaceMatch(selection, workspaceId) {
+  if (selection.workspace.id !== workspaceId) {
+    throw new WorkspaceRegistryError(
+      "WORKSPACE_CONVERSATION_MISMATCH",
+      "The conversation workspace token is pinned to a different workspace.",
+      {
+        pinnedWorkspaceId: selection.workspace.id,
+        requestedWorkspaceId: workspaceId
+      }
+    );
+  }
+}
 
 export function registerWorkspaceTools(mcp, dependencies) {
   const {
@@ -29,7 +70,6 @@ export function registerWorkspaceTools(mcp, dependencies) {
     modelSafeWatcherStatus,
     pageMetadata,
     pageScope,
-    primaryWorkspaceId,
     reg,
     registry,
     sanitizeGraphSnapshot,
@@ -43,27 +83,43 @@ export function registerWorkspaceTools(mcp, dependencies) {
     "workspace_list",
     {
       title: "List workspaces",
-      description: "List registered workspaces and their availability without silently falling back to another root.",
-      inputSchema: {}
+      description: "List registered workspaces and their availability. Pass conversation_workspace_token to resolve the workspace already pinned for that conversation instead of reading the current default.",
+      inputSchema: {
+        conversation_workspace_token: z.string().min(1).max(200).optional()
+      }
     },
-    async () => {
+    async ({ conversation_workspace_token }) => {
       if (!registry) throw new Error(`Multi-workspace storage unavailable: ${storageError?.message || "unknown error"}`);
       const workspaces = await registry.listWorkspaces();
+      const conversationToken = normalizeConversationWorkspaceToken(conversation_workspace_token);
       const sessionId = currentMcpSessionId();
-      let selected = await registry.getSelectedWorkspace({
-        scope: sessionId ? `session:${sessionId}` : "default",
-        fallback: false
-      }).catch(() => null);
-      if (!selected && sessionId) {
+      let selected = null;
+      if (conversationToken) {
+        selected = await getConversationWorkspace(registry, conversationToken);
+        if (!selected) {
+          throw new WorkspaceRegistryError(
+            "WORKSPACE_CONVERSATION_TOKEN_UNKNOWN",
+            "The conversation workspace token is not registered."
+          );
+        }
+      } else {
         selected = await registry.getSelectedWorkspace({
-          scope: "default",
+          scope: sessionId ? `session:${sessionId}` : "default",
           fallback: false
         }).catch(() => null);
+        if (!selected && sessionId) {
+          selected = await registry.getSelectedWorkspace({
+            scope: "default",
+            fallback: false
+          }).catch(() => null);
+        }
       }
       return jsonResult({
         count: workspaces.length,
         selected_workspace_id: selected?.workspace?.id || null,
         selected_workspace_scope: selected?.scope || null,
+        selection_source: conversationToken ? "conversation" : selected?.scope || null,
+        conversation_workspace_pinned: Boolean(conversationToken),
         workspaces: workspaces.map((workspace) => ({
           workspace_id: workspace.id,
           label: workspace.metadata?.label || path.basename(workspace.canonicalRoot),
@@ -133,7 +189,7 @@ export function registerWorkspaceTools(mcp, dependencies) {
     "workspace_select",
     {
       title: "Select workspace",
-      description: "Select the default workspace for the next task in this MCP session; active tasks are unchanged.",
+      description: "Select the workspace advertised for future conversations. Existing conversation workspace tokens and active tasks are unchanged.",
       inputSchema: { workspace_id: z.string().min(1) }
     },
     async ({ workspace_id }) => {
@@ -158,40 +214,69 @@ export function registerWorkspaceTools(mcp, dependencies) {
     "task_open",
     {
       title: "Open task",
-      description: "Open or resume a task. Provide a concise objective and a model-selected complexity_hint; title is only a short UI label. LCA may report advisory scope signals but does not change the effective profile automatically.",
+      description: "Open or resume a task with conversation-scoped workspace isolation. For the first new task in a conversation, pass primary_workspace_id and omit conversation_workspace_token; the response creates a token pinned to that workspace. For later new tasks, reuse the token so global default changes cannot reroute the conversation.",
       inputSchema: {
         objective: z.string().max(4000).optional().describe("Concise task objective preserving the user's requested behavior and constraints; do not include unrelated conversation text."),
         title: z.string().max(180).optional().describe("Optional short UI label. Defaults from objective when omitted."),
         complexity_hint: z.enum(["quick_edit", "normal", "complex"]).optional().describe("Model-selected effective complexity. Defaults to normal when omitted."),
         complexity_override: z.boolean().optional().describe("Compatibility field; LCA no longer changes the effective profile automatically."),
-        primary_workspace_id: z.string().optional(),
+        primary_workspace_id: z.string().min(1).optional().describe("Required for the first new task unless conversation_workspace_token already resolves a pinned workspace. If both are provided, they must match."),
+        conversation_workspace_token: z.string().min(1).max(200).optional().describe("Opaque token returned by the first task_open in this conversation. Reuse it for every later new task to retain the pinned workspace."),
         attached_workspace_ids: z.array(z.string()).max(8).optional(),
         task_token: z.string().optional().describe("Resume an existing task after reconnect.")
       }
     },
-    async ({ objective, title, complexity_hint, complexity_override = false, primary_workspace_id, attached_workspace_ids = [], task_token }) => {
+    async ({ objective, title, complexity_hint, complexity_override = false, primary_workspace_id, conversation_workspace_token, attached_workspace_ids = [], task_token }) => {
       if (!taskRouter || !registry) {
         throw new Error(`Multi-workspace task storage unavailable: ${storageError?.message || "unknown error"}`);
       }
       const sessionId = currentMcpSessionId();
+      let conversationToken = normalizeConversationWorkspaceToken(conversation_workspace_token);
       if (task_token) {
         const resumed = await taskRouter.resumeTask({ taskToken: task_token, sessionId });
-        return jsonResult({ ok: true, resumed: true, task: await taskOpenPayload(resumed) });
-      }
-      let primaryId = primary_workspace_id;
-      if (!primaryId) {
-        let selected = await registry.getSelectedWorkspace({
-          scope: sessionId ? `session:${sessionId}` : "default",
-          fallback: false
-        }).catch(() => null);
-        if (!selected && sessionId) {
-          selected = await registry.getSelectedWorkspace({
-            scope: "default",
-            fallback: false
-          }).catch(() => null);
+        if (conversationToken) {
+          const pinned = await getConversationWorkspace(registry, conversationToken);
+          if (!pinned) {
+            throw new WorkspaceRegistryError(
+              "WORKSPACE_CONVERSATION_TOKEN_UNKNOWN",
+              "The conversation workspace token is not registered."
+            );
+          }
+          assertConversationWorkspaceMatch(pinned, resumed.primary_workspace_id);
         }
-        primaryId = selected?.workspace?.id || primaryWorkspaceId;
+        return jsonResult({
+          ok: true,
+          resumed: true,
+          ...(conversationToken ? {
+            conversation_workspace_token: conversationToken,
+            conversation_workspace_id: resumed.primary_workspace_id
+          } : {}),
+          task: await taskOpenPayload(resumed)
+        });
       }
+
+      let primaryId = primary_workspace_id || null;
+      let pinnedSelection = null;
+      if (conversationToken) {
+        pinnedSelection = await getConversationWorkspace(registry, conversationToken);
+        if (!pinnedSelection) {
+          throw new WorkspaceRegistryError(
+            "WORKSPACE_CONVERSATION_TOKEN_UNKNOWN",
+            "The conversation workspace token is not registered.",
+            { guidance: "Do not replace or recreate an unknown token. For a new conversation, omit the token and pass primary_workspace_id." }
+          );
+        }
+        if (primaryId) assertConversationWorkspaceMatch(pinnedSelection, primaryId);
+        primaryId = pinnedSelection.workspace.id;
+      }
+      if (!primaryId) {
+        throw new WorkspaceRegistryError(
+          "TASK_CONTEXT_REQUIRED",
+          "A new task requires either primary_workspace_id or a registered conversation_workspace_token.",
+          { guidance: "Call workspace_list for a new conversation, then pass its selected_workspace_id as primary_workspace_id." }
+        );
+      }
+
       const workspaceIds = dedupe([primaryId, ...attached_workspace_ids]);
       const workspaceBaselines = [];
       for (const workspaceId of workspaceIds) {
@@ -200,6 +285,16 @@ export function registerWorkspaceTools(mcp, dependencies) {
         if (workspace.metadata?.trusted !== true) throw new Error(`Workspace is not explicitly trusted: ${workspaceId}`);
         workspaceBaselines.push(await captureTaskWorkspaceBaseline(workspaceId));
       }
+      if (!conversationToken) {
+        conversationToken = createConversationWorkspaceToken();
+      }
+      if (!pinnedSelection) {
+        const claimed = await registry.claimWorkspaceSelection(primaryId, {
+          scope: conversationWorkspaceScope(conversationToken)
+        });
+        pinnedSelection = claimed;
+      }
+
       const task = await taskRouter.openTask({
         title: title || objective || "LCA task",
         objective,
@@ -210,7 +305,13 @@ export function registerWorkspaceTools(mcp, dependencies) {
         ownerSessionId: sessionId,
         workspaceBaselines
       });
-      return jsonResult({ ok: true, resumed: false, task: await taskOpenPayload(task) });
+      return jsonResult({
+        ok: true,
+        resumed: false,
+        conversation_workspace_token: conversationToken,
+        conversation_workspace_id: primaryId,
+        task: await taskOpenPayload(task)
+      });
     }
   );
 

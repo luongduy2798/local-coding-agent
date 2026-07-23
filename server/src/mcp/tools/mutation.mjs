@@ -67,7 +67,7 @@ function registerFsWriteTools(mcp) {
     "apply_patch",
     {
       title: "Apply patch",
-      description: "Preview, validate, or atomically apply a multi-file create/update/delete/rename/mkdir patch with stale-version checks and all-before/all-after recovery.",
+      description: "Preview, validate, or atomically apply a multi-file create/update/delete/rename/mkdir patch within an already opened task. Requires explicit task context and never auto-selects a fallback workspace.",
       inputSchema: {
         action: z.enum(["apply", "preview", "validate"]).optional(),
         task_title: z.string().min(1).max(180).optional(),
@@ -191,7 +191,13 @@ export async function preparePatchTaskContext({
   freeze = true
 }) {
   let task = await currentTask({ taskToken, required: false });
-  let returnTaskToken = null;
+  if (taskRouter && !task) {
+    throw new TaskRouterError(
+      "TASK_CONTEXT_REQUIRED",
+      "Open a task with an explicit primary_workspace_id before applying a patch."
+    );
+  }
+  const returnTaskToken = null;
   let defaultId = defaultWorkspaceId || task?.primary_workspace_id || null;
   if (!defaultId) {
     const selected = await selectWorkspace({ taskToken });
@@ -204,30 +210,6 @@ export async function preparePatchTaskContext({
   const workspaceIds = dedupe(normalized.map((operation) => operation.workspace_id));
 
   if (taskRouter) {
-    if (!task) {
-      if (workspaceIds.length !== 1) {
-        throw new TaskRouterError(
-          "TASK_CONTEXT_REQUIRED",
-          "Open a task and explicitly attach every workspace before applying a cross-workspace patch.",
-          { workspace_ids: workspaceIds }
-        );
-      }
-      const selected = await selectWorkspace({ workspaceId: workspaceIds[0] });
-      if (selected.workspace.availability !== "available" || selected.workspace.metadata?.trusted !== true) {
-        throw new TaskRouterError(
-          "WORKSPACE_NOT_TRUSTED",
-          `Workspace must be available and explicitly trusted: ${workspaceIds[0]}`
-        );
-      }
-      const opened = await taskRouter.openTask({
-        title: taskTitle || "Apply patch",
-        primaryWorkspaceId: workspaceIds[0],
-        ownerSessionId: currentMcpSessionId()
-      });
-      returnTaskToken = opened.task_token;
-      taskToken = opened.task_token;
-      task = opened;
-    }
     for (const workspaceId of workspaceIds) {
       if (!task.workspace_ids.includes(workspaceId)) {
         throw new TaskRouterError(

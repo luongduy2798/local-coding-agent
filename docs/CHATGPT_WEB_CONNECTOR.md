@@ -85,7 +85,9 @@ Trong ChatGPT, hỏi:
 call lca
 ```
 
-Prompt ngắn `call lca` phải chọn `lca_status`. Kết quả phải trả `catalog_version=7`, `catalog_hash`, workspace/task và trạng thái session. Dùng `workspace_list`, sau đó `workspace_select` và `task_open` để bind task mới vào repo trước khi gọi các coding/mutation tool. Khi mở task, ChatGPT chọn `complexity_hint`; LCA chỉ trả scope signal tư vấn và không tự đổi effective profile. Khi phạm vi thực sự thay đổi, ChatGPT xác nhận bằng `task_reclassify` kèm lý do. Task đang mở không tự đổi theo lần `workspace_select` sau đó.
+Prompt ngắn `call lca` phải chọn `lca_status`. Kết quả phải trả `catalog_version=8`, `catalog_hash`, workspace/task và trạng thái session. Dùng `workspace_list`, sau đó `workspace_select` và `task_open` để bind task mới vào repo trước khi gọi các coding/mutation tool. Khi mở task, ChatGPT chọn `complexity_hint`; LCA chỉ trả scope signal tư vấn và không tự đổi effective profile. Khi phạm vi thực sự thay đổi, ChatGPT xác nhận bằng `task_reclassify` kèm lý do. Task đang mở không tự đổi theo lần `workspace_select` sau đó.
+
+Khi ChatGPT dùng dynamic tool discovery, request đầu tiên phải dùng đúng một query nhóm chính xác như `discovery-group:task-mutation`, `discovery-group:task-investigation`, `discovery-group:task-planning`, `discovery-group:task-code-change`, `discovery-group:task-verification`, `discovery-group:task-process`, `discovery-group:workspace-management`, `discovery-group:change-management` hoặc `discovery-group:figma-workflow`. Không query tự do kiểu `write`/`edit` và không fallback sang toàn bộ catalog nếu group bị thiếu.
 
 Để kiểm tra Apps SDK và PiP, gọi:
 

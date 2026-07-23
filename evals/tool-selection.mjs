@@ -68,10 +68,10 @@ let runtime = null;
 try {
   const fixedCatalog = await readCatalog();
   const legacyCatalog = [...FROZEN_LEGACY_65].map(frozenLegacyTool);
-  assert.equal(fixedCatalog.length, 35, `Fixed catalog drifted to ${fixedCatalog.length} tools`);
+  assert.equal(fixedCatalog.length, 36, `Fixed catalog drifted to ${fixedCatalog.length} tools`);
   assert.equal(legacyCatalog.length, 65);
 
-  const fixedResult = evaluateCatalog(fixedCatalog, "fixed-35", "expectedFixed");
+  const fixedResult = evaluateCatalog(fixedCatalog, "fixed-36", "expectedFixed");
   const legacyResult = evaluateCatalog(legacyCatalog, "legacy-65", "expectedLegacy");
   const report = {
     eval: "lca-tool-selection",

@@ -1914,9 +1914,11 @@ button {
   display: flex;
   min-width: 0;
   flex-wrap: wrap;
-  gap: 4px 8px;
-  color: var(--vscode-disabledForeground);
-  font-size: 8px;
+  gap: 5px 10px;
+  color: var(--vscode-descriptionForeground);
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 1.35;
 }
 
 .task-card-meta .redundant-count,
