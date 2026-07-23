@@ -74,7 +74,7 @@ Chi tiết: [docs/CHATGPT_WEB_CONNECTOR.md](docs/CHATGPT_WEB_CONNECTOR.md).
 ## Task Orchestration Rules
 
 - Khi mở task, agent phải chọn `complexity_hint`: `quick_edit`, `normal` hoặc `complex`. Nếu chưa đủ căn cứ, dùng `normal` thay vì giao quyết định cho LCA.
-- `objective` là bản tóm tắt trung thực behavior và constraint; `title` chỉ là nhãn UI ngắn.
+- `objective` là metadata tùy chọn, bền vững và hiển thị cho user về kết quả cần đạt cùng constraint riêng của task; không chứa private reasoning, secret, hội thoại không liên quan hoặc policy chung. `title` là nhãn UI ngắn; chỉ truyền title thì objective phải để trống, còn thiếu title có thể sinh title từ objective.
 - LCA không hiểu intent như model và không được tự đổi `effective_profile`. `suggested_profile`, `scope_signal` và `scope_reasons` chỉ là telemetry/advisory dựa trên tool evidence.
 - Chỉ gọi `task_reclassify` sau khi agent tự đánh giá context và xác nhận profile mới, luôn kèm lý do cụ thể.
 - Với `quick_edit`, ưu tiên flow ngắn: discovery `task-mutation` một lần, mở task, đọc evidence mục tiêu, quyết định nội bộ, patch, review diff và đóng task. Không mặc định gọi `task_plan`, kể tiến độ bằng `task_state`, hoặc list `skills`.

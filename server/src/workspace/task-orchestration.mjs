@@ -47,9 +47,10 @@ const EXECUTION_TOOLS = new Set(["git", "run_command", "run_commands", "process"
 const MUTATION_TOOLS = new Set(["apply_patch"]);
 const MAX_RECENT_FINGERPRINTS = 64;
 
-export function normalizeTaskObjective(value, fallback = "") {
-  return String(value || fallback || "")
-    .replace(/\s+/g, " ")
+export function normalizeTaskObjective(value) {
+  if (value === null || value === undefined) return "";
+  return String(value)
+    .replace(/\r\n?/g, "\n")
     .trim()
     .slice(0, 4_000);
 }

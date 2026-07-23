@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import path from "node:path";
+import React from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import * as vscode from "vscode";
 import type { HealthResponse } from "../src/api/api-types.js";
 import { ConnectionManager } from "../src/connection/connection-manager.js";
@@ -7,8 +9,11 @@ import { ReviewChangesStore } from "../src/review-changes/review-changes-store.j
 import { filterAuditForRegisteredWorkspaces } from "../src/control-center/control-center-store.js";
 import {
   buildWorkspaceTasks,
+  ChronologicalTaskFeed,
   isScrollNearBottom,
+  taskActivitiesExpanded,
   visibleActivityVerification,
+  visibleTaskObjective,
 } from "../src/webview/control-center.js";
 
 const roots = {
@@ -151,6 +156,28 @@ async function main(): Promise<void> {
     "INCOMPLETE",
     "explicit verification results must remain visible",
   );
+  assert.equal(
+    visibleTaskObjective({ title: "Title only", objective: null }),
+    null,
+    "tasks without objective must not render an objective block",
+  );
+  assert.equal(
+    visibleTaskObjective({ title: "Legacy duplicate", objective: "Legacy duplicate" }),
+    null,
+    "legacy title/objective duplicates must stay hidden",
+  );
+  assert.equal(
+    visibleTaskObjective({
+      title: "Visible objective",
+      objective: "  Preserve the first line.\nPreserve the second line.  ",
+    }),
+    "Preserve the first line.\nPreserve the second line.",
+    "multiline objectives must remain fully visible",
+  );
+  assert.equal(taskActivitiesExpanded("auto", true), true, "the latest task opens calls by default");
+  assert.equal(taskActivitiesExpanded("auto", false), false, "older tasks collapse calls by default");
+  assert.equal(taskActivitiesExpanded("collapsed", true), false, "users can collapse the latest task");
+  assert.equal(taskActivitiesExpanded("expanded", false), true, "users can keep an older task expanded");
 
   const taskActivities = [
     {
@@ -236,6 +263,65 @@ async function main(): Promise<void> {
   assert.equal(workspaceTasks[0].elapsedMs, 3_000);
   assert.equal(workspaceTasks[0].activeToolTimeMs, 2);
   assert.equal(workspaceTasks[0].betweenCallsMs, 2_998);
+
+  const renderTaskId = "task_renderfeed0001";
+  const renderActivities = [
+    { ...activity("render-open", ["ws_cccccccccccccccc"]), taskId: renderTaskId, tool: "task_open", startedAt: "2026-07-22T03:00:00.000Z", finishedAt: "2026-07-22T03:00:00.010Z" },
+    { ...activity("render-plan", ["ws_cccccccccccccccc"]), taskId: renderTaskId, tool: "task_plan", startedAt: "2026-07-22T03:00:01.000Z", finishedAt: "2026-07-22T03:00:01.010Z" },
+    { ...activity("render-read", ["ws_cccccccccccccccc"]), taskId: renderTaskId, tool: "read_many", startedAt: "2026-07-22T03:00:02.000Z", finishedAt: "2026-07-22T03:00:02.010Z" },
+    {
+      ...activity("render-running", ["ws_cccccccccccccccc"]),
+      taskId: renderTaskId,
+      tool: "search_text",
+      status: "started" as const,
+      ok: null,
+      startedAt: "2026-07-22T03:00:03.000Z",
+      finishedAt: null,
+      durationMs: null,
+    },
+  ];
+  const renderTasks = buildWorkspaceTasks({
+    tasks: [{
+      id: renderTaskId,
+      title: "Rendered latest task",
+      objective: "Keep the objective visible inside the task timeline.",
+      requestedProfile: "normal",
+      effectiveProfile: "normal",
+      profileConfidence: 1,
+      orchestration: null,
+      status: "open",
+      primaryWorkspaceId: "ws_cccccccccccccccc",
+      workspaceIds: ["ws_cccccccccccccccc"],
+      createdAt: "2026-07-22T03:00:00.000Z",
+      updatedAt: "2026-07-22T03:00:03.000Z",
+      closedAt: null,
+    }],
+    audit: { activities: renderActivities },
+    processes: [],
+  } as never, [], "ws_cccccccccccccccc");
+  const renderedTaskFeed = renderToStaticMarkup(React.createElement(ChronologicalTaskFeed, {
+    tasks: renderTasks,
+    workspaceLabel: "local-coding-agent",
+    workspaceId: "ws_cccccccccccccccc",
+    onDeleteTask: () => undefined,
+    onDeleteAll: () => undefined,
+    renderChanges: () => null,
+  }));
+  const timelineStart = renderedTaskFeed.indexOf("<ol class=\"tool-timeline task-tool-timeline\"");
+  const objectiveIndex = renderedTaskFeed.indexOf("Agent objective");
+  const firstToolIndex = renderedTaskFeed.indexOf("Open task");
+  const timelineEnd = renderedTaskFeed.indexOf("</ol>", timelineStart);
+  assert.ok(
+    timelineStart >= 0 && objectiveIndex > timelineStart && firstToolIndex > objectiveIndex && timelineEnd > firstToolIndex,
+    "the full objective must render as the first item inside the same tool timeline",
+  );
+  assert.match(renderedTaskFeed, /Show fewer calls/, "the latest task must expose its collapse control");
+  assert.equal(
+    renderedTaskFeed.match(/class=\"rotating-dots(?: rotating-dots-compact)?\s*\"/g)?.length,
+    2,
+    "running task and running tool rows must both render RotatingDots",
+  );
+
   assert.equal(
     isScrollNearBottom({ scrollHeight: 1_000, scrollTop: 764, clientHeight: 200 }),
     true,

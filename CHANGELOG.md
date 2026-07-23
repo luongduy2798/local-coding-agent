@@ -8,11 +8,12 @@ All notable changes to Local Coding Agent are documented in this file.
 
 - Added task complexity profiles (`quick_edit`, `normal`, and `complex`) selected by the model when opening a task. When omitted, the runtime defaults the effective profile to `normal`.
 - Added advisory orchestration state with phases, evidence status, soft discovery/total-call budgets, duplicate-call fingerprints, version-checked evidence caching, and repeated-evidence loop guards.
-- Added `objective` as the concise behavior-and-constraints summary for a task while keeping `title` as an optional short UI label.
+- Defined `objective` as optional durable, user-visible task metadata distinct from the short `title`: title-only tasks keep objective null, objective-only tasks derive a title, multiline objective content is preserved, and objective text is not interpreted for complexity classification.
 - Made scope classification advisory-only: LCA records observable `suggested_profile`, `scope_signal`, and reasons, but never changes `effective_profile` automatically.
 - Added `task_reclassify`, which changes the effective profile only after the model explicitly confirms the decision and provides a reason.
 - Updated model instructions so quick edits normally avoid persistent plans, progress narration, unrelated skill discovery, and repeated unchanged reads.
-- Updated Control Center task cards and activity rows to show effective profile, advisory suggestions, phase, redundant calls, cached duplicates, and policy skips without presenting them as tool failures.
+- Updated Control Center task cards to render the full non-duplicate Agent objective as the first item in the tool timeline, and activity rows to show effective profile, advisory suggestions, phase, redundant calls, cached duplicates, and policy skips without presenting them as tool failures.
+- Added explicit expand/collapse controls to every task with more than three calls: the latest task opens by default but can be collapsed, while older tasks can remain explicitly expanded. Replaced ambiguous circular running icons in task headers and tool calls with animated `RotatingDots` indicators.
 - Added task timing telemetry for total elapsed time, measured LCA tool-handler time, and time between calls so connector/model latency is distinguishable from local tool execution.
 - Kept the user-facing task state model to Running, Completed, and Failed. Internal `INCOMPLETE` close evidence is no longer shown as a fourth task status, while explicit verification results remain visible.
 - Tuned `quick_edit` guidance to five discovery calls and nine work calls, excluding `task_open`/`task_close` from the work budget. Budget notices now require stalled discovery rather than firing on call count alone.

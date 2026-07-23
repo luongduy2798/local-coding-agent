@@ -64,6 +64,8 @@ test("TaskRouter locks an explicit multi-workspace set and resumes by token", {
       ]
     });
     assert.ok(opened.task_token);
+    assert.equal(opened.title, "Cross repo");
+    assert.equal(opened.objective, null, "title-only tasks must not duplicate title into objective");
     assert.deepEqual(opened.workspace_ids, ["ws_aaaaaaaaaaaaaaaa", "ws_bbbbbbbbbbbbbbbb"]);
     assert.deepEqual(opened.workspaces[0].baseline, {
       known: true,
@@ -74,6 +76,18 @@ test("TaskRouter locks an explicit multi-workspace set and resumes by token", {
       dirty: { staged: 1, unstaged: 0, untracked: 0 },
       captured_at: "2026-07-17T00:00:00.000Z"
     });
+    const objectiveOnly = await router.openTask({
+      objective: "  Create durable task metadata.\r\nPreserve this second line.  ",
+      primaryWorkspaceId: "ws_aaaaaaaaaaaaaaaa"
+    });
+    assert.equal(objectiveOnly.title, "Create durable task metadata. Preserve this second line.");
+    assert.equal(objectiveOnly.objective, "Create durable task metadata.\nPreserve this second line.");
+    const defaultMetadata = await router.openTask({
+      primaryWorkspaceId: "ws_aaaaaaaaaaaaaaaa"
+    });
+    assert.equal(defaultMetadata.title, "LCA task");
+    assert.equal(defaultMetadata.objective, null);
+
     const bySession = await router.getTask({ sessionId: "session-a" });
     assert.equal(bySession.id, opened.id);
     assert.equal(

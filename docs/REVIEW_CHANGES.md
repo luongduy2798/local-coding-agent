@@ -13,8 +13,9 @@ is allowed only before the first mutation; the workspace set is then frozen. Rec
 the returned `task_token`, while normal stateful MCP requests reuse the session binding.
 
 The MCP contract still contains `task_plan`, but the VS Code extension neither creates, edits nor
-renders it. The Control Center reports only observable runtime state; it never exposes prompts,
-model thinking, or a fabricated completion percentage.
+renders it. The Control Center reports observable runtime state plus the task's explicitly public
+`objective` metadata. Objective is not a prompt or model thinking; prompts, private reasoning and
+fabricated completion percentages are never exposed.
 
 ## Tracked operations
 
@@ -226,13 +227,16 @@ The extension in `vscode-extension/` exposes **Control Center** in the Activity 
 
 - **Overview**: supervisor/server/tunnel/session state and Start/Stop/Pause controls;
 - **Workspaces**: the complete registry, global default, availability and Archive/Restore/Permanent Remove;
-- **Tasks**: real tool start/finish/failure/interruption timers, verification, process and change/file counts;
+- **Tasks**: the public Agent objective followed by real tool start/finish/failure/interruption timers, verification, process and change/file counts;
 - **Changes**: task/workspace-scoped review, snapshot diff and safe replay.
 
 It also:
 
 - uses public `GET /healthz` only for liveness, then authenticates `GET /healthz/details` with the supervisor instance nonce to verify canonical workspace identity;
 - lists task/workspace-scoped cards with workspace badges and task/workspace filters;
+- renders a non-duplicate objective in full as the first task-timeline item rather than as model thinking;
+- opens the latest task's calls by default while retaining a user-controlled Show fewer/earlier calls disclosure for every task with more than three calls;
+- uses animated `RotatingDots` in task headers and individual tool rows so running state remains visually distinct from a static circle;
 - opens before/after snapshots in the native VS Code diff editor;
 - supports task-level Undo/Reapply, per-file Partial Undo/Reapply, Undo All, and Clear History;
 - refreshes the local instance nonce through the explicit `lca status --json --include-instance-nonce` machine-readable flow;
@@ -240,7 +244,7 @@ It also:
 - consumes `/changes/events` revisions—including `workspace_id=all`—while visible, falls back to bounded polling if SSE is unavailable, and reconnects automatically to return to Live;
 - cancels stale requests so an older workspace/task response cannot overwrite a newer selection.
 
-Operational activity comes from the existing rotating runtime `audit.log`, with a seven-day/20,000-event UI bound. The reader handles rotation, partial lines and deduplication. Only invocation/tool/task/workspace IDs, phase, timestamps, duration, safe error code, verification enum and counts are projected; args, commands, output, prompt, token, thinking and error content never enter the webview.
+The displayed objective comes from the durable task record. Operational activity comes separately from the existing rotating runtime `audit.log`, with a seven-day/20,000-event UI bound. The reader handles rotation, partial lines and deduplication. Only invocation/tool/task/workspace IDs, phase, timestamps, duration, safe error code, verification enum and counts are projected from audit data; args, commands, output, prompt, token, thinking and error content never enter the webview.
 
 Archived workspaces stay visible in Workspaces/Tasks and their history remains readable, but replay is disabled until Restore. Permanent Remove uses a durable quarantine/intent transaction, leaves source files untouched, and cannot remove a workspace referenced by multi-workspace task history.
 

@@ -110,7 +110,7 @@ export function registerSystemTools(mcp, dependencies) {
     "task_close",
     {
       title: "Close task",
-      description: "Close the active Review Changes task and return its final summary. When verification was intentionally skipped or remains incomplete, pass status=incomplete directly instead of attempting complete and retrying.",
+      description: "Close the active Review Changes task and return its final summary. When verification evidence is missing, a requested complete close is automatically downgraded to incomplete and completed in the same call.",
       inputSchema: {
         title: z.string().max(180).optional(),
         status: z.enum(["complete", "incomplete", "failed"]).optional(),
@@ -132,7 +132,12 @@ export function registerSystemTools(mcp, dependencies) {
       const hardBlockers = preflight.incomplete_reasons.filter((reason) =>
         ["TASK_PROCESS_RUNNING", "TRANSACTION_IN_DOUBT"].includes(reason)
       );
-      if (!preflight.ok && (status === "complete" || hardBlockers.length > 0)) {
+      const missingVerificationOnly = preflight.incomplete_reasons.length > 0 &&
+        preflight.incomplete_reasons.every((reason) => reason === "VERIFICATION_EVIDENCE_MISSING");
+      const effectiveStatus = status === "complete" && missingVerificationOnly
+        ? "incomplete"
+        : status;
+      if (!preflight.ok && (effectiveStatus === "complete" || hardBlockers.length > 0)) {
         return jsonResult({
           ok: false,
           status: "INCOMPLETE",
@@ -193,6 +198,7 @@ export function registerSystemTools(mcp, dependencies) {
         workspace_ids: [...openTask.workspace_ids],
         completed_workspace_ids: [],
         requested_status: status,
+        effective_status: effectiveStatus,
         status: "committing",
         created_at: isoNow(),
         updated_at: isoNow()
@@ -261,7 +267,7 @@ export function registerSystemTools(mcp, dependencies) {
         routedTask = await taskRouter.closeTask({
           taskToken: task_token,
           sessionId: currentMcpSessionId(),
-          status: status === "failed" ? "failed" : "closed"
+          status: effectiveStatus === "failed" ? "failed" : "closed"
         });
       } catch {
         const rolledBack = await rollbackCompletedTaskJournals(
@@ -291,7 +297,9 @@ export function registerSystemTools(mcp, dependencies) {
       const intentDurable = await atomicWriteJson(intentPath, intent).then(() => true, () => false);
       return jsonResult({
         ok: true,
-        status,
+        status: effectiveStatus,
+        requested_status: status,
+        auto_downgraded: effectiveStatus !== status,
         task: routedTask,
         completion_guard: preflight,
         close_transaction: {

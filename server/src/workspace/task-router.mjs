@@ -49,7 +49,7 @@ export class TaskRouter {
   }
 
   async openTask({
-    title = "LCA task",
+    title,
     objective,
     complexityHint,
     complexityOverride = false,
@@ -64,11 +64,9 @@ export class TaskRouter {
     if (workspaceIds.length > MAX_WORKSPACES_PER_TASK) {
       throw new TaskRouterError("TOO_MANY_WORKSPACES", `A task supports at most ${MAX_WORKSPACES_PER_TASK} workspaces.`);
     }
-    const normalizedObjective = normalizeTaskObjective(objective, title);
+    const normalizedObjective = normalizeTaskObjective(objective);
     const normalizedTitle = normalizeTitle(title || normalizedObjective || "LCA task");
     const classification = classifyTaskComplexity({
-      objective: normalizedObjective,
-      title: normalizedTitle,
       complexityHint,
       complexityOverride,
       workspaceCount: workspaceIds.length

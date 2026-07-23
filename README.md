@@ -121,7 +121,7 @@ lca_input  # chỉ mở Apps SDK widget khi yêu cầu rõ widget/composer/PiP
 
 Mỗi tool có exact `discovery-group:*` tags để dynamic discovery nạp một nhóm workflow trong một lần. ChatGPT không nên tự nghĩ query như `write`/`edit`, gọi catalog không có query, hoặc fallback sang toàn bộ 36 tool khi group bị thiếu.
 
-Trước khi dùng tool đọc/sửa/chạy code, mở context bằng `workspace_select` rồi `task_open`. ChatGPT truyền một `objective` ngắn giữ đủ behavior/constraint, `title` chỉ là nhãn UI tùy chọn, và chọn `complexity_hint` là `quick_edit`, `normal` hoặc `complex`. Nếu không truyền profile, runtime dùng `normal`. Session stateful tự bind vào `task_id`; chỉ dùng lại `task_token` khi reconnect/resume. Nếu thiếu hoặc mơ hồ task context, coding tool fail closed thay vì tự chọn repo.
+Trước khi dùng tool đọc/sửa/chạy code, mở context bằng `workspace_select` rồi `task_open`. `title` là nhãn UI ngắn. `objective` là metadata tùy chọn, bền vững và hiển thị cho user về kết quả cần đạt cùng constraint riêng của task; không dùng nó làm private reasoning, nơi chứa secret hoặc policy chung. Chỉ truyền title thì objective giữ `null`; thiếu title có thể sinh title từ objective. ChatGPT chọn `complexity_hint` là `quick_edit`, `normal` hoặc `complex`; nếu bỏ qua, runtime dùng `normal`. Session stateful tự bind vào `task_id`; chỉ dùng lại `task_token` khi reconnect/resume. Nếu thiếu hoặc mơ hồ task context, coding tool fail closed thay vì tự chọn repo.
 
 ChatGPT là bên quyết định effective profile. LCA chỉ theo dõi các tín hiệu khách quan như số workspace, số discovery call, số path quan sát được và thao tác lặp. Nếu scope có vẻ rộng hơn, response có thể chứa `suggested_profile` và `scope_signal`, nhưng profile không tự đổi. Chỉ khi ChatGPT xác nhận phạm vi thực sự đã thay đổi thì mới gọi `task_reclassify` kèm lý do.
 
@@ -257,7 +257,7 @@ lca extension uninstall
 
 - **Overview** quản lý Start/Stop/Pause monitoring và trạng thái supervisor/server/tunnel/session.
 - **Workspaces** hiển thị toàn bộ registry, đặt default cho task mới, Archive, Restore hoặc Remove permanently.
-- **Tasks** chỉ hiển thị sự kiện vận hành thật: tool đang chạy/duration, kết quả, verification, process và số change/file quan sát được. Nó không hiển thị `task_plan`, prompt hay thinking của model.
+- **Tasks** hiển thị `objective` công khai của agent như metadata đầu tiên trong timeline, sau đó là sự kiện vận hành thật: tool đang chạy/duration, kết quả, verification, process và số change/file quan sát được. Task mới nhất mở danh sách call theo mặc định nhưng vẫn có thể thu gọn; các trạng thái đang chạy dùng `RotatingDots`. View không hiển thị `task_plan`, prompt hay private thinking của model.
 - **Changes** giữ review/diff/Undo/Reapply hiện tại; workspace của repo đang mở trong cửa sổ VS Code được chọn và xếp đầu mặc định, các repo registry khác nằm bên dưới. Mỗi lựa chọn dùng SSE riêng và tự quay lại Live sau polling fallback.
 
 Activity được đọc từ audit log xoay vòng tại `<config-root>/data/runtime/audit.log` (hoặc `<AGENT_DATA_DIR>/runtime/audit.log`), không tạo activity database riêng. Log dành cho UI chỉ chiếu metadata whitelist; không đưa args, command, output, prompt, token hoặc error content vào webview. **Connect current folder** đăng ký repo, đặt nó làm global default cho task mới và start LCA khi cần; nó không đổi primary của task đang chạy.

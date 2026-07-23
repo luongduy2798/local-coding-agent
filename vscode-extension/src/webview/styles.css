@@ -1526,9 +1526,58 @@ button {
   color: var(--vscode-progressBar-background);
 }
 
-.task-state-icon.state-running .icon,
-.timeline-started .timeline-marker .icon {
-  animation: rotate 1.1s linear infinite;
+.rotating-dots {
+  position: relative;
+  display: inline-block;
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  animation: rotating-dots-turn 1.05s linear infinite;
+}
+
+.rotating-dots-compact {
+  width: 11px;
+  height: 11px;
+}
+
+.rotating-dots > span {
+  position: absolute;
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 4px color-mix(in srgb, currentColor 32%, transparent);
+}
+
+.rotating-dots-compact > span {
+  width: 2.5px;
+  height: 2.5px;
+}
+
+.rotating-dots > span:nth-child(1) {
+  top: 0;
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+.rotating-dots > span:nth-child(2) {
+  bottom: 1px;
+  left: 1px;
+}
+
+.rotating-dots > span:nth-child(3) {
+  right: 1px;
+  bottom: 1px;
+}
+
+@keyframes rotating-dots-turn {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rotating-dots {
+    animation-duration: 2.4s;
+  }
 }
 
 .task-state-icon.state-complete {
@@ -1931,6 +1980,39 @@ button {
   max-width: 220px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.task-objective {
+  padding-top: 4px;
+  padding-bottom: 10px;
+}
+
+.task-objective-marker {
+  color: var(--vscode-focusBorder);
+  border-color: color-mix(in srgb, var(--vscode-focusBorder) 48%, var(--vscode-widget-border, var(--vscode-panel-border)));
+}
+
+.task-objective-copy {
+  min-width: 0;
+  padding-top: 1px;
+}
+
+.task-objective-label {
+  display: block;
+  margin-bottom: 3px;
+  color: var(--vscode-descriptionForeground);
+  font-size: 10px;
+  font-weight: 650;
+  line-height: 1.25;
+}
+
+.task-objective p {
+  margin: 0;
+  color: var(--vscode-foreground);
+  font-size: 11px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 
 .inline-changes-panel {

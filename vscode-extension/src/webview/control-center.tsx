@@ -626,6 +626,15 @@ export function ChronologicalTaskFeed({
   );
 }
 
+export type TaskActivityDisclosure = "auto" | "expanded" | "collapsed";
+
+export function taskActivitiesExpanded(
+  disclosure: TaskActivityDisclosure,
+  latest: boolean,
+): boolean {
+  return disclosure === "expanded" || (disclosure === "auto" && latest);
+}
+
 function TaskBlock({
   item,
   latest,
@@ -639,11 +648,11 @@ function TaskBlock({
   onDelete?: () => void;
   renderChanges: (item: TaskPresentation) => React.ReactNode;
 }): React.JSX.Element {
-  const [expanded, setExpanded] = useState(false);
+  const [activityDisclosure, setActivityDisclosure] = useState<TaskActivityDisclosure>("auto");
   const running = item.activities.some((activity) => activity.status === "started");
   const changeCount = item.changes.length;
   const groupedActivities = groupRepeatedActivities(item.activities);
-  const showAllActivities = latest || expanded;
+  const showAllActivities = taskActivitiesExpanded(activityDisclosure, latest);
   const visibleActivities = showAllActivities ? groupedActivities : groupedActivities.slice(-3);
   const hiddenActivityCount = Math.max(0, groupedActivities.length - visibleActivities.length);
   const earlierCallCount = groupedActivities
@@ -654,12 +663,15 @@ function TaskBlock({
   const suggestedProfile = item.task.orchestration?.suggested_profile;
   const notice = item.task.orchestration?.last_notice;
   const showNotice = isUserVisibleOrchestrationNoticeCode(notice?.code);
+  const objective = visibleTaskObjective(item.task);
 
   return (
     <article className={`task-card ${latest ? "is-latest" : ""} ${displayStatus.stateTone === "running" ? "is-running" : ""}`}>
       <div className="task-card-header">
         <span className={`task-state-icon state-${displayStatus.stateTone}`}>
-          <Icon name={displayStatus.icon} />
+          {displayStatus.icon
+            ? <Icon name={displayStatus.icon} />
+            : <RotatingDots label="Task running" />}
         </span>
         <div className="task-card-copy">
           <div className="task-card-title-row">
@@ -701,14 +713,27 @@ function TaskBlock({
         )}
       </div>
 
-      {(latest || groupedActivities.length > 0) && (
+      {(objective || latest || groupedActivities.length > 0) && (
         <div className="task-activity">
-          {visibleActivities.length > 0 ? (
+          {(objective || visibleActivities.length > 0) ? (
             <ol className="tool-timeline task-tool-timeline" id={`task-activity-${item.task.id}`}>
+              {objective && (
+                <li className="timeline-item task-objective" aria-label="Agent objective">
+                  <span className="timeline-marker task-objective-marker" aria-hidden="true">
+                    <Icon name="task" />
+                  </span>
+                  <div className="task-objective-copy">
+                    <strong className="task-objective-label">Agent objective</strong>
+                    <p>{objective}</p>
+                  </div>
+                </li>
+              )}
               {visibleActivities.map((activity) => (
                 <li className={`timeline-item timeline-${activity.status} ${activity.policySkip ? "timeline-skipped" : ""} ${activity.duplicate ? "timeline-duplicate" : ""}`} key={activity.invocationId}>
                   <span className="timeline-marker">
-                    <Icon name={activity.status === "started" ? "spinner" : activity.status === "finished" ? "check" : "warning"} />
+                    {activity.status === "started"
+                      ? <RotatingDots compact label={`${activityLabel(activity.tool)} running`} />
+                      : <Icon name={activity.status === "finished" ? "check" : "warning"} />}
                   </span>
                   <div className="timeline-copy">
                     <strong>{activityLabel(activity.tool)}{activity.repeatCount > 1 ? ` ×${activity.repeatCount}` : ""}</strong>
@@ -730,21 +755,21 @@ function TaskBlock({
                   </div>
                 </li>
               ))}
-              {!latest && groupedActivities.length > 3 && (
+              {groupedActivities.length > 3 && (
                 <li className="task-summary-item">
                   <button
                     className="task-summary-button"
                     type="button"
                     aria-controls={`task-activity-${item.task.id}`}
-                    aria-expanded={expanded}
-                    onClick={() => setExpanded((value) => !value)}
+                    aria-expanded={showAllActivities}
+                    onClick={() => setActivityDisclosure(showAllActivities ? "collapsed" : "expanded")}
                   >
                     <span className="timeline-marker task-summary-marker" aria-hidden="true">
-                      {expanded ? "−" : "+"}
+                      {showAllActivities ? "−" : "+"}
                     </span>
                     <span className="timeline-copy">
                       <strong>
-                        {expanded
+                        {showAllActivities
                           ? "Show fewer calls"
                           : `${earlierCallCount} earlier call${earlierCallCount === 1 ? "" : "s"}`}
                       </strong>
@@ -768,6 +793,14 @@ function TaskBlock({
       )}
     </article>
   );
+}
+
+export function visibleTaskObjective(
+  task: Pick<ControlTaskView, "title" | "objective">,
+): string | null {
+  const objective = task.objective?.trim();
+  if (!objective || objective === task.title.trim()) return null;
+  return objective;
 }
 
 export function activityLabel(tool: string): string {
@@ -855,6 +888,26 @@ export function Badge({ value, tone = "" }: { value: string; tone?: string }): R
   return <span className={`control-badge ${tone}`}>{value}</span>;
 }
 
+export function RotatingDots({
+  label = "Running",
+  compact = false,
+}: {
+  label?: string;
+  compact?: boolean;
+}): React.JSX.Element {
+  return (
+    <span
+      className={`rotating-dots ${compact ? "rotating-dots-compact" : ""}`}
+      role="status"
+      aria-label={label}
+    >
+      <span aria-hidden="true" />
+      <span aria-hidden="true" />
+      <span aria-hidden="true" />
+    </span>
+  );
+}
+
 export type IconName =
   | "archive"
   | "arrowLeft"
@@ -866,7 +919,6 @@ export type IconName =
   | "plug"
   | "refresh"
   | "restore"
-  | "spinner"
   | "star"
   | "starFilled"
   | "stop"
@@ -916,7 +968,6 @@ export function Icon({ name }: { name: IconName }): React.JSX.Element {
     plug: <><path d="M8 3v4M12 3v4M6 7h8v2a4 4 0 0 1-4 4v4M7 17h6"/></>,
     refresh: <><path d="M15 6V3l3 3-3 3V6a6 6 0 1 0 1 7"/></>,
     restore: <><path d="M4 5v4h4"/><path d="M5 8a6 6 0 1 1 1 6"/></>,
-    spinner: <><circle cx="10" cy="10" r="6"/><path d="M10 4a6 6 0 0 1 6 6"/></>,
     star: <path d="m10 3 2.1 4.3 4.7.7-3.4 3.3.8 4.7-4.2-2.2L5.8 16l.8-4.7L3.2 8l4.7-.7L10 3Z"/>,
     starFilled: <path fill="currentColor" d="m10 3 2.1 4.3 4.7.7-3.4 3.3.8 4.7-4.2-2.2L5.8 16l.8-4.7L3.2 8l4.7-.7L10 3Z"/>,
     stop: <rect x="5" y="5" width="10" height="10" rx="1"/>,
@@ -993,10 +1044,10 @@ function profileLabel(profile: "quick_edit" | "normal" | "complex"): string {
 function taskDisplayStatus(
   status: string,
   hasRunningActivity: boolean,
-): { label: string; badgeTone: string; stateTone: "running" | "complete" | "failed"; icon: IconName } {
+): { label: string; badgeTone: string; stateTone: "running" | "complete" | "failed"; icon: IconName | null } {
   const normalized = status.toLowerCase();
   if (hasRunningActivity || isOpenTask(normalized)) {
-    return { label: "Running", badgeTone: "accent", stateTone: "running", icon: "spinner" };
+    return { label: "Running", badgeTone: "accent", stateTone: "running", icon: null };
   }
   if (normalized === "failed") {
     return { label: "Failed", badgeTone: "fail", stateTone: "failed", icon: "warning" };

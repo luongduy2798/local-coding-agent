@@ -216,8 +216,8 @@ export function registerWorkspaceTools(mcp, dependencies) {
       title: "Open task",
       description: "Open or resume a task with conversation-scoped workspace isolation. For the first new task in a conversation, pass primary_workspace_id and omit conversation_workspace_token; the response creates a token pinned to that workspace. For later new tasks, reuse the token so global default changes cannot reroute the conversation.",
       inputSchema: {
-        objective: z.string().max(4000).optional().describe("Concise task objective preserving the user's requested behavior and constraints; do not include unrelated conversation text."),
-        title: z.string().max(180).optional().describe("Optional short UI label. Defaults from objective when omitted."),
+        objective: z.string().max(4000).optional().describe("Optional durable, user-visible summary of the intended result and task-specific constraints. Do not include private reasoning, secrets, unrelated conversation text, or general agent policy."),
+        title: z.string().max(180).optional().describe("Optional short UI label. When omitted, it may be derived from objective; providing title alone leaves objective unset."),
         complexity_hint: z.enum(["quick_edit", "normal", "complex"]).optional().describe("Model-selected effective complexity. Defaults to normal when omitted."),
         complexity_override: z.boolean().optional().describe("Compatibility field; LCA no longer changes the effective profile automatically."),
         primary_workspace_id: z.string().min(1).optional().describe("Required for the first new task unless conversation_workspace_token already resolves a pinned workspace. If both are provided, they must match."),
@@ -296,7 +296,7 @@ export function registerWorkspaceTools(mcp, dependencies) {
       }
 
       const task = await taskRouter.openTask({
-        title: title || objective || "LCA task",
+        title,
         objective,
         complexityHint: complexity_hint,
         complexityOverride: complexity_override,

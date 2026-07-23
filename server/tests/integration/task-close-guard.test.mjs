@@ -84,23 +84,25 @@ try {
   const missingEvidenceClose = await callTool(runtime.port, sessionId, 3, "task_close", {
     task_token: missingEvidenceTask.task_token
   });
-  assert.equal(missingEvidenceClose.data.ok, false);
-  assert.equal(missingEvidenceClose.data.status, "INCOMPLETE");
-  assert.ok(missingEvidenceClose.data.incomplete_reasons.includes("VERIFICATION_EVIDENCE_MISSING"));
-  const stillOpen = await callTool(runtime.port, sessionId, 4, "task_state", {
-    task_token: missingEvidenceTask.task_token
-  });
-  assert.equal(stillOpen.data.task.status, "open");
+  assert.equal(missingEvidenceClose.data.ok, true);
+  assert.equal(missingEvidenceClose.data.status, "incomplete");
+  assert.equal(missingEvidenceClose.data.requested_status, "complete");
+  assert.equal(missingEvidenceClose.data.auto_downgraded, true);
+  assert.ok(missingEvidenceClose.data.completion_guard.incomplete_reasons.includes("VERIFICATION_EVIDENCE_MISSING"));
+  assert.equal(missingEvidenceClose.data.task.status, "closed");
 
+  const verifiedTask = await openTask(runtime.port, sessionId, 4, "Verified close");
   const cleanVerification = await callTool(runtime.port, sessionId, 5, "verify_changes", {
-    task_token: missingEvidenceTask.task_token
+    task_token: verifiedTask.task_token
   });
   assert.equal(cleanVerification.data.status, "PASS");
   assert.equal(cleanVerification.data.verification_evidence.persisted, true);
   const cleanClose = await callTool(runtime.port, sessionId, 6, "task_close", {
-    task_token: missingEvidenceTask.task_token
+    task_token: verifiedTask.task_token
   });
   assert.equal(cleanClose.data.ok, true, JSON.stringify(cleanClose.data));
+  assert.equal(cleanClose.data.status, "complete");
+  assert.equal(cleanClose.data.auto_downgraded, false);
   assert.equal(cleanClose.data.task.status, "closed");
 
   const closeRaceTask = await openTask(runtime.port, sessionId, 69, "Close race");

@@ -74,7 +74,7 @@ workspace_select(workspace_id)
 task_open(primary_workspace_id, attached_workspace_ids[])
 ```
 
-`task_open` accepts a concise `objective` that preserves the requested behavior and constraints, an optional short `title` for UI display, and a model-selected `complexity_hint` (`quick_edit`, `normal`, or `complex`). If the model omits the hint, the effective profile defaults to `normal`.
+`task_open` accepts an optional short `title` for UI display, an optional durable and user-visible `objective` describing the intended result and task-specific constraints, and a model-selected `complexity_hint` (`quick_edit`, `normal`, or `complex`). Objective is task metadata, not private reasoning or an instruction channel for LCA; it must not contain secrets, unrelated conversation text, or general agent policy. Providing only title leaves objective `null`; when title is omitted, it may be derived from objective. If the model omits the complexity hint, the effective profile defaults to `normal`.
 
 `task_open` returns:
 
@@ -94,7 +94,7 @@ The model, not LCA, selects the effective profile. `quick_edit` is intended for 
 
 LCA updates an orchestration phase independently from the routing lifecycle: `opened`, `discovering`, `decision_ready`, `mutating`, `confirming`, `blocked`, and `closing`. It also tracks evidence status, call counters, mutation epochs, and fingerprints for repeated discovery requests. Routing status remains `open`, `closed`, or `failed`; orchestration phases do not replace it.
 
-LCA may report `suggested_profile`, `scope_signal`, and `scope_reasons` from objective scope evidence such as multiple attached workspaces or the model creating a persistent multi-step plan. Discovery-call count and raw search-result path count do not by themselves trigger a profile suggestion. These are advisory signals only. LCA never updates `effective_profile` from those signals. After evaluating the actual request and code context, the model may keep the current profile or call `task_reclassify(complexity, reason)` to confirm a change.
+LCA may report `suggested_profile`, `scope_signal`, and `scope_reasons` from observable scope evidence such as multiple attached workspaces or the model creating a persistent multi-step plan. Objective text is not interpreted for complexity classification. Discovery-call count and raw search-result path count do not by themselves trigger a profile suggestion. These are advisory signals only. LCA never updates `effective_profile` from those signals. After evaluating the actual request and code context, the model may keep the current profile or call `task_reclassify(complexity, reason)` to confirm a change.
 
 Repeated unchanged discovery calls are fingerprinted. For supported reads, LCA checks the source version before reusing cached evidence; changed files are read again. Repeated requests without new evidence can return advisory notices and eventually a loop guard. A model that genuinely needs a similar read should state the concrete unresolved evidence gap rather than narrating progress through repeated `task_state` calls.
 
