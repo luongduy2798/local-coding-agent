@@ -40,6 +40,8 @@ scripts\lca.cmd setup
 
 Wizard sẽ tự detect hệ điều hành hiện tại, kiểm tra prerequisite, mở trang tạo Tunnel/API key, tạo/cập nhật `.env.local`, cài dependency trong `server/`, tải `tools/tunnel-client`, ghi config local và cài global command `lca`. Trên Windows, wizard sẽ thêm thư mục `lca.cmd` vào User PATH; mở terminal mới trước khi gõ `lca`.
 
+Workspace khởi động của wizard mặc định luôn là chính repo `local-coding-agent`, không phụ thuộc thư mục hiện tại hoặc config cũ. Chỉ dùng `--workspace <path>` nếu chủ động muốn ghi đè. Sau lần cài đầu, chạy lại bằng `lca setup` có cùng hành vi với `bash scripts/lca setup`.
+
 Nếu cần xem hướng dẫn cho hệ điều hành khác máy đang chạy, dùng `node scripts/local-coding-agent.mjs setup --choose-os`.
 
 ## Dùng Hằng Ngày

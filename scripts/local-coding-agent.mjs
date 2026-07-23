@@ -170,4 +170,5 @@ export {
   classifyMigrationRecovery,
   createMigrationTransactionState
 } from "./cli/release.mjs";
+export { resolveSetupWorkspace } from "./cli/setup.mjs";
 export { resolveCliRuntimeDataDir } from "./cli/workspace.mjs";

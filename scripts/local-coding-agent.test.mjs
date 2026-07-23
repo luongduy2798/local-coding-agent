@@ -15,6 +15,7 @@ import {
   normalizeTunnelArch,
   parseDotEnv,
   resolveCliRuntimeDataDir,
+  resolveSetupWorkspace,
   ripgrepInstallCommand,
   setupSecurityDefaults,
   supervisorBackoffMs,
@@ -68,6 +69,13 @@ test("places default runtime state beside CLI config instead of inside the repos
   assert.equal(resolveCliRuntimeDataDir("", config), join(dirname(config), "data", "runtime"));
   const explicit = resolve("isolated", "agent-data");
   assert.equal(resolveCliRuntimeDataDir(explicit, config), resolve(explicit, "runtime"));
+});
+
+test("setup defaults to its local-coding-agent repository unless workspace is explicit", () => {
+  const repositoryRoot = resolve("isolated", "local-coding-agent");
+  const explicitWorkspace = resolve("isolated", "project");
+  assert.equal(resolveSetupWorkspace("", repositoryRoot), repositoryRoot);
+  assert.equal(resolveSetupWorkspace(explicitWorkspace, repositoryRoot), explicitWorkspace);
 });
 
 test("migration transaction persists restart and safety intent without secrets", () => {

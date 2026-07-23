@@ -175,6 +175,8 @@ The wizard uses only Node.js built-ins. It auto-detects the current OS, checks
 prerequisites, creates or updates .env.local, installs server dependencies,
 checks the local Figma Desktop MCP bridge, downloads tunnel-client when possible,
 writes local CLI config, installs the global lca command, and prints health/status checks.
+The startup workspace defaults to this local-coding-agent repository; use
+--workspace only when you intentionally want a different startup workspace.
 It does not install editor integrations. Install the optional VS Code integration with:
 
   lca extension setup

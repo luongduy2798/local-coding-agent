@@ -711,6 +711,10 @@ async function openVsCodeExtension(flags = {}, services = {}) {
   console.log(`Opened Review Changes for: ${workspace}`);
 }
 
+function resolveSetupWorkspace(explicitWorkspace = "", repositoryRoot = REPO_ROOT) {
+  return resolve(explicitWorkspace || repositoryRoot);
+}
+
 async function setup(flags, services = {}) {
   if (flags.help) return setupUsage();
   if (!input.isTTY || !output.isTTY) {
@@ -764,7 +768,7 @@ async function setup(flags, services = {}) {
 
     printStep(4, 9, "Configure agent defaults");
     cfg.node = cfg.node || "node";
-    cfg.workspace = resolve(flags.workspace || cfg.workspace || await services.detectWorkspaceRoot());
+    cfg.workspace = resolveSetupWorkspace(flags.workspace);
     const explicitSecurity = Boolean(flags.mode || flags.policy);
     const alreadyConsented =
       Number(cfg.fullAccessConsentVersion || 0) >= FULL_ACCESS_CONSENT_VERSION &&
@@ -879,6 +883,7 @@ export {
   promptSecretRequired,
   promptSecretUpdate,
   promptYesNo,
+  resolveSetupWorkspace,
   setup,
   setupVsCodeExtension,
   uninstallVsCodeExtension,
