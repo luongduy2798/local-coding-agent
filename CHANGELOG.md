@@ -4,6 +4,14 @@ All notable changes to Local Coding Agent are documented in this file.
 
 ## [Unreleased]
 
+### Cross-host Control Center
+
+- Extracted a serializable Control Center host protocol and adapter boundary so the existing React UI can run in VS Code, JetBrains/JCEF and a standalone local browser without duplicating task, activity or Review Changes presentation logic.
+- Added a cached server-side safe audit projection and shared `/control/state`/`/control/events` surface; clients no longer need their own rotating-log parser. Commands, arguments, output, prompts, tokens and raw error content remain excluded.
+- Added `lca ui` with one-time launch tickets and same-origin HttpOnly sessions. Supervisor instance nonces are exchanged only by the local CLI and never exposed to browser JavaScript.
+- Added `lca integrations` commands for VS Code, JetBrains and web, while retaining `lca extension` as a deprecated VS Code alias.
+- Added a JetBrains Platform/JCEF plugin scaffold that launches the shared Control Center and uses web diff/copy-path fallbacks until native IDE bridge actions are implemented.
+
 ### Task orchestration
 
 - Added task complexity profiles (`quick_edit`, `normal`, and `complex`) selected by the model when opening a task. When omitted, the runtime defaults the effective profile to `normal`.

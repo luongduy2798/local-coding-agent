@@ -1,0 +1,17 @@
+<idea-plugin>
+  <id>com.luongduy.lca.jetbrains</id>
+  <name>Local Coding Agent</name>
+  <vendor>Lương Duy</vendor>
+  <description><![CDATA[
+    Opens the shared Local Coding Agent Control Center in a JetBrains tool window.
+    Runtime state and Review Changes remain served by the trusted local LCA companion.
+  ]]></description>
+  <depends>com.intellij.modules.platform</depends>
+  <extensions defaultExtensionNs="com.intellij">
+    <toolWindow
+      id="Local Coding Agent"
+      anchor="right"
+      factoryClass="com.luongduy.lca.jetbrains.LcaToolWindowFactory"
+      canCloseContents="false" />
+  </extensions>
+</idea-plugin>

@@ -130,6 +130,47 @@ export interface AuditStatus {
   updated_at?: string | null;
 }
 
+export interface ControlActivitySnapshot {
+  available: boolean;
+  enabled: boolean;
+  currentRuntimeId: string | null;
+  activities: Array<{
+    invocationId: string;
+    runtimeId: string | null;
+    tool: string;
+    taskId: string | null;
+    workspaceIds: string[];
+    status: "started" | "finished" | "failed" | "interrupted";
+    ok: boolean | null;
+    startedAt: string;
+    finishedAt: string | null;
+    durationMs: number | null;
+    errorCode: string | null;
+    verification: "PASS" | "INCOMPLETE" | "FAIL" | null;
+    changeCount: number | null;
+    fileCount: number | null;
+    toolClass: string | null;
+    fingerprint: string | null;
+    purpose: string | null;
+    purposeFingerprint: string | null;
+    orchestrationEvent: string | null;
+    runState: string | null;
+    duplicate: boolean;
+    statusOnly: boolean;
+    policySkip: boolean;
+    cacheHit: boolean;
+    evidenceDelta: boolean;
+    orchestrationNoticeCode: string | null;
+    orchestrationPhaseBefore: string | null;
+    orchestrationPhaseAfter: string | null;
+    effectiveProfile: string | null;
+    evidenceStatus: string | null;
+  }>;
+  revision?: string;
+  error?: string;
+  updatedAt?: string;
+}
+
 export interface HealthResponse {
   status: string;
   version: string;
@@ -146,6 +187,7 @@ export interface HealthResponse {
   tasks?: TaskDescriptor[];
   processes?: ProcessDescriptor[];
   audit?: AuditStatus;
+  control_activity?: ControlActivitySnapshot;
   mcp_sessions?: {
     active?: number;
     max?: number;

@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import type { ControlCenterHostCapabilities } from "./protocol.js";
 
 export type WorkspaceRoute =
   | { kind: "tasks" }
@@ -167,6 +168,7 @@ export interface ChangeSummaryView {
 
 export interface WorkspaceShellProps {
   control: ControlStateView;
+  capabilities: ControlCenterHostCapabilities;
   currentWorkspace?: WorkspaceOptionView;
   syncMode: "idle" | "sse" | "polling";
   trusted: boolean;
@@ -181,6 +183,7 @@ export interface WorkspaceShellProps {
 
 export function WorkspaceHeader({
   control,
+  capabilities,
   currentWorkspace,
   syncMode,
   trusted,
@@ -241,6 +244,7 @@ export function WorkspaceHeader({
             {workspacesOpen && (
               <WorkspacePopover
                 control={control}
+                capabilities={capabilities}
                 currentWorkspace={currentWorkspace}
                 trusted={trusted}
                 busyAction={busyAction}
@@ -256,7 +260,7 @@ export function WorkspaceHeader({
               />
             )}
           </div>
-          {currentWorkspace && !registered && (
+          {capabilities.workspaceManagement && currentWorkspace && !registered && (
             <>
               <span className="header-warning">Not connected</span>
               <button
@@ -273,13 +277,15 @@ export function WorkspaceHeader({
       </div>
 
       <div className="header-actions" aria-label="Runtime controls">
-        <IconButton
-          title={control.serverOnline ? "Stop LCA" : "Start LCA"}
-          icon={control.serverOnline ? "stop" : "play"}
-          danger={control.serverOnline}
-          disabled={!trusted || Boolean(busyAction)}
-          onClick={() => onRuntimeAction(control.serverOnline ? "stopLca" : "startLca")}
-        />
+        {capabilities.runtimeControl && (
+          <IconButton
+            title={control.serverOnline ? "Stop LCA" : "Start LCA"}
+            icon={control.serverOnline ? "stop" : "play"}
+            danger={control.serverOnline}
+            disabled={!trusted || Boolean(busyAction)}
+            onClick={() => onRuntimeAction(control.serverOnline ? "stopLca" : "startLca")}
+          />
+        )}
         <IconButton
           title="Refresh"
           icon="refresh"
@@ -294,6 +300,7 @@ export function WorkspaceHeader({
 
 function WorkspacePopover({
   control,
+  capabilities,
   currentWorkspace,
   trusted,
   busyAction,
@@ -302,6 +309,7 @@ function WorkspacePopover({
   onViewHistory,
 }: {
   control: ControlStateView;
+  capabilities: ControlCenterHostCapabilities;
   currentWorkspace?: WorkspaceOptionView;
   trusted: boolean;
   busyAction?: string;
@@ -328,6 +336,7 @@ function WorkspacePopover({
         rows={currentRows}
         currentId={currentId}
         trusted={trusted}
+        canManage={capabilities.workspaceManagement}
         busyAction={busyAction}
         onSelect={onSelect}
         onAction={onAction}
@@ -338,6 +347,7 @@ function WorkspacePopover({
         rows={otherRows}
         currentId={currentId}
         trusted={trusted}
+        canManage={capabilities.workspaceManagement}
         busyAction={busyAction}
         onSelect={onSelect}
         onAction={onAction}
@@ -348,6 +358,7 @@ function WorkspacePopover({
         rows={archived}
         currentId={currentId}
         trusted={trusted}
+        canManage={capabilities.workspaceManagement}
         busyAction={busyAction}
         onSelect={onSelect}
         onAction={onAction}
@@ -362,6 +373,7 @@ function WorkspaceGroup({
   rows,
   currentId,
   trusted,
+  canManage,
   busyAction,
   onSelect,
   onAction,
@@ -371,6 +383,7 @@ function WorkspaceGroup({
   rows: ControlWorkspaceView[];
   currentId?: string;
   trusted: boolean;
+  canManage: boolean;
   busyAction?: string;
   onSelect: (key: string) => void;
   onAction: (type: string, workspaceId?: string) => void;
@@ -409,7 +422,7 @@ function WorkspaceGroup({
               </span>
             </button>
             <div className="workspace-row-actions">
-              {!archived && !workspace.isDefault && (
+              {canManage && !archived && !workspace.isDefault && (
                 <IconButton
                   title="Make default"
                   icon="star"
@@ -418,7 +431,7 @@ function WorkspaceGroup({
                 />
               )}
               <IconButton title="View history" icon="history" onClick={() => onViewHistory(workspace.id)} />
-              {!archived && (
+              {canManage && !archived && (
                 <IconButton
                   title="Archive workspace"
                   icon="archive"
@@ -426,7 +439,7 @@ function WorkspaceGroup({
                   onClick={() => onAction("archiveWorkspace", workspace.id)}
                 />
               )}
-              {archived && (
+              {canManage && archived && (
                 <IconButton
                   title="Restore workspace"
                   icon="restore"
@@ -434,13 +447,13 @@ function WorkspaceGroup({
                   onClick={() => onAction("restoreWorkspace", workspace.id)}
                 />
               )}
-              <IconButton
+              {canManage && <IconButton
                 title="Remove workspace data permanently"
                 icon="trash"
                 danger
                 disabled={!trusted || protectedWorkspace || Boolean(busyAction)}
                 onClick={() => onAction("removeWorkspace", workspace.id)}
-              />
+              />}
             </div>
           </article>
         );

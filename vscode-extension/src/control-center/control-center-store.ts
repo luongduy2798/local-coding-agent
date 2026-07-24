@@ -96,9 +96,11 @@ export class ControlCenterStore implements vscode.Disposable {
   private cliStatus: LcaCliStatus | undefined;
   private cliStatusError: string | undefined;
   private cliStatusCheckedAt = 0;
+  private serverActivityProjection = false;
 
   constructor(private readonly connection: ConnectionManager) {
     this.auditReader.onDidChange((audit) => {
+      if (this.serverActivityProjection) return;
       this.state = {
         ...this.state,
         audit: filterAuditForRegisteredWorkspaces(
@@ -169,10 +171,18 @@ export class ControlCenterStore implements vscode.Disposable {
         : undefined;
     const serverOnline = Boolean(health || cliStatus?.pids?.server_alive);
     const auditStatus = health?.audit || cliStatus?.audit;
+    const serverAudit = health?.control_activity;
     const workspaceFolders = await openFolderRoots();
     const workspaces = normalizeWorkspaces(health, cliStatus, workspaceFolders);
     const tasks = normalizeTasks(health, cliStatus);
-    await this.auditReader.configure(auditStatus?.path, auditStatus?.enabled === true);
+    if (serverAudit) {
+      if (!this.serverActivityProjection) await this.auditReader.configure(undefined, false);
+      this.serverActivityProjection = true;
+    } else {
+      this.serverActivityProjection = false;
+      await this.auditReader.configure(auditStatus?.path, auditStatus?.enabled === true);
+    }
+    const projectedAudit = serverAudit || this.auditReader.current;
     this.state = {
       ...this.state,
       loading: false,
@@ -187,7 +197,7 @@ export class ControlCenterStore implements vscode.Disposable {
         max: Number(health?.mcp_sessions?.max ?? cliStatus?.sessions?.max ?? 32),
       },
       audit: filterAuditForRegisteredWorkspaces(
-        withOfflineInterruptions(this.auditReader.current, serverOnline),
+        withOfflineInterruptions(projectedAudit, serverOnline),
         workspaces,
       ),
       workspaces,

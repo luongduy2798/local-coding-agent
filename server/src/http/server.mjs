@@ -6,15 +6,18 @@ import { timingSafeEqual } from "node:crypto";
 import http from "node:http";
 import path from "node:path";
 import { ChangeJournalError } from "../change-journal.mjs";
+import { createControlCenterRoutes } from "./control-center.mjs";
 
 export function createApplicationHttpServer({
   allowDangerous,
+  auditPath,
   auditStatus,
   authToken,
   catalogHash,
   catalogVersion,
   changeRoutes,
   configId,
+  controlCenterUiDir,
   getPrimaryWorkspaceId,
   getRegistry,
   getTaskRouter,
@@ -30,6 +33,7 @@ export function createApplicationHttpServer({
   port,
   primaryRoot,
   processes,
+  readJsonBody,
   productTier,
   runtimeId,
   roots,
@@ -39,6 +43,16 @@ export function createApplicationHttpServer({
   testRuntimeDiagnostics,
   version
 }) {
+  const controlOrigin = `http://127.0.0.1:${port}`;
+  const controlRoutes = createControlCenterRoutes({
+    auditPath,
+    changeRoutes,
+    controlOrigin,
+    getHealthDetails: healthDetails,
+    readJsonBody,
+    sendJson,
+    uiDir: controlCenterUiDir
+  });
   const server = http.createServer(async (req, res) => {
     try {
       const requestUrl = new URL(req.url || "/", `http://${req.headers.host || host}`);
@@ -69,6 +83,15 @@ export function createApplicationHttpServer({
       }
       if (req.method === "GET" && url.pathname === "/.well-known/oauth-protected-resource") {
         return sendJson(res, 200, oauthProtectedResourceMetadata());
+      }
+      if (req.method === "POST" && url.pathname === "/control/tickets") {
+        if (!isLoopbackRequest(req) || !checkInstanceNonce(req)) {
+          return sendJson(res, 401, { error: "instance_auth_required" });
+        }
+        return await controlRoutes.handle(req, res, url);
+      }
+      if (url.pathname === "/control" || url.pathname.startsWith("/control/")) {
+        return await controlRoutes.handle(req, res, url);
       }
       if (
         url.pathname === "/changes" || url.pathname.startsWith("/changes/") ||
@@ -166,6 +189,7 @@ export function createApplicationHttpServer({
       workspace_id: item.workspaceId || null,
       started_at: item.startedAt || null
     }));
+    const controlActivity = await controlRoutes.readActivities(runtimeId, auditStatus?.() || { enabled: false });
     return {
       status: "ok",
       version,
@@ -184,8 +208,10 @@ export function createApplicationHttpServer({
       tasks,
       processes: processDescriptors,
       audit: auditStatus?.() || { enabled: false },
+      control_activity: controlActivity,
       mcp_sessions: sessionManager.summary(),
       change_events_endpoint: "/changes/events",
+      control_center_endpoint: `${controlOrigin}/control/`,
       mcp_endpoint: `http://${host}:${port}/mcp`
     };
   }
@@ -204,7 +230,11 @@ export function createApplicationHttpServer({
 
   function checkCompanionAuth(req) {
     if (testRuntimeDiagnostics) return checkAuth(req);
-    return isLoopbackRequest(req) && checkInstanceNonce(req);
+    if (!isLoopbackRequest(req)) return false;
+    if (checkInstanceNonce(req)) return true;
+    return Boolean(controlRoutes.authorize(req, {
+      mutation: req.method !== "GET" && req.method !== "HEAD"
+    }));
   }
 
   server.on("error", (error) => {

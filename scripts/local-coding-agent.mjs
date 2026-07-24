@@ -25,6 +25,10 @@ import {
   figmaCommand
 } from "./cli/integrations.mjs";
 import {
+  integrationsCommand,
+  openControlCenterWeb
+} from "./cli/control-center-integrations.mjs";
+import {
   cliCommand,
   handoffAfterMigrationRecovery,
   keysCommand,
@@ -39,10 +43,7 @@ import {
 } from "./cli/release.mjs";
 import {
   installDeps,
-  openVsCodeExtension,
-  setup,
-  setupVsCodeExtension,
-  uninstallVsCodeExtension
+  setup
 } from "./cli/setup.mjs";
 import {
   configCommand,
@@ -101,12 +102,25 @@ async function main() {
     if (rest.length) throw new Error("Usage: lca setup");
     return setup(flags, { detectWorkspaceRoot, ensureFigmaDesktopConnected, start, status });
   }
+  const controlCenterServices = { detectWorkspaceRoot, runningStatusForConfig, start };
+  if (command === "ui" || command === "web") {
+    if (rest.length) throw new Error("Usage: lca ui [--print-url] [--no-open] [--host browser|jetbrains]");
+    return openControlCenterWeb(flags, controlCenterServices);
+  }
+  if (command === "integrations") {
+    return integrationsCommand(rest, flags, controlCenterServices);
+  }
   if (command === "extension") {
+    console.warn("`lca extension` is deprecated; use `lca integrations ... vscode`.");
     if (rest.length === 0 || (rest.length === 1 && rest[0] === "run")) {
-      return openVsCodeExtension(flags, { detectWorkspaceRoot });
+      return integrationsCommand(["open", "vscode"], flags, controlCenterServices);
     }
-    if (rest.length === 1 && rest[0] === "setup") return setupVsCodeExtension();
-    if (rest.length === 1 && ["uninstall", "remove"].includes(rest[0])) return uninstallVsCodeExtension();
+    if (rest.length === 1 && rest[0] === "setup") {
+      return integrationsCommand(["setup", "vscode"], flags, controlCenterServices);
+    }
+    if (rest.length === 1 && ["uninstall", "remove"].includes(rest[0])) {
+      return integrationsCommand(["uninstall", "vscode"], flags, controlCenterServices);
+    }
     throw new Error("Usage: lca extension [run] | lca extension setup | lca extension uninstall");
   }
   if (command === "install") return installDeps(effectiveOptions(flags));

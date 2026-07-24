@@ -36,7 +36,7 @@ export function setCors(req, res) {
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
   res.setHeader(
     "Access-Control-Allow-Headers",
-    "Content-Type, Accept, Authorization, X-LCA-Instance-Nonce, Mcp-Session-Id, mcp-session-id"
+    "Content-Type, Accept, Authorization, X-LCA-Instance-Nonce, X-LCA-Control-Request, Mcp-Session-Id, mcp-session-id"
   );
   res.setHeader("Access-Control-Expose-Headers", "Mcp-Session-Id");
 }

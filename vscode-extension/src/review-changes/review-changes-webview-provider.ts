@@ -1,22 +1,16 @@
 import * as vscode from "vscode";
-import type { ApiRevision, ChangeRecord } from "../api/api-types.js";
 import type { ConnectionState } from "../connection/connection-manager.js";
 import { ConnectionManager } from "../connection/connection-manager.js";
 import { ControlCenterActions } from "../control-center/control-center-actions.js";
-import type { ControlCenterState } from "../control-center/control-center-store.js";
 import { ControlCenterStore } from "../control-center/control-center-store.js";
 import { ReviewChangesActions } from "./review-changes-actions.js";
 import { ReviewChangesStore } from "./review-changes-store.js";
-
-interface WebviewMessage {
-  type: string;
-  changeId?: string;
-  path?: string;
-  workspaceId?: string;
-  value?: string;
-  requestId?: string;
-  revision?: number;
-}
+import {
+  DEFAULT_HOST_CAPABILITIES,
+  type ControlCenterRequest as WebviewMessage,
+  type ControlCenterViewState as WebviewState,
+  type SerializableConnectionState,
+} from "../webview/protocol.js";
 
 const REVISION_FENCED_MESSAGES = new Set([
   "selectWorkspace",
@@ -40,46 +34,6 @@ const REVISION_FENCED_MESSAGES = new Set([
   "deleteWorkspaceTasks",
   "viewWorkspaceHistory",
 ]);
-
-interface WebviewState {
-  loading: boolean;
-  revision: number;
-  serverRevision?: ApiRevision;
-  syncMode: "idle" | "sse" | "polling";
-  busyAction?: string;
-  trusted: boolean;
-  currentWorkspace?: string;
-  selectedWorkspaceKey?: string;
-  selectedTaskId?: string;
-  scopeError?: string;
-  workspaceOptions: Array<{
-    key: string;
-    label: string;
-    root: string;
-    workspaceId?: string;
-    available: boolean;
-    registered: boolean;
-    trusted: boolean;
-    opened: boolean;
-    registrationState: "active" | "archived";
-  }>;
-  taskOptions: Array<{
-    taskId: string;
-    title: string;
-    status?: string;
-  }>;
-  connection?: SerializableConnectionState;
-  changes: ChangeRecord[];
-  control: ControlCenterState;
-}
-
-type SerializableConnectionState =
-  | { kind: "connected"; workspace: string; version: string; workspaceCount: number }
-  | { kind: "server_offline"; message: string }
-  | { kind: "workspace_mismatch"; message: string; workspace: string }
-  | { kind: "unauthorized"; message: string }
-  | { kind: "no_workspace"; message: string }
-  | { kind: "remote_blocked"; message: string };
 
 export class ReviewChangesWebviewProvider implements vscode.WebviewViewProvider, vscode.Disposable {
   private view: vscode.WebviewView | undefined;
@@ -313,6 +267,10 @@ export class ReviewChangesWebviewProvider implements vscode.WebviewViewProvider,
       ),
       changes: current.changes,
       control: this.controlStore.current,
+      host: {
+        kind: "vscode",
+        capabilities: DEFAULT_HOST_CAPABILITIES.vscode,
+      },
     };
     await this.view.webview.postMessage({ type: "state", state });
   }

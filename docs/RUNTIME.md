@@ -179,5 +179,7 @@ lca doctor
 - `GET http://127.0.0.1:8789/healthz` is public liveness only. It returns status, version, `catalog_version`, and `catalog_hash`; it intentionally omits roots, tasks, PID, and configuration.
 - `GET /healthz/details` is for trusted local companions. In production it requires loopback plus `X-LCA-Instance-Nonce`; an MCP tunnel bearer is insufficient. Normal `lca status` output redacts the nonce; the extension uses the explicit machine-readable local flow `lca status --json --include-instance-nonce`.
 - Every `/changes` route, including `/changes/events`, uses the same companion authentication. Do not embed the nonce in documentation, settings committed to Git, or browser code.
+- `lca ui` sends the nonce only from the local CLI to `POST /control/tickets`. The server consumes a one-time ticket and issues a same-origin `HttpOnly; SameSite=Strict` Control Center session cookie. Browser and JCEF JavaScript never receive the nonce. Mutating cookie-authenticated requests also require the same local origin and `X-LCA-Control-Request: 1`.
+- `/control/state` exposes the same safe workspace/task/change/activity projection to local web and JetBrains hosts. Audit arguments, command text, output, prompts, tokens and error content remain server-side.
 
 ChatGPT Web must use the tunnel MCP URL rather than either loopback health URL.

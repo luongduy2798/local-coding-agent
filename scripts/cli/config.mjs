@@ -27,6 +27,7 @@ export const CONFIG_PATH = process.env.LCA_CONFIG_PATH || defaultConfigPath();
 export const PID_PATH = join(dirname(CONFIG_PATH), "processes.json");
 export const LOG_PATH = join(dirname(CONFIG_PATH), "launcher.log");
 export const VSCODE_EXTENSION_STATE_PATH = join(dirname(CONFIG_PATH), "vscode-extension.json");
+export const INTEGRATIONS_STATE_PATH = join(dirname(CONFIG_PATH), "integrations.json");
 export const RELEASE_MIGRATION_STATE_PATH = join(dirname(CONFIG_PATH), "release-migration.json");
 export const LEGACY_RELEASE_MIGRATION_STATE_PATH = join(dirname(CONFIG_PATH), "v5-migration.json");
 export const RELEASE_MIGRATION_BACKUP_DIR = join(dirname(CONFIG_PATH), "migration-backups");
@@ -91,9 +92,12 @@ Usage:
   lca
   lca run
   node scripts/local-coding-agent.mjs setup [options]
-  node scripts/local-coding-agent.mjs extension setup
-  node scripts/local-coding-agent.mjs extension uninstall
-  node scripts/local-coding-agent.mjs extension [run]
+  node scripts/local-coding-agent.mjs ui
+  node scripts/local-coding-agent.mjs integrations list
+  node scripts/local-coding-agent.mjs integrations setup <vscode|jetbrains|web>
+  node scripts/local-coding-agent.mjs integrations open <vscode|jetbrains|web>
+  node scripts/local-coding-agent.mjs integrations uninstall <vscode|jetbrains|web>
+  node scripts/local-coding-agent.mjs extension [run|setup|uninstall]  # deprecated VS Code alias
   node scripts/local-coding-agent.mjs install
   node scripts/local-coding-agent.mjs start [options]
   node scripts/local-coding-agent.mjs stop
@@ -153,9 +157,11 @@ Fast path:
   bash scripts/lca setup       # macOS/Linux
   node scripts/local-coding-agent.mjs setup
   lca                         # From any repo, set workspace to git root and run
-  lca extension setup         # Install the optional VS Code Review Changes extension
-  lca extension               # Open Review Changes for the current repo
-  lca extension uninstall     # Remove the VS Code extension
+  lca ui                      # Open the standalone local Control Center
+  lca integrations list       # Inspect VS Code, JetBrains and web integrations
+  lca integrations setup web
+  lca integrations setup vscode
+  lca integrations setup jetbrains
 
 One-shot examples:
   node scripts/local-coding-agent.mjs start --workspace "<path-to-repo>" --no-tunnel
@@ -177,9 +183,13 @@ checks the local Figma Desktop MCP bridge, downloads tunnel-client when possible
 writes local CLI config, installs the global lca command, and prints health/status checks.
 The startup workspace defaults to this local-coding-agent repository; use
 --workspace only when you intentionally want a different startup workspace.
-It does not install editor integrations. Install the optional VS Code integration with:
+It does not install editor integrations. Build or install optional Control Center hosts with:
 
-  lca extension setup
+  lca integrations setup web
+  lca integrations setup vscode
+  lca integrations setup jetbrains
+
+Open the standalone local UI with lca ui. The old lca extension command remains a deprecated VS Code alias.
 
 Use --choose-os only when you want instruction mode for another OS.
 `);
@@ -275,6 +285,15 @@ function parseArgs(argv) {
         break;
       case "--include-instance-nonce":
         flags.includeInstanceNonce = true;
+        break;
+      case "--print-url":
+        flags.printUrl = true;
+        break;
+      case "--no-open":
+        flags.noOpen = true;
+        break;
+      case "--host":
+        flags.hostKind = next();
         break;
       default:
         if (arg.startsWith("--")) throw new Error(`Unknown argument: ${arg}`);
@@ -628,6 +647,9 @@ function stripRuntimeFields(cfg) {
   delete clean.save;
   delete clean.runtimeKeyFromFlag;
   delete clean.includeInstanceNonce;
+  delete clean.printUrl;
+  delete clean.noOpen;
+  delete clean.hostKind;
   return clean;
 }
 

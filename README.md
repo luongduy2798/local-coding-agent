@@ -240,31 +240,36 @@ DELETE /changes?workspace_id=<id>&task_id=<id>
 
 `run_command` và `run_commands` chỉ tạo activity record tối giản; lịch sử thay đổi không lưu command text, stdout, stderr, environment hoặc secret.
 
-VS Code extension là tích hợp tùy chọn. Cài và mở bằng:
+Control Center dùng chung một bundle React cho local web, VS Code và JetBrains/JCEF. Các host tùy chọn được quản lý bằng:
 
 ```bash
-lca extension setup
-lca extension
+lca ui
+lca integrations list
+lca integrations setup web
+lca integrations setup vscode
+lca integrations setup jetbrains
 ```
 
-Gỡ extension:
+Mở hoặc gỡ một host:
 
 ```bash
-lca extension uninstall
+lca integrations open vscode
+lca integrations open jetbrains
+lca integrations uninstall vscode
 ```
 
-`lca setup` thông thường không cài extension. View **Local Coding Agent → Control Center** có bốn tab:
+`lca extension` vẫn hoạt động như alias VS Code cũ nhưng đã deprecated. `lca setup` thông thường không bắt buộc cài editor integration. View **Local Coding Agent → Control Center** có các vùng chức năng:
 
 - **Overview** quản lý Start/Stop/Pause monitoring và trạng thái supervisor/server/tunnel/session.
 - **Workspaces** hiển thị toàn bộ registry, đặt default cho task mới, Archive, Restore hoặc Remove permanently.
 - **Tasks** hiển thị `objective` công khai của agent như metadata đầu tiên trong timeline, sau đó là sự kiện vận hành thật: tool đang chạy/duration, kết quả, verification, process và số change/file quan sát được. Task mới nhất mở danh sách call theo mặc định nhưng vẫn có thể thu gọn; trạng thái đang chạy dùng `RotatingDots`. Task còn `open` nhưng đã mất toàn bộ MCP session binding được hiển thị là **Detached**, dừng tăng thời gian và có nút đóng riêng; thao tác này giữ nguyên Review Changes, snapshot và Undo. View không hiển thị `task_plan`, prompt hay private thinking của model.
 - **Changes** giữ review/diff/Undo/Reapply hiện tại; workspace của repo đang mở trong cửa sổ VS Code được chọn và xếp đầu mặc định, các repo registry khác nằm bên dưới. Mỗi lựa chọn dùng SSE riêng và tự quay lại Live sau polling fallback.
 
-Activity được đọc từ audit log xoay vòng tại `<config-root>/data/runtime/audit.log` (hoặc `<AGENT_DATA_DIR>/runtime/audit.log`), không tạo activity database riêng. Log dành cho UI chỉ chiếu metadata whitelist; không đưa args, command, output, prompt, token hoặc error content vào webview. **Connect current folder** đăng ký repo, đặt nó làm global default cho task mới và start LCA khi cần; nó không đổi primary của task đang chạy.
+Server đọc audit log xoay vòng tại `<config-root>/data/runtime/audit.log` (hoặc `<AGENT_DATA_DIR>/runtime/audit.log`) và phát một projection chung cho mọi host; client không tự parse log và không tạo activity database riêng. Projection chỉ chứa metadata whitelist, không đưa args, command, output, prompt, token hoặc error content vào webview. Standalone web dùng one-time launch ticket đổi sang cookie `HttpOnly` cùng origin; instance nonce của supervisor không đi vào JavaScript. **Connect current folder** trong IDE đăng ký repo, đặt nó làm global default cho task mới và start LCA khi cần; nó không đổi primary của task đang chạy.
 
 Archive giữ nguyên workspace ID, task, journal, blob và index nhưng loại workspace khỏi model routing/aggregate Changes. Restore kích hoạt lại đúng identity cũ. Remove permanently yêu cầu LCA đã dừng và xác nhận đúng label; nó xóa dữ liệu LCA bằng purge transaction có recovery nhưng giữ nguyên source repo. Default/configured workspace, task multi-workspace và transaction chưa hoàn tất đều bị chặn.
 
-Chi tiết: [docs/REVIEW_CHANGES.md](docs/REVIEW_CHANGES.md).
+Chi tiết: [docs/REVIEW_CHANGES.md](docs/REVIEW_CHANGES.md) và [docs/CONTROL_CENTER_HOSTS.md](docs/CONTROL_CENTER_HOSTS.md).
 
 ## Config
 

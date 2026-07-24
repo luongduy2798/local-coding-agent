@@ -349,6 +349,30 @@ export function createChangeRoutes({
     return { revision: changeListRevision(changes), ...changes };
   }
 
+  async function listSnapshot({ workspaceId = getPrimaryWorkspaceId(), taskId = null, limit = 200, offset = 0 } = {}) {
+    if (workspaceId === "all") return listAllWorkspaceChanges({ limit, offset, taskId });
+    const registry = getRegistry();
+    const descriptor = registry
+      ? await registry.getWorkspace(workspaceId, { allowArchived: true })
+      : { canonicalRoot: primaryRoot, registrationState: "active", metadata: {} };
+    return {
+      workspace_id: workspaceId,
+      label: descriptor.metadata?.label || path.basename(descriptor.canonicalRoot || primaryRoot),
+      canonical_root: descriptor.canonicalRoot || primaryRoot,
+      registration_state: descriptor.registrationState || "active",
+      task_id: taskId,
+      ...(await listOneWorkspaceChanges(workspaceId, { limit, offset, taskId }))
+    };
+  }
+
+  async function getDiffSnapshot({ workspaceId = getPrimaryWorkspaceId(), taskId = null, changeId, path: selectedPath } = {}) {
+    const journal = await getChangeJournal(workspaceId, { allowArchived: true });
+    return {
+      workspace_id: workspaceId,
+      ...(await journal.getDiff(changeId, { path: selectedPath || undefined, taskId }))
+    };
+  }
+
   async function listAllWorkspaceChanges({ limit, offset, taskId }) {
     const registry = getRegistry();
     if (!registry) {
@@ -371,7 +395,7 @@ export function createChangeRoutes({
     return { revision, workspaces: results };
   }
 
-  return { handle };
+  return { handle, listSnapshot, getDiffSnapshot };
 }
 
 function changeListRevision(value) {

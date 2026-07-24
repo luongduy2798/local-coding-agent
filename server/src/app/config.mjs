@@ -27,6 +27,7 @@ export async function loadApplicationConfig() {
   const configId = String(process.env.AGENT_CONFIG_ID || "");
   const instanceNonce = String(process.env.LCA_INSTANCE_NONCE || "");
   const companionWidgetPath = path.join(packageDir, "resources", "lca-compact-input-v2.html");
+  const controlCenterUiDir = path.join(repositoryDir, "vscode-extension", "dist");
   const primaryRoot = path.resolve(process.env.AGENT_WORKSPACE || path.join(repositoryDir, "agent-workspace"));
   const startupProfile = readStartupProfile(primaryRoot);
   const roots = dedupe([primaryRoot, ...parseExtraRoots(startupProfile)]);
@@ -157,6 +158,7 @@ export async function loadApplicationConfig() {
     CHECKPOINT_PATH: checkpointPath,
     CMD_OUTPUT_DEFAULT: commandOutputDefault,
     COMPANION_WIDGET_PATH: companionWidgetPath,
+    CONTROL_CENTER_UI_DIR: controlCenterUiDir,
     CONFIG_ID: configId,
     DATA_DIR: dataDir,
     DEFAULT_CMD_TIMEOUT: 60_000,

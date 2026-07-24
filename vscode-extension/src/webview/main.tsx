@@ -8,6 +8,12 @@ import {
   type ControlStateView,
   type WorkspaceRoute,
 } from "./control-center.js";
+import { createControlCenterHostBridge } from "./host-bridge.js";
+import type {
+  ControlCenterStateMessage as HostMessage,
+  ControlCenterViewState as ViewState,
+  SerializableConnectionState as ConnectionState,
+} from "./protocol.js";
 import "./styles.css";
 
 interface LineChangeStats {
@@ -38,15 +44,7 @@ function LineStats({
   );
 }
 
-interface VsCodeApi {
-  postMessage(message: unknown): void;
-  getState(): unknown;
-  setState(state: unknown): void;
-}
-
-declare function acquireVsCodeApi(): VsCodeApi;
-
-const vscode = acquireVsCodeApi();
+const host = createControlCenterHostBridge();
 
 type ChangeStatus =
   | "applied"
@@ -106,51 +104,6 @@ interface ChangeRecord {
   undoable: boolean;
 }
 
-type ConnectionState =
-  | { kind: "connected"; workspace: string; version: string; workspaceCount: number }
-  | { kind: "server_offline"; message: string }
-  | { kind: "workspace_mismatch"; message: string; workspace: string }
-  | { kind: "unauthorized"; message: string }
-  | { kind: "no_workspace"; message: string }
-  | { kind: "remote_blocked"; message: string };
-
-interface ViewState {
-  loading: boolean;
-  revision: number;
-  serverRevision?: string | number;
-  syncMode: "idle" | "sse" | "polling";
-  busyAction?: string;
-  trusted: boolean;
-  currentWorkspace?: string;
-  selectedWorkspaceKey?: string;
-  selectedTaskId?: string;
-  scopeError?: string;
-  workspaceOptions: Array<{
-    key: string;
-    label: string;
-    root: string;
-    workspaceId?: string;
-    available: boolean;
-    registered: boolean;
-    trusted: boolean;
-    opened: boolean;
-    registrationState: "active" | "archived";
-  }>;
-  taskOptions: Array<{
-    taskId: string;
-    title: string;
-    status?: string;
-  }>;
-  connection?: ConnectionState;
-  changes: ChangeRecord[];
-  control: ControlStateView;
-}
-
-interface HostMessage {
-  type: "state";
-  state: ViewState;
-}
-
 const initialState: ViewState = {
   loading: true,
   revision: 0,
@@ -178,36 +131,31 @@ const initialState: ViewState = {
     tasks: [],
     processes: [],
   },
+  host: { kind: host.kind, capabilities: host.capabilities },
 };
 
 function App(): React.JSX.Element {
   const [state, setState] = useState<ViewState>(initialState);
   const [route, setRoute] = useState<WorkspaceRoute>(() => {
-    const saved = vscode.getState() as { route?: { kind?: string } } | undefined;
+    const saved = host.getState() as { route?: { kind?: string } } | undefined;
     return saved?.route?.kind === "history" ? { kind: "history" } : { kind: "tasks" };
   });
   const [historyReturnKey, setHistoryReturnKey] = useState<string | undefined>();
 
   useEffect(() => {
-    const listener = (event: MessageEvent<HostMessage>) => {
-      if (event.data?.type !== "state") return;
-      latestViewRevision = Math.max(latestViewRevision, event.data.state.revision);
+    const unsubscribe = host.subscribe((message: HostMessage) => {
+      latestViewRevision = Math.max(latestViewRevision, message.state.revision);
       setState((current) => (
-        event.data.state.revision < current.revision ? current : event.data.state
+        message.state.revision < current.revision ? current : message.state
       ));
-    };
-    window.addEventListener("message", listener);
-    vscode.postMessage({ type: "ready" });
-    return () => window.removeEventListener("message", listener);
+    });
+    host.postMessage({ type: "ready" });
+    return unsubscribe;
   }, []);
 
   useEffect(() => {
-    vscode.setState({ route });
+    host.setState({ ...(host.getState() as Record<string, unknown> | undefined), route });
   }, [route]);
-
-  useEffect(() => {
-    if (state.selectedTaskId) post("selectTask", undefined, undefined, undefined);
-  }, [state.selectedTaskId]);
 
   const connected = state.connection?.kind === "connected";
   const currentWorkspace = state.workspaceOptions.find(
@@ -231,6 +179,7 @@ function App(): React.JSX.Element {
     <main className={`app-shell workspace-shell ${connected && route.kind === "tasks" ? "feed-mode" : ""}`}>
       <WorkspaceHeader
         control={state.control}
+        capabilities={state.host?.capabilities || host.capabilities}
         currentWorkspace={currentWorkspace}
         syncMode={state.syncMode}
         trusted={state.trusted}
@@ -926,7 +875,7 @@ function post(
       if (now - createdAt > 2000) recentMessages.delete(messageKey);
     }
   }
-  vscode.postMessage({
+  host.postMessage({
     type,
     changeId,
     path,
@@ -992,6 +941,8 @@ function operationDetails(operation: ChangeOperation): { marker: string; label: 
   };
   return values[operation];
 }
+
+window.addEventListener("beforeunload", () => host.dispose(), { once: true });
 
 const root = document.getElementById("root");
 if (!root) throw new Error("Review Changes root element was not found.");

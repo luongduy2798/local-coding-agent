@@ -1,23 +1,23 @@
 # Local Coding Agent Workspace Activity for VS Code
 
-The extension adds one workspace-focused **Workspace Activity** view to the VS Code Activity Bar.
+The extension is a thin VS Code host for the shared Local Coding Agent React Control Center. It adds one workspace-focused **Workspace Activity** view to the VS Code Activity Bar.
 It shows observable LCA runtime, activity, task and Review Changes state; it does not display
 `task_plan`, prompts, model thinking, tool arguments/output, or fake progress.
 
 ## Install and open
 
 ```bash
-lca extension setup
-lca extension
+lca integrations setup vscode
+lca integrations open vscode
 ```
 
 Uninstall:
 
 ```bash
-lca extension uninstall
+lca integrations uninstall vscode
 ```
 
-The normal `lca setup` command does not install editor integrations. Run `lca extension` from an
+`lca extension` remains a deprecated compatibility alias. The normal `lca setup` command does not install editor integrations. Run the integration command from an
 integrated terminal. **Connect current folder** registers that folder, makes it the global default
 for new tasks, and starts LCA when needed. It never changes the primary workspace of a task that is
 already open.
