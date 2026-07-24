@@ -34,6 +34,10 @@ export interface ToolActivityView {
   fileCount: number | null;
   toolClass: string | null;
   fingerprint: string | null;
+  purpose: string | null;
+  purposeFingerprint: string | null;
+  orchestrationEvent: string | null;
+  runState: string | null;
   duplicate: boolean;
   statusOnly: boolean;
   policySkip: boolean;
@@ -52,6 +56,17 @@ export interface TaskOrchestrationView {
   scope_reasons?: string[];
   phase?: string;
   evidence_status?: string;
+  run_state?: "running" | "retrying" | "blocked" | "waiting_for_user";
+  blocker?: {
+    code?: string;
+    step?: string;
+    summary?: string;
+    evidence?: string[];
+    required_action?: string | null;
+    retryable?: boolean;
+    purpose?: string | null;
+    target?: string | null;
+  } | null;
   budgets?: { discovery_soft_limit?: number | null; total_soft_limit?: number | null };
   counters?: {
     total_calls?: number;
@@ -61,6 +76,11 @@ export interface TaskOrchestrationView {
     status_only_calls?: number;
     failed_calls?: number;
     mutations?: number;
+    semantic_duplicate_calls?: number;
+    blockers_detected?: number;
+    transient_retries?: number;
+    retry_exhausted?: number;
+    tasks_resumed?: number;
   };
   last_notice?: {
     code?: string;
@@ -680,19 +700,26 @@ function TaskBlock({
     .slice(0, hiddenActivityCount)
     .reduce((count, activity) => count + (activity.repeatCount || 1), 0);
   const profile = item.task.effectiveProfile;
-  const displayStatus = taskDisplayStatus(item.task.status, running || item.runningProcessCount > 0, detached);
+  const runState = item.task.orchestration?.run_state;
+  const displayStatus = taskDisplayStatus(
+    item.task.status,
+    running || item.runningProcessCount > 0,
+    detached,
+    runState,
+  );
   const suggestedProfile = item.task.orchestration?.suggested_profile;
   const notice = item.task.orchestration?.last_notice;
+  const blocker = item.task.orchestration?.blocker;
   const showNotice = isUserVisibleOrchestrationNoticeCode(notice?.code);
   const objective = visibleTaskObjective(item.task);
 
   return (
-    <article className={`task-card ${latest ? "is-latest" : ""} ${displayStatus.stateTone === "running" ? "is-running" : ""} ${detached ? "is-detached" : ""}`}>
+    <article className={`task-card ${latest ? "is-latest" : ""} ${["running", "retrying"].includes(displayStatus.stateTone) ? "is-running" : ""} ${displayStatus.stateTone === "waiting" ? "is-waiting" : ""} ${displayStatus.stateTone === "blocked" ? "is-blocked" : ""} ${detached ? "is-detached" : ""}`}>
       <div className="task-card-header">
         <span className={`task-state-icon state-${displayStatus.stateTone}`}>
           {displayStatus.icon
             ? <Icon name={displayStatus.icon} />
-            : <RotatingDots label="Task running" />}
+            : <RotatingDots label={displayStatus.stateTone === "retrying" ? "Task retrying" : "Task running"} />}
         </span>
         <div className="task-card-copy">
           <div className="task-card-title-row">
@@ -744,6 +771,21 @@ function TaskBlock({
         )}
       </div>
 
+      {blocker?.summary && ["blocked", "waiting_for_user"].includes(runState || "") && (
+        <section className={`task-blocker-card blocker-${runState}`} role="status">
+          <strong>{runState === "waiting_for_user" ? "Waiting for input" : "Task blocked"}</strong>
+          <p>{blocker.summary}</p>
+          {blocker.evidence && blocker.evidence.length > 0 && (
+            <ul>
+              {blocker.evidence.map((item, index) => <li key={`${item}-${index}`}>{item}</li>)}
+            </ul>
+          )}
+          {blocker.required_action && (
+            <p className="task-blocker-action"><span>Required:</span> {blocker.required_action}</p>
+          )}
+        </section>
+      )}
+
       {(objective || latest || groupedActivities.length > 0) && (
         <div className="task-activity">
           {(objective || visibleActivities.length > 0) ? (
@@ -769,7 +811,7 @@ function TaskBlock({
                       : <Icon name={interruptedByDetach ? "stop" : activity.status === "finished" ? "check" : "warning"} />}
                   </span>
                   <div className="timeline-copy">
-                    <strong>{activityLabel(activity.tool)}{activity.repeatCount > 1 ? ` ×${activity.repeatCount}` : ""}</strong>
+                    <strong>{activityPurposeLabel(activity)}{activity.repeatCount > 1 ? ` · ${activity.repeatCount} attempts` : ""}</strong>
                     <span title={activity.tool}>{activity.tool}</span>
                     <span>
                       {activity.cacheHit
@@ -837,6 +879,10 @@ export function visibleTaskObjective(
   const objective = task.objective?.trim();
   if (!objective || objective === task.title.trim()) return null;
   return objective;
+}
+
+export function activityPurposeLabel(activity: Pick<ToolActivityView, "tool" | "purpose">): string {
+  return activity.purpose ? humanizeTool(activity.purpose) : activityLabel(activity.tool);
 }
 
 export function activityLabel(tool: string): string {
@@ -1048,13 +1094,18 @@ interface GroupedToolActivity extends ToolActivityView {
   repeatCount: number;
 }
 
-function groupRepeatedActivities(activities: ToolActivityView[]): GroupedToolActivity[] {
+export function groupRepeatedActivities(activities: ToolActivityView[]): GroupedToolActivity[] {
   const grouped: GroupedToolActivity[] = [];
   for (const activity of activities) {
     const previous = grouped[grouped.length - 1];
-    const groupable = isRedundantActivity(activity) && previous && isRedundantActivity(previous) &&
-      previous.tool === activity.tool &&
-      previous.orchestrationNoticeCode === activity.orchestrationNoticeCode;
+    const samePurpose = Boolean(activity.purposeFingerprint) && previous?.purposeFingerprint === activity.purposeFingerprint;
+    const groupable = Boolean(previous) && (
+      samePurpose || (
+        isRedundantActivity(activity) && isRedundantActivity(previous) &&
+        previous.tool === activity.tool &&
+        previous.orchestrationNoticeCode === activity.orchestrationNoticeCode
+      )
+    );
     if (!groupable) {
       grouped.push({ ...activity, repeatCount: 1 });
       continue;
@@ -1084,8 +1135,18 @@ function taskDisplayStatus(
   status: string,
   hasRunningActivity: boolean,
   detached: boolean,
-): { label: string; badgeTone: string; stateTone: "running" | "detached" | "complete" | "failed"; icon: IconName | null } {
+  runState?: string | null,
+): { label: string; badgeTone: string; stateTone: "running" | "retrying" | "waiting" | "blocked" | "detached" | "complete" | "failed"; icon: IconName | null } {
   const normalized = status.toLowerCase();
+  if (runState === "waiting_for_user") {
+    return { label: "Waiting for input", badgeTone: "incomplete", stateTone: "waiting", icon: "stop" };
+  }
+  if (runState === "blocked") {
+    return { label: "Blocked", badgeTone: "fail", stateTone: "blocked", icon: "warning" };
+  }
+  if (runState === "retrying") {
+    return { label: "Retrying", badgeTone: "incomplete", stateTone: "retrying", icon: null };
+  }
   if (detached) {
     return { label: "Detached", badgeTone: "incomplete", stateTone: "detached", icon: "stop" };
   }
@@ -1133,10 +1194,9 @@ function taskTiming(
     if (timestamp === null) return latest;
     return latest === null ? timestamp : Math.max(latest, timestamp);
   }, null);
-  const detachedFallback = isOpenTask(task.status) && task.sessionBound === false
-    ? latestActivityAt ?? finiteTimestamp(task.updatedAt)
+  const effectiveDetachedAt = detachedAt !== null && (latestActivityAt === null || latestActivityAt <= detachedAt)
+    ? detachedAt
     : null;
-  const effectiveDetachedAt = detachedAt ?? detachedFallback;
   const activeToolTimeMs = mergedActivityDurationMs(activities, effectiveDetachedAt);
   const endedAt = closedAt ?? effectiveDetachedAt ?? (startedAt !== null ? Date.now() : null);
   const elapsedMs = startedAt !== null && endedAt !== null
@@ -1231,10 +1291,20 @@ function humanizeTool(value: string): string {
     .join(" ");
 }
 
-export function taskIsDetached(item: Pick<TaskPresentation, "task" | "runningProcessCount">): boolean {
-  return isOpenTask(item.task.status)
-    && item.task.sessionBound === false
-    && item.runningProcessCount === 0;
+export function taskIsDetached(item: Pick<TaskPresentation, "task" | "activities" | "runningProcessCount">): boolean {
+  const detachedAt = finiteTimestamp(item.task.detachedAt);
+  if (
+    !isOpenTask(item.task.status)
+    || item.task.sessionBound !== false
+    || item.runningProcessCount > 0
+    || detachedAt === null
+  ) {
+    return false;
+  }
+  return !item.activities.some((activity) => {
+    const activityAt = finiteTimestamp(activity.finishedAt || activity.startedAt);
+    return activityAt !== null && activityAt > detachedAt;
+  });
 }
 
 function detachedActivityDuration(

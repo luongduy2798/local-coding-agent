@@ -4,6 +4,7 @@
 
 import { randomUUID } from "node:crypto";
 import { TaskRouterError } from "../workspace/task-router.mjs";
+import { operationalPayloadSuccess } from "../workspace/task-blockers.mjs";
 import { withDiscoveryGroups } from "./discovery-groups.mjs";
 import {
   advanceTaskOrchestration,
@@ -160,6 +161,8 @@ export function createToolRegistrar({
           tool: name,
           tool_class: inspection?.tool_class || null,
           fingerprint: inspection?.fingerprint || null,
+          purpose: inspection?.purpose?.purpose || null,
+          purpose_fingerprint: inspection?.purpose?.fingerprint || null,
           duplicate: inspection?.duplicate === true,
           task_id: taskBefore?.id || null,
           effective_profile: taskBefore?.effective_profile || null,
@@ -223,7 +226,7 @@ export function createToolRegistrar({
           : null;
         if (inspection?.skip) {
           skipped = true;
-          result = structuredResult({
+          result = structuredResult(inspection.response || {
             ok: true,
             skipped: true,
             code: inspection.notice?.code || "TASK_ORCHESTRATION_SKIP",
@@ -276,12 +279,13 @@ export function createToolRegistrar({
 
       const finishedAt = isoNow();
       let payload = parseStructuredPayload(result, firstText);
+      const operationalSuccess = ok && !result?.isError && operationalPayloadSuccess(payload);
       if (taskBefore && name !== "task_close") {
         observation = advanceTaskOrchestration({
           task: taskBefore,
           tool: name,
           args: args ?? {},
-          success: ok && !result?.isError,
+          success: operationalSuccess,
           resultPayload: payload,
           invocationId,
           finishedAt,
@@ -314,7 +318,7 @@ export function createToolRegistrar({
         Number(requestMetrics?.responseBudget || defaultResponseBytes)
       );
       result = enforceResultBudget(result, responseBudget);
-      const success = ok && !result?.isError;
+      const success = operationalSuccess && !result?.isError;
       const outChars = resultLen(result);
       const outBytes = resultBytes(result);
       const durationMs = roundMs(performance.now() - startedMs);
@@ -357,6 +361,10 @@ export function createToolRegistrar({
         tool: name,
         tool_class: observation?.tool_class || inspection?.tool_class || null,
         fingerprint: observation?.fingerprint || inspection?.fingerprint || null,
+        purpose: observation?.purpose || inspection?.purpose?.purpose || null,
+        purpose_fingerprint: observation?.purpose_fingerprint || inspection?.purpose?.fingerprint || null,
+        orchestration_event: observation?.orchestration_event || null,
+        run_state: observation?.run_state || publicOrchestration?.run_state || null,
         duplicate: observation?.duplicate === true || inspection?.duplicate === true,
         status_only: observation?.status_only === true,
         policy_skip: !cacheHit && (observation?.policy_skip === true || skipped),

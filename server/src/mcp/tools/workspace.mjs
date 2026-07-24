@@ -223,17 +223,22 @@ export function registerWorkspaceTools(mcp, dependencies) {
         primary_workspace_id: z.string().min(1).optional().describe("Required for the first new task unless conversation_workspace_token already resolves a pinned workspace. If both are provided, they must match."),
         conversation_workspace_token: z.string().min(1).max(200).optional().describe("Opaque token returned by the first task_open in this conversation. Reuse it for every later new task to retain the pinned workspace."),
         attached_workspace_ids: z.array(z.string()).max(8).optional(),
-        task_token: z.string().optional().describe("Resume an existing task after reconnect.")
+        task_token: z.string().optional().describe("Resume an existing task after reconnect."),
+        resume: z.object({
+          resolved_blocker_code: z.string().min(1).max(80).optional(),
+          new_input: z.record(z.unknown()).optional(),
+          changed_targets: z.array(z.string().max(2000)).max(32).optional()
+        }).optional()
       }
     },
-    async ({ objective, title, complexity_hint, complexity_override = false, primary_workspace_id, conversation_workspace_token, attached_workspace_ids = [], task_token }) => {
+    async ({ objective, title, complexity_hint, complexity_override = false, primary_workspace_id, conversation_workspace_token, attached_workspace_ids = [], task_token, resume }) => {
       if (!taskRouter || !registry) {
         throw new Error(`Multi-workspace task storage unavailable: ${storageError?.message || "unknown error"}`);
       }
       const sessionId = currentMcpSessionId();
       let conversationToken = normalizeConversationWorkspaceToken(conversation_workspace_token);
       if (task_token) {
-        const resumed = await taskRouter.resumeTask({ taskToken: task_token, sessionId });
+        const resumed = await taskRouter.resumeTask({ taskToken: task_token, sessionId, resume });
         if (conversationToken) {
           const pinned = await getConversationWorkspace(registry, conversationToken);
           if (!pinned) {

@@ -10,6 +10,7 @@ import { filterAuditForRegisteredWorkspaces } from "../src/control-center/contro
 import {
   buildWorkspaceTasks,
   ChronologicalTaskFeed,
+  groupRepeatedActivities,
   isScrollNearBottom,
   taskActivitiesExpanded,
   taskIsDetached,
@@ -324,6 +325,26 @@ async function main(): Promise<void> {
     "running task and running tool rows must both render RotatingDots",
   );
 
+  const tokenOnlyItem = {
+    ...renderTasks[0],
+    task: {
+      ...renderTasks[0].task,
+      sessionBound: false,
+      detachedAt: null,
+    },
+  };
+  assert.equal(taskIsDetached(tokenOnlyItem), false, "a token-only task without detach evidence must remain active");
+
+  const continuedAfterDetachItem = {
+    ...renderTasks[0],
+    task: {
+      ...renderTasks[0].task,
+      sessionBound: false,
+      detachedAt: "2026-07-22T03:00:01.500Z",
+    },
+  };
+  assert.equal(taskIsDetached(continuedAfterDetachItem), false, "new tool activity must invalidate stale detach metadata");
+
   const detachedItem = {
     ...renderTasks[0],
     task: {
@@ -332,7 +353,7 @@ async function main(): Promise<void> {
       detachedAt: "2026-07-22T03:00:04.000Z",
     },
   };
-  assert.equal(taskIsDetached(detachedItem), true, "an open task without a session or live work must be detached");
+  assert.equal(taskIsDetached(detachedItem), true, "an open task without a session or activity after detach must be detached");
   const detachedTaskFeed = renderToStaticMarkup(React.createElement(ChronologicalTaskFeed, {
     tasks: [detachedItem],
     workspaceLabel: "local-coding-agent",
@@ -346,6 +367,71 @@ async function main(): Promise<void> {
   assert.match(detachedTaskFeed, /Close detached task Rendered latest task/, "detached tasks must expose a safe close action");
   assert.doesNotMatch(detachedTaskFeed, /Task running|rotating-dots/, "detached tasks and stale started calls must not render running indicators");
   assert.match(detachedTaskFeed, /Interrupted after/, "a stale started call must freeze as interrupted when its task detaches");
+
+  const semanticActivities = [
+    {
+      ...activity("semantic-first", ["ws_cccccccccccccccc"]),
+      tool: "run_command",
+      purpose: "check_file_exists",
+      purposeFingerprint: "purpose-export-zip",
+      taskId: renderTaskId,
+    },
+    {
+      ...activity("semantic-second", ["ws_cccccccccccccccc"]),
+      tool: "run_command",
+      purpose: "check_file_exists",
+      purposeFingerprint: "purpose-export-zip",
+      taskId: renderTaskId,
+    },
+    {
+      ...activity("forensic-distinct", ["ws_cccccccccccccccc"]),
+      tool: "run_command",
+      purpose: "read_audit_timeline",
+      purposeFingerprint: "purpose-audit-timeline",
+      taskId: renderTaskId,
+    },
+  ];
+  const semanticGroups = groupRepeatedActivities(semanticActivities as never);
+  assert.equal(semanticGroups.length, 2, "only adjacent calls with the same semantic purpose should collapse");
+  assert.equal(semanticGroups[0].repeatCount, 2);
+  assert.equal(semanticGroups[1].repeatCount, 1, "distinct forensic purposes must remain separate");
+
+  const blockedItem = {
+    ...renderTasks[0],
+    task: {
+      ...renderTasks[0].task,
+      orchestration: {
+        run_state: "waiting_for_user" as const,
+        blocker: {
+          code: "missing_file",
+          summary: "The uploaded ZIP is not available on the Macmini host.",
+          evidence: ["/mnt/data/export.zip was not found."],
+          required_action: "Copy it into the workspace and provide its local Mac path.",
+        },
+      },
+    },
+    activities: renderTasks[0].activities.map((entry) => ({
+      ...entry,
+      status: "finished" as const,
+      ok: true,
+      finishedAt: entry.finishedAt || entry.startedAt,
+      durationMs: entry.durationMs || 1,
+    })),
+  };
+  const blockedTaskFeed = renderToStaticMarkup(React.createElement(ChronologicalTaskFeed, {
+    tasks: [blockedItem],
+    workspaceLabel: "local-coding-agent",
+    workspaceId: "ws_cccccccccccccccc",
+    onCloseDetachedTask: () => undefined,
+    onDeleteTask: () => undefined,
+    onDeleteAll: () => undefined,
+    renderChanges: () => null,
+  }));
+  assert.match(blockedTaskFeed, />Waiting for input</, "waiting tasks must replace the running badge");
+  assert.match(blockedTaskFeed, /The uploaded ZIP is not available on the Macmini host/);
+  assert.match(blockedTaskFeed, /Required:/);
+  assert.match(blockedTaskFeed, /Copy it into the workspace/);
+  assert.doesNotMatch(blockedTaskFeed, /Task running/, "blocked tasks must stop the task spinner");
 
   assert.equal(
     isScrollNearBottom({ scrollHeight: 1_000, scrollTop: 764, clientHeight: 200 }),
@@ -454,6 +540,22 @@ function activity(invocationId: string, workspaceIds: string[]) {
     verification: null,
     changeCount: null,
     fileCount: null,
+    toolClass: null,
+    fingerprint: null,
+    purpose: null,
+    purposeFingerprint: null,
+    orchestrationEvent: null,
+    runState: null,
+    duplicate: false,
+    statusOnly: false,
+    policySkip: false,
+    cacheHit: false,
+    evidenceDelta: false,
+    orchestrationNoticeCode: null,
+    orchestrationPhaseBefore: null,
+    orchestrationPhaseAfter: null,
+    effectiveProfile: null,
+    evidenceStatus: null,
   };
 }
 

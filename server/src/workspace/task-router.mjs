@@ -14,7 +14,8 @@ import {
   classifyTaskComplexity,
   createTaskOrchestration,
   normalizeTaskObjective,
-  normalizeTaskOrchestration
+  normalizeTaskOrchestration,
+  resumeTaskOrchestration
 } from "./task-orchestration.mjs";
 
 const MAX_WORKSPACES_PER_TASK = 9;
@@ -102,7 +103,7 @@ export class TaskRouter {
         classification.complexity_override ? 1 : 0,
         classification.confidence,
         JSON.stringify(orchestration),
-        ownerSession ? null : timestamp,
+        null,
         timestamp,
         timestamp
       ]
@@ -129,7 +130,7 @@ export class TaskRouter {
     return { ...(await this.getTaskById(taskId)), task_token: taskToken };
   }
 
-  async resumeTask({ taskToken, sessionId } = {}) {
+  async resumeTask({ taskToken, sessionId, resume } = {}) {
     const task = await this.getTaskByToken(taskToken);
     if (task.status !== "open") {
       throw new TaskRouterError("TASK_CLOSED", `Task is ${task.status}: ${task.id}`, { task_id: task.id });
@@ -148,7 +149,17 @@ export class TaskRouter {
       steps.push(refreshTaskSessionStateStep(task.id, timestamp));
       await this.database.batch(steps);
     }
-    return this.getTaskById(task.id);
+    let resumed = await this.getTaskById(task.id);
+    if (resume && typeof resume === "object" && !Array.isArray(resume)) {
+      const orchestration = resumeTaskOrchestration(resumed.orchestration, resume);
+      resumed = await this.updateOrchestration({
+        taskId: resumed.id,
+        orchestration,
+        effectiveProfile: resumed.effective_profile,
+        profileConfidence: resumed.profile_confidence
+      });
+    }
+    return resumed;
   }
 
   async getTask({ taskToken, sessionId, required = true } = {}) {
@@ -234,7 +245,6 @@ export class TaskRouter {
                 ELSE detached_at
               END
           WHERE owner_session_id IS NOT NULL
-             OR (status = 'open' AND detached_at IS NULL)
         `,
         params: []
       }

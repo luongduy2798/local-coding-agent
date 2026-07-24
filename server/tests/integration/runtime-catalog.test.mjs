@@ -55,7 +55,7 @@ const EXPECTED_CATALOG_HASH = createHash("sha256")
   .update([...EXPECTED_TOOLS].sort().join("\n"))
   .digest("hex")
   .slice(0, 16);
-const MAX_TOOLS_LIST_BYTES = 30_000;
+const MAX_TOOLS_LIST_BYTES = 35_000;
 const PROTOCOL_VERSION = "2025-06-18";
 
 const context = await createIsolatedTestRoot({
@@ -699,17 +699,21 @@ async function firstSseEvent(port, pathname, headers = {}) {
     reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
-    while (!buffer.includes("\n\n")) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
+    while (true) {
+      while (!buffer.includes("\n\n")) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
+      }
+      const boundary = buffer.indexOf("\n\n");
+      assert.ok(boundary >= 0, "SSE endpoint must emit a complete event");
+      const block = buffer.slice(0, boundary);
+      buffer = buffer.slice(boundary + 2);
+      const dataText = block.match(/^data:\s*(.+)$/m)?.[1];
+      if (!dataText) continue;
+      const event = block.match(/^event:\s*(.+)$/m)?.[1] || "message";
+      return { event, data: JSON.parse(dataText) };
     }
-    const boundary = buffer.indexOf("\n\n");
-    assert.ok(boundary >= 0, "SSE endpoint must emit a complete event");
-    const block = buffer.slice(0, boundary);
-    const event = block.match(/^event:\s*(.+)$/m)?.[1] || "message";
-    const dataText = block.match(/^data:\s*(.+)$/m)?.[1] || "{}";
-    return { event, data: JSON.parse(dataText) };
   } finally {
     clearTimeout(timeout);
     await reader?.cancel().catch(() => {});

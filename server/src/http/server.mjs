@@ -140,6 +140,8 @@ export function createApplicationHttpServer({
             evidence_status: task.orchestration.evidence_status,
             budgets: task.orchestration.budgets,
             counters: task.orchestration.counters,
+            run_state: task.orchestration.run_state,
+            blocker: task.orchestration.blocker,
             last_notice: task.orchestration.last_notice
           } : null,
           status: task.status,

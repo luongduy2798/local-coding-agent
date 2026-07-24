@@ -26,6 +26,10 @@ export interface ToolActivity {
   fileCount: number | null;
   toolClass: string | null;
   fingerprint: string | null;
+  purpose: string | null;
+  purposeFingerprint: string | null;
+  orchestrationEvent: string | null;
+  runState: string | null;
   duplicate: boolean;
   statusOnly: boolean;
   policySkip: boolean;
@@ -66,6 +70,10 @@ interface ProjectedEvent {
   fileCount?: number | null;
   toolClass?: string | null;
   fingerprint?: string | null;
+  purpose?: string | null;
+  purposeFingerprint?: string | null;
+  orchestrationEvent?: string | null;
+  runState?: string | null;
   duplicate?: boolean;
   statusOnly?: boolean;
   policySkip?: boolean;
@@ -305,6 +313,10 @@ function projectAuditEvent(raw: unknown): ProjectedEvent | null {
     fileCount: safeCount(value.file_count),
     toolClass: safeLowerIdentifier(value.tool_class),
     fingerprint: safeIdentifier(value.fingerprint, 80),
+    purpose: safeLowerIdentifier(value.purpose),
+    purposeFingerprint: safeIdentifier(value.purpose_fingerprint, 80),
+    orchestrationEvent: safeLowerIdentifier(value.orchestration_event),
+    runState: safeLowerIdentifier(value.run_state),
     duplicate: value.duplicate === true,
     statusOnly: value.status_only === true,
     policySkip: value.policy_skip === true,
@@ -349,6 +361,10 @@ function buildActivities(events: Iterable<ProjectedEvent>): ToolActivity[] {
         fileCount: null,
         toolClass: event.toolClass || null,
         fingerprint: event.fingerprint || null,
+        purpose: event.purpose || null,
+        purposeFingerprint: event.purposeFingerprint || null,
+        orchestrationEvent: event.orchestrationEvent || null,
+        runState: event.runState || null,
         duplicate: event.duplicate === true,
         statusOnly: event.statusOnly === true,
         policySkip: event.policySkip === true,
@@ -383,6 +399,10 @@ function buildActivities(events: Iterable<ProjectedEvent>): ToolActivity[] {
       fileCount: event.fileCount ?? existing?.fileCount ?? null,
       toolClass: event.toolClass || existing?.toolClass || null,
       fingerprint: event.fingerprint || existing?.fingerprint || null,
+      purpose: event.purpose || existing?.purpose || null,
+      purposeFingerprint: event.purposeFingerprint || existing?.purposeFingerprint || null,
+      orchestrationEvent: event.orchestrationEvent || existing?.orchestrationEvent || null,
+      runState: event.runState || existing?.runState || null,
       duplicate: event.duplicate === true || existing?.duplicate === true,
       statusOnly: event.statusOnly === true || existing?.statusOnly === true,
       policySkip: event.policySkip === true || existing?.policySkip === true,

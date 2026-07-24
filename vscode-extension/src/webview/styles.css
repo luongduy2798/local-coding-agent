@@ -1585,12 +1585,23 @@ button {
 }
 
 .task-state-icon.state-detached,
-.task-state-icon.state-incomplete {
+.task-state-icon.state-incomplete,
+.task-state-icon.state-waiting,
+.task-state-icon.state-retrying {
   color: var(--vscode-editorWarning-foreground);
 }
 
-.task-card.is-detached {
+.task-state-icon.state-blocked {
+  color: var(--vscode-testing-iconFailed, #f85149);
+}
+
+.task-card.is-detached,
+.task-card.is-waiting {
   border-color: color-mix(in srgb, var(--vscode-editorWarning-foreground) 55%, var(--vscode-panel-border));
+}
+
+.task-card.is-blocked {
+  border-color: color-mix(in srgb, var(--vscode-testing-iconFailed, #f85149) 55%, var(--vscode-panel-border));
 }
 
 .task-state-icon.state-failed {
@@ -1985,6 +1996,40 @@ button {
   max-width: 220px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.task-blocker-card {
+  margin: 0 8px 9px 42px;
+  padding: 9px 10px;
+  border: 1px solid color-mix(in srgb, var(--vscode-editorWarning-foreground) 45%, transparent);
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--vscode-editorWarning-foreground) 8%, var(--vscode-editorWidget-background));
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.task-blocker-card.blocker-blocked {
+  border-color: color-mix(in srgb, var(--vscode-testing-iconFailed, #f85149) 45%, transparent);
+  background: color-mix(in srgb, var(--vscode-testing-iconFailed, #f85149) 8%, var(--vscode-editorWidget-background));
+}
+
+.task-blocker-card strong {
+  display: block;
+  margin-bottom: 4px;
+}
+
+.task-blocker-card p {
+  margin: 3px 0;
+}
+
+.task-blocker-card ul {
+  margin: 5px 0;
+  padding-left: 18px;
+  color: var(--vscode-descriptionForeground);
+}
+
+.task-blocker-action span {
+  font-weight: 700;
 }
 
 .task-objective {

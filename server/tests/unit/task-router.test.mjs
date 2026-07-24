@@ -82,6 +82,8 @@ test("TaskRouter locks an explicit multi-workspace set and resumes by token", {
     });
     assert.equal(objectiveOnly.title, "Create durable task metadata. Preserve this second line.");
     assert.equal(objectiveOnly.objective, "Create durable task metadata.\nPreserve this second line.");
+    assert.equal(objectiveOnly.session_bound, false);
+    assert.equal(objectiveOnly.detached_at, null, "token-only tasks must not be born detached");
     const defaultMetadata = await router.openTask({
       primaryWorkspaceId: "ws_aaaaaaaaaaaaaaaa"
     });
@@ -197,6 +199,8 @@ test("TaskRouter locks an explicit multi-workspace set and resumes by token", {
     const resetState = await router.getTaskById(resetCandidate.id);
     assert.equal(resetState.session_bound, false);
     assert.ok(resetState.detached_at);
+    const tokenOnlyAfterReset = await router.getTaskById(objectiveOnly.id);
+    assert.equal(tokenOnlyAfterReset.detached_at, null, "startup cleanup must detach only tasks that had a session binding");
 
     const closed = await router.closeTask({ taskToken: resetCandidate.task_token });
     assert.equal(closed.status, "closed");

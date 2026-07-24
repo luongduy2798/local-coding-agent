@@ -39,12 +39,27 @@ export interface WorkspaceDescriptor {
 
 export type TaskComplexityProfile = "quick_edit" | "normal" | "complex";
 
+export interface TaskBlockerDescriptor {
+  code?: "missing_input" | "missing_file" | "workspace_mismatch" | "permission_denied" | "tool_unavailable" | "repeated_no_progress" | "command_timeout" | "unknown";
+  step?: string;
+  summary?: string;
+  evidence?: string[];
+  required_action?: string | null;
+  retryable?: boolean;
+  purpose?: string | null;
+  target?: string | null;
+  detected_at?: string;
+  source_invocation_id?: string | null;
+}
+
 export interface TaskOrchestrationDescriptor {
   suggested_profile?: TaskComplexityProfile | null;
   scope_signal?: "expanded" | "reduced" | "aligned" | null;
   scope_reasons?: string[];
   phase?: "opened" | "discovering" | "decision_ready" | "mutating" | "confirming" | "blocked" | "closing";
   evidence_status?: "not_started" | "insufficient" | "likely_sufficient" | "target_confirmed" | "mutation_applied" | "confirmation_complete";
+  run_state?: "running" | "retrying" | "blocked" | "waiting_for_user";
+  blocker?: TaskBlockerDescriptor | null;
   budgets?: {
     discovery_soft_limit?: number | null;
     total_soft_limit?: number | null;
@@ -57,6 +72,11 @@ export interface TaskOrchestrationDescriptor {
     status_only_calls?: number;
     failed_calls?: number;
     mutations?: number;
+    semantic_duplicate_calls?: number;
+    blockers_detected?: number;
+    transient_retries?: number;
+    retry_exhausted?: number;
+    tasks_resumed?: number;
   };
   last_notice?: {
     code?: string;

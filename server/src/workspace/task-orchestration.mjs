@@ -3,6 +3,14 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import { createHash } from "node:crypto";
+import {
+  advanceTaskExecutionControl,
+  createTaskExecutionControl,
+  inspectTaskExecutionControl,
+  normalizeTaskExecutionControl,
+  publicTaskExecutionControl,
+  resumeTaskExecutionControl
+} from "./task-blockers.mjs";
 
 const PROFILES = new Set(["quick_edit", "normal", "complex"]);
 const PHASES = new Set(["opened", "discovering", "decision_ready", "mutating", "confirming", "blocked", "closing"]);
@@ -94,7 +102,7 @@ export function classifyTaskComplexity({
 export function createTaskOrchestration(classification = {}) {
   const effectiveProfile = normalizeComplexityProfile(classification.effective_profile, "normal");
   return {
-    version: 1,
+    version: 2,
     requested_profile: normalizeComplexityProfile(classification.requested_profile),
     effective_profile: effectiveProfile,
     confidence: finiteConfidence(classification.confidence),
@@ -107,6 +115,7 @@ export function createTaskOrchestration(classification = {}) {
     budgets: profileBudgets(effectiveProfile),
     counters: emptyCounters(),
     mutation_epoch: 0,
+    ...createTaskExecutionControl(),
     recent_fingerprints: [],
     last_status_normalized: null,
     last_notice: null,
@@ -118,7 +127,7 @@ export function normalizeTaskOrchestration(value, fallbackProfile = "normal") {
   const source = value && typeof value === "object" && !Array.isArray(value) ? value : {};
   const effectiveProfile = normalizeComplexityProfile(source.effective_profile, normalizeComplexityProfile(fallbackProfile, "normal"));
   return {
-    version: 1,
+    version: 2,
     requested_profile: normalizeComplexityProfile(source.requested_profile),
     effective_profile: effectiveProfile,
     confidence: finiteConfidence(source.confidence),
@@ -131,6 +140,7 @@ export function normalizeTaskOrchestration(value, fallbackProfile = "normal") {
     budgets: normalizeBudgets(source.budgets, effectiveProfile),
     counters: normalizeCounters(source.counters),
     mutation_epoch: nonNegativeInteger(source.mutation_epoch),
+    ...normalizeTaskExecutionControl(source),
     recent_fingerprints: normalizeFingerprints(source.recent_fingerprints),
     last_status_normalized: normalizeOptionalString(source.last_status_normalized, 240),
     last_notice: normalizeNotice(source.last_notice),
@@ -153,6 +163,7 @@ export function publicTaskOrchestration(value, fallbackProfile = "normal") {
     evidence_status: state.evidence_status,
     budgets: state.budgets,
     counters: state.counters,
+    ...publicTaskExecutionControl(state),
     last_notice: state.last_notice,
     recommended_transition: recommendedTransition(state)
   };
@@ -188,7 +199,8 @@ export function inspectTaskTool({ task, tool, args = {} } = {}) {
   const toolClass = classifyTaskTool(tool, args);
   const fingerprint = taskToolFingerprint(tool, args, state);
   const previous = state.recent_fingerprints.find((entry) => entry.fingerprint === fingerprint) || null;
-  const evidenceGap = normalizeOptionalString(args.evidence_gap, 1_000);
+  const executionInspection = inspectTaskExecutionControl({ task, orchestration: state, tool, args });
+  const evidenceGap = executionInspection.evidence_gap || normalizeOptionalString(args.evidence_gap, 1_000);
   const statusNormalized = tool === "task_state" ? normalizeStatusText(args.status) : null;
   const statusOnly = tool === "task_state" && Boolean(statusNormalized) &&
     args.set_step_done === undefined && (!Array.isArray(args.add_steps) || args.add_steps.length === 0);
@@ -196,7 +208,10 @@ export function inspectTaskTool({ task, tool, args = {} } = {}) {
   let skip = false;
   let notice = null;
 
-  if (statusDuplicate) {
+  if (executionInspection.halt) {
+    skip = true;
+    notice = executionInspection.notice;
+  } else if (statusDuplicate) {
     skip = true;
     notice = buildNotice(
       "DUPLICATE_STATUS_UPDATE",
@@ -241,12 +256,16 @@ export function inspectTaskTool({ task, tool, args = {} } = {}) {
     tool_class: toolClass,
     fingerprint,
     previous,
-    duplicate: Boolean(previous),
+    duplicate: Boolean(previous) || executionInspection.semantic_duplicate,
     status_only: statusOnly,
     status_normalized: statusNormalized,
     evidence_gap: evidenceGap,
     source_changed: false,
     skip,
+    halt: executionInspection.halt,
+    purpose: executionInspection.purpose,
+    purpose_previous: executionInspection.previous,
+    response: executionInspection.response,
     notice
   };
 }
@@ -263,7 +282,8 @@ export function advanceTaskOrchestration({
   skipped = false
 } = {}) {
   const observed = inspection || inspectTaskTool({ task, tool, args });
-  const resultTask = tool === "task_reclassify" && resultPayload?.task && typeof resultPayload.task === "object"
+  const resultTask = ["task_open", "task_reclassify"].includes(String(tool || "")) &&
+    resultPayload?.task && typeof resultPayload.task === "object"
     ? resultPayload.task
     : null;
   const state = normalizeTaskOrchestration(
@@ -371,7 +391,32 @@ export function advanceTaskOrchestration({
       : counters.stagnant_discovery_calls + 1;
   }
 
-  let notice = observed.notice;
+  const executionControl = advanceTaskExecutionControl({
+    orchestration: state,
+    inspection: {
+      halt: observed.halt,
+      notice: observed.notice,
+      semantic_duplicate: Boolean(observed.purpose_previous),
+      purpose: observed.purpose,
+      previous: observed.purpose_previous,
+      evidence_gap: observed.evidence_gap
+    },
+    tool,
+    args,
+    success,
+    resultPayload,
+    invocationId,
+    finishedAt,
+    skipped
+  });
+  if (executionControl.phase_override) phase = executionControl.phase_override;
+  if (executionControl.evidence_delta !== null) evidenceDelta = executionControl.evidence_delta;
+  if (executionControl.semantic_duplicate) counters.semantic_duplicate_calls++;
+  if (executionControl.blocker_detected) counters.blockers_detected++;
+  if (executionControl.retry_started) counters.transient_retries++;
+  if (executionControl.retry_exhausted) counters.retry_exhausted++;
+
+  let notice = executionControl.notice || observed.notice;
   if (!notice && scopeSignal === "expanded") {
     notice = buildNotice(
       "TASK_PROFILE_REVIEW_SUGGESTED",
@@ -404,6 +449,7 @@ export function advanceTaskOrchestration({
 
   const next = {
     ...state,
+    ...executionControl.state,
     effective_profile: effectiveProfile,
     suggested_profile: suggestedProfile,
     scope_signal: scopeSignal,
@@ -426,12 +472,35 @@ export function advanceTaskOrchestration({
     notice,
     tool_class: observed.tool_class,
     fingerprint: observed.fingerprint,
+    purpose: observed.purpose?.purpose || null,
+    purpose_fingerprint: observed.purpose?.fingerprint || null,
+    orchestration_event: executionControl.event,
+    run_state: next.run_state,
     duplicate: observed.duplicate,
     status_only: observed.status_only,
     policy_skip: skipped,
     evidence_delta: evidenceDelta,
     phase_before: state.phase,
     phase_after: next.phase
+  };
+}
+
+export function resumeTaskOrchestration(value, resume = {}) {
+  const state = normalizeTaskOrchestration(value);
+  const executionControl = resumeTaskExecutionControl(state, resume);
+  const counters = { ...state.counters, tasks_resumed: state.counters.tasks_resumed + 1 };
+  return {
+    ...state,
+    ...executionControl,
+    phase: "decision_ready",
+    counters,
+    last_notice: buildNotice(
+      "TASK_RESUMED",
+      "info",
+      "New user input was recorded and the blocked purpose can be retried.",
+      "continue_from_blocked_step"
+    ),
+    updated_at: new Date().toISOString()
   };
 }
 
@@ -526,6 +595,9 @@ function profileBudgets(profile) {
 }
 
 function recommendedTransition(state) {
+  if (state.run_state === "waiting_for_user") return "report_blocker_and_wait_for_user";
+  if (state.run_state === "blocked") return "report_blocker";
+  if (state.run_state === "retrying") return "retry_once_or_report_blocker";
   if (state.last_notice?.recommended_transition) return state.last_notice.recommended_transition;
   if (state.phase === "decision_ready") return "make_decision_or_gather_specific_evidence";
   if (state.phase === "confirming") return "confirm_or_close";
@@ -544,7 +616,12 @@ function emptyCounters() {
     stagnant_discovery_calls: 0,
     status_only_calls: 0,
     failed_calls: 0,
-    mutations: 0
+    mutations: 0,
+    semantic_duplicate_calls: 0,
+    blockers_detected: 0,
+    transient_retries: 0,
+    retry_exhausted: 0,
+    tasks_resumed: 0
   };
 }
 

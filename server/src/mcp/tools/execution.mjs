@@ -4,6 +4,15 @@
 
 import { z } from "zod";
 
+const COMMAND_INTENT_SCHEMA = z.object({
+  purpose: z.string().min(1).max(120),
+  target: z.string().max(2000).optional(),
+  expected_evidence: z.string().min(1).max(1000),
+  evidence_gap: z.string().max(1000).optional(),
+  state_version: z.string().max(160).optional(),
+  idempotent: z.boolean().optional()
+});
+
 let CMD_OUTPUT_DEFAULT;
 let DEFAULT_CMD_TIMEOUT;
 let MAX_COMMAND_OUTPUT;
@@ -85,10 +94,11 @@ function registerExecTools(mcp) {
         tail_lines: z.number().int().min(1).max(5000).optional().describe("Return only the last N lines of output."),
         head_lines: z.number().int().min(1).max(5000).optional().describe("Return only the first N lines of output."),
         max_output_chars: z.number().int().min(500).max(MAX_COMMAND_OUTPUT).optional().describe(`Combined stdout/stderr budget (default ${CMD_OUTPUT_DEFAULT}).`),
-        include_request: z.boolean().optional().describe("Echo command/cwd/shell in the response (default false).")
+        include_request: z.boolean().optional().describe("Echo command/cwd/shell in the response (default false)."),
+        intent: COMMAND_INTENT_SCHEMA.optional()
       }
     },
-    async ({ command, cwd = ".", workspace_id, task_token, shell, timeout_ms = DEFAULT_CMD_TIMEOUT, tail_lines, head_lines, max_output_chars = CMD_OUTPUT_DEFAULT, include_request = false }) => {
+    async ({ command, cwd = ".", workspace_id, task_token, shell, timeout_ms = DEFAULT_CMD_TIMEOUT, tail_lines, head_lines, max_output_chars = CMD_OUTPUT_DEFAULT, include_request = false, intent: _intent }) => {
       assertCommandAllowed(command);
       await freezeTaskForMutation(task_token);
       const selected = await resolveWorkspacePath(cwd, { workspaceId: workspace_id, taskToken: task_token });
