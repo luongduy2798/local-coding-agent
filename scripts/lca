@@ -1,3 +1,8 @@
 #!/usr/bin/env sh
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+if ! command -v node >/dev/null 2>&1; then
+  echo "ERROR: Node.js >=22.13.0 is required but node was not found in PATH." >&2
+  echo "Install Node.js 22 LTS from https://nodejs.org/ (or use your package/version manager), then open a new shell." >&2
+  exit 1
+fi
 exec node "$SCRIPT_DIR/local-coding-agent.mjs" "$@"

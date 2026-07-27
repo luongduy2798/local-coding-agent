@@ -1,0 +1,180 @@
+{
+  "name": "local-coding-agent-vscode",
+  "displayName": "Local Coding Agent",
+  "description": "Operate Local Coding Agent workspaces and tasks, and review task-scoped changes.",
+  "version": "0.5.0",
+  "publisher": "luongduy",
+  "private": true,
+  "license": "AGPL-3.0-or-later",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onView:lca.reviewChanges",
+    "onUri"
+  ],
+  "main": "./dist/extension.js",
+  "extensionKind": [
+    "workspace"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "Review Changes remains readable, but connecting, process launch, and file mutations are disabled.",
+      "restrictedConfigurations": [
+        "lca.cliPath",
+        "lca.serverUrl",
+        "lca.allowRemoteServer"
+      ]
+    }
+  },
+  "scripts": {
+    "build:extension": "esbuild src/extension.ts --bundle --platform=node --format=cjs --external:vscode --outfile=dist/extension.js",
+    "build:webview": "esbuild src/webview/main.tsx --bundle --platform=browser --format=iife --minify --outfile=dist/webview.js --loader:.css=css",
+    "build": "npm run build:extension && npm run build:webview",
+    "check": "tsc --noEmit",
+    "test:audit": "node tests/run-audit-reader-test.mjs",
+    "test:control": "node tests/run-control-center-test.mjs",
+    "test": "npm run test:audit && npm run test:control"
+  },
+  "dependencies": {
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.1.10",
+    "@types/react-dom": "^19.1.7",
+    "@types/vscode": "^1.90.0",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.8.0"
+  },
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "lca",
+          "title": "Local Coding Agent",
+          "icon": "media/lca.svg"
+        }
+      ]
+    },
+    "views": {
+      "lca": [
+        {
+          "id": "lca.reviewChanges",
+          "name": "Workspace Activity",
+          "type": "webview"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "lca.reviewChanges.refresh",
+        "title": "Refresh Review Changes",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "lca.reviewChanges.connect",
+        "title": "Connect LCA to This Workspace",
+        "icon": "$(plug)"
+      },
+      {
+        "command": "lca.reviewChanges.openDiff",
+        "title": "Review Change",
+        "icon": "$(diff)"
+      },
+      {
+        "command": "lca.reviewChanges.openCurrentFile",
+        "title": "Open Current File",
+        "icon": "$(go-to-file)"
+      },
+      {
+        "command": "lca.reviewChanges.undoChange",
+        "title": "Undo Change",
+        "icon": "$(discard)"
+      },
+      {
+        "command": "lca.reviewChanges.undoFile",
+        "title": "Undo File",
+        "icon": "$(discard)"
+      },
+      {
+        "command": "lca.reviewChanges.reapplyChange",
+        "title": "Reapply Change",
+        "icon": "$(redo)"
+      },
+      {
+        "command": "lca.reviewChanges.reapplyFile",
+        "title": "Reapply File",
+        "icon": "$(redo)"
+      },
+      {
+        "command": "lca.reviewChanges.undoAll",
+        "title": "Undo All Changes",
+        "icon": "$(discard)"
+      },
+      {
+        "command": "lca.reviewChanges.clear",
+        "title": "Clear Review Changes History",
+        "icon": "$(clear-all)"
+      },
+      {
+        "command": "lca.reviewChanges.setToken",
+        "title": "Set LCA Authentication Token",
+        "icon": "$(key)"
+      },
+      {
+        "command": "lca.reviewChanges.removeToken",
+        "title": "Remove LCA Authentication Token"
+      },
+      {
+        "command": "lca.reviewChanges.testConnection",
+        "title": "Test LCA Connection"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "lca.reviewChanges.refresh",
+          "when": "view == lca.reviewChanges",
+          "group": "navigation@1"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Local Coding Agent",
+      "properties": {
+        "lca.cliPath": {
+          "type": "string",
+          "default": "lca",
+          "description": "Path or command used by the Connect action to register/select a workspace and start Local Coding Agent when needed."
+        },
+        "lca.serverUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:8789",
+          "description": "Local Coding Agent HTTP server URL."
+        },
+        "lca.reviewChanges.autoRefresh": {
+          "type": "boolean",
+          "default": true,
+          "description": "Monitor workspace activity and Review Changes while the view is visible, using server events when available and polling as a fallback."
+        },
+        "lca.reviewChanges.refreshInterval": {
+          "type": "number",
+          "default": 2000,
+          "minimum": 1000,
+          "description": "Fallback polling interval in milliseconds when server events are unavailable."
+        },
+        "lca.allowRemoteServer": {
+          "type": "boolean",
+          "default": false,
+          "description": "Allow Review Changes to connect to a non-local LCA server URL."
+        }
+      }
+    }
+  }
+}

@@ -19,7 +19,7 @@ Use this when preparing a new Local Coding Agent version.
 
 1. Confirm version and scope.
 2. Update:
-   - `server/server.mjs`
+   - `server/src/server.mjs`
    - `server/package.json`
    - `server/package-lock.json`
    - tests that assert version

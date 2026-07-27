@@ -133,7 +133,7 @@ try {
   const snap = await callJson(client, "workspace_snapshot", { depth: 3, max_entries: 120, include_symbols: true, refresh: true });
   check("snapshot kind is workspace_snapshot", snap.kind === "workspace_snapshot");
   check("snapshot is pro", snap.pro === true && snap.tier === "pro");
-  check("snapshot version is 4.4.0-pro", snap.version === "4.4.0-pro", `version=${snap.version}`);
+  check("snapshot version is 4.5.0-pro", snap.version === "4.5.0-pro", `version=${snap.version}`);
   check("snapshot includes safety model", snap.safety?.file_tools_root_confined === true && snap.safety?.command_os_sandbox === false);
   check("snapshot detects javascript", snap.profile?.languages?.includes("javascript"), JSON.stringify(snap.profile));
   check("snapshot omits fast-workflow commands", snap.commands === undefined, JSON.stringify(snap.commands));

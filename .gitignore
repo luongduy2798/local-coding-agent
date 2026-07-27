@@ -2,25 +2,29 @@
 .env
 .env.*
 !.env.example
-**/profiles/
+/tools/profiles/
 *.key
 *.pem
-config.json
+/config.json
 
 # ---- Proprietary binaries (do NOT redistribute) ----
-tools/
+/tools/
 **/tunnel-client*.exe
 **/tunnel-client*.zip
 *.exe
 
 # ---- Node ----
 node_modules/
-server/data/
-server/*.log
-tmp-*/
-*-test-workspace/
+/vscode-extension/dist/
+/server/data/
+/server/*.log
+/.agent/state/
+/tmp-*/
+/*-test-workspace/
 # ---- OS / editor ----
 .DS_Store
 Thumbs.db
 .vscode/
+!vscode-extension/.vscode/
+!vscode-extension/.vscode/launch.json
 .idea/
