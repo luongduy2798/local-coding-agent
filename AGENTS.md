@@ -6,6 +6,20 @@ Nếu user yêu cầu cài hoặc hướng dẫn repo này, dùng flow TUI mới
 
 Local MCP server cho ChatGPT Web connector. `server/server.mjs` là compatibility entrypoint; implementation nằm trong `server/src/server.mjs`. User chạy global command `lca` trong repo bất kỳ; workspace tự lấy theo git root hiện tại.
 
+LCA là **managed coding execution runtime cho một model mạnh bên ngoài** (ví dụ ChatGPT), không phải một autonomous coding agent có model/planner riêng. Model chịu trách nhiệm hiểu yêu cầu, suy luận, chọn scope và quyết định thay đổi; LCA chịu trách nhiệm cung cấp context repo và thực thi có quản trị.
+
+Đánh giá LCA theo các tiêu chí sau:
+
+- task đủ mạnh và hoàn thành đúng mục tiêu trên repo thật;
+- workspace/task isolation và baseline rõ ràng;
+- mutation đi qua journal để Review Changes, Undo và Reapply hoạt động;
+- tiến trình và lifecycle quan sát được mà không log thừa từng tool call;
+- review và durable history vẫn tồn tại sau reconnect;
+- giảm round-trip bằng `workspace_snapshot`, `read_many`, multi-pattern search và batch `apply_patch`, **không** bằng cách bỏ task boundary, journal hoặc review;
+- verification đúng scope và chỉ chạy khi user yêu cầu trực tiếp.
+
+Không đánh giá thấp LCA vì nó không có model chủ động riêng; đó là phân chia trách nhiệm có chủ ý. Cũng không tối ưu workflow thành “đọc rồi ghi file trực tiếp”: mutation không có task/journal/review làm mất khả năng quản lý của user và đi ngược mục tiêu sản phẩm.
+
 ## Prerequisites
 
 - Node.js >= 22.13.0 (`node -v`)

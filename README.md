@@ -6,10 +6,27 @@
 
 Local MCP server giúp ChatGPT Web đọc/sửa code, chạy command và xem git trên máy bạn. Mục tiêu là biến ChatGPT thành coding agent làm việc trực tiếp trên workspace local, nhưng vẫn giữ quyền kiểm soát ở phía bạn.
 
+LCA được thiết kế như một **managed coding execution runtime**: model ChatGPT mạnh chịu trách nhiệm suy luận và quyết định; LCA cung cấp repo context, task isolation, journaled mutation, Review Changes, tiến trình, Undo/Reapply và durable history. LCA không cố trở thành một autonomous agent có model riêng.
+
 </div>
 
 > Công cụ này có thể chạy command trên máy bạn. Chỉ dùng với repo tin tưởng.
 > Đây không phải OS sandbox. Đọc thêm [SECURITY.md](SECURITY.md).
+
+## Mục Tiêu Thiết Kế
+
+Một task LCA không được tối ưu thành thao tác “đọc rồi ghi file” không có quản trị. Dù task nhỏ, mutation vẫn phải thuộc một task đã mở, gắn đúng workspace, được journal hóa, review được và có thể Undo/Reapply khi snapshot cho phép.
+
+Workflow tối thiểu có chủ ý:
+
+```text
+pin workspace → mở task/baseline → lấy evidence cần thiết
+→ journaled mutation → review diff → đóng task/history
+```
+
+Tốc độ được tối ưu bằng cách batch evidence và mutation trong ít round-trip hơn, không bằng cách cắt bỏ task boundary, journal, progress, review hay history. Verification vẫn theo scope và chỉ chạy khi user yêu cầu trực tiếp.
+
+Vì reasoning nằm ở ChatGPT, LCA nên được đánh giá như execution backend có quản trị: task completion, độ chính xác context, isolation, journal/Undo/Reapply, observability, reliability và round-trip efficiency. Việc LCA không sở hữu model/planner tự trị là lựa chọn kiến trúc, không phải thiếu sót về autonomous intelligence.
 
 ## Cài Nhanh
 

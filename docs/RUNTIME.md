@@ -2,6 +2,38 @@
 
 Local Coding Agent runs one local supervisor for one server/tunnel pair. A workspace switch changes the default for a **new task**; it does not restart the connector and never reroutes a task that is already open.
 
+## Product architecture and evaluation criteria
+
+LCA is a **managed coding execution runtime controlled by a strong external model**, not an autonomous coding agent with its own model or competing planner. The model is responsible for understanding the request, reasoning about the repository, selecting scope, and deciding what to change. LCA is responsible for trusted repository access, bounded context retrieval, task/workspace isolation, execution, durable state, and user control over every managed mutation.
+
+This separation is intentional. Do not evaluate LCA by whether it independently initiates work, owns a model, or runs a second autonomous planning loop. Evaluate it by whether the combined model + runtime system can complete strong repository tasks while preserving these guarantees:
+
+- every mutation belongs to an explicit task and pinned workspace set;
+- the task captures its baseline so pre-existing dirty state is distinguishable;
+- managed file changes pass through `apply_patch` and the Review Changes journal;
+- users can inspect progress and final diffs, then Undo or Reapply supported changes;
+- task, journal, snapshot, and history state survive reconnect and runtime restart;
+- review remains part of the normal mutation lifecycle;
+- verification is proportional to the requested scope and runs only when explicitly requested;
+- runtime responses and context retrieval remain bounded and efficient.
+
+Low round-trip count means batching work **inside this managed lifecycle**, not deleting the lifecycle. Prefer one focused discovery, batched reads/searches, one atomic multi-file patch, one diff review, and one close. Do not bypass `task_open`, journaled mutation, `review_diff`, or durable close merely to make a demo appear faster. Direct shell/source mutation is intentionally treated as unmanaged because it cannot provide the same conflict, history, and recovery guarantees.
+
+The intended minimal mutation flow is:
+
+```text
+resolve/pin workspace
+→ task_open with baseline
+→ targeted or batched evidence acquisition
+→ model decision
+→ journaled apply_patch transaction
+→ review_diff
+→ optional explicitly requested verification
+→ task_close with durable history
+```
+
+Progress should be observable at meaningful phase transitions or blockers, without narrating every low-level tool call. The optimization target is a strong, reviewable, reversible task with minimal redundant model/tool round-trips—not an untracked read/write shortcut and not a heavyweight autonomous workflow engine.
+
 ## Requirements and storage
 
 - Node.js `>=22.13.0` is required. SQLite runs through storage workers rather than doing synchronous database work on the MCP event loop.
