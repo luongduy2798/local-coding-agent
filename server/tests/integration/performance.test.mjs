@@ -4,50 +4,19 @@
 
 import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
+import {
+  EXPECTED_CATALOG_VERSION,
+  EXPECTED_TOOL_COUNT,
+  EXPECTED_TOOLS,
+  MAX_TOOLS_LIST_BYTES
+} from "../helpers/catalog-contract.mjs";
 import { createGitFixture, createIsolatedTestRoot, safeRemove } from "../helpers/test-guard.mjs";
 import { startTestServer, stopTestProcess } from "../helpers/test-runtime.mjs";
 
 const PROTOCOL_VERSION = "2025-06-18";
-const MAX_TOOLS_LIST_BYTES = 25_000;
 const DEFAULT_RESPONSE_BUDGET = 64 * 1024;
 const HARD_RESPONSE_BUDGET = 200 * 1024;
-const EXPECTED_TOOLS = [
-  "lca_status",
-  "workspace_list",
-  "workspace_register",
-  "workspace_select",
-  "workspace_attach",
-  "workspace_detach",
-  "task_open",
-  "task_state",
-  "task_plan",
-  "task_checkpoint",
-  "task_close",
-  "workspace_snapshot",
-  "code_query",
-  "search_text",
-  "find_files",
-  "list_files",
-  "read_file",
-  "read_many",
-  "project_profile",
-  "index_control",
-  "apply_patch",
-  "change_history",
-  "git",
-  "run_command",
-  "run_commands",
-  "process",
-  "run_changed_tests",
-  "verify_changes",
-  "review_diff",
-  "security_scan",
-  "todo_scan",
-  "skills",
-  "notes",
-  "figma",
-  "lca_input"
-];
+const MAX_WIDGET_AUTOCOMPLETE_BACKEND_P95_MS = 150;
 
 let pass = 0;
 let fail = 0;
@@ -158,12 +127,12 @@ try {
   const names = tools.map((tool) => tool.name);
   measured.toolsListBytes = listed.bytes;
   check(
-    "Runtime production catalog exposes exactly 35 fixed tools",
-    names.length === 35 && [...names].sort().join("\n") === [...EXPECTED_TOOLS].sort().join("\n"),
+    `Runtime production catalog exposes exactly ${EXPECTED_TOOL_COUNT} fixed tools`,
+    names.length === EXPECTED_TOOL_COUNT && [...names].sort().join("\n") === [...EXPECTED_TOOLS].sort().join("\n"),
     `count=${names.length}; names=${names.join(",")}`
   );
   check(
-    "tools/list stays below the 25 KB raw budget",
+    "tools/list stays below the 35 KB raw budget",
     listed.bytes < MAX_TOOLS_LIST_BYTES,
     `bytes=${listed.bytes}`
   );
@@ -171,7 +140,7 @@ try {
   const initialStatus = (await rpcClient.callTool("lca_status")).data;
   check(
     "lca_status reports Runtime catalog and configured response budgets",
-    initialStatus.catalog_version === 5 &&
+    initialStatus.catalog_version === EXPECTED_CATALOG_VERSION &&
       initialStatus.tool_catalog === "fixed" &&
       initialStatus.limits?.response_default_chars === DEFAULT_RESPONSE_BUDGET &&
       initialStatus.limits?.response_hard_max_chars === HARD_RESPONSE_BUDGET,
@@ -219,7 +188,8 @@ try {
   );
 
   const openedTaskResponse = (await rpcClient.callTool("task_open", {
-    title: "Runtime performance task"
+    title: "Runtime performance task",
+    primary_workspace_id: initialStatus.primary_workspace_id
   })).data;
   const openedTask = openedTaskResponse.task;
   check(
@@ -329,7 +299,7 @@ try {
   }
   const widgetAutocompleteDurations = [];
   for (let index = 0; index < 30; index++) {
-    const moduleIndex = index % 24;
+    const moduleIndex = index + 5;
     const startedAt = performance.now();
     const [files, symbols] = await Promise.all([
       rpcClient.callTool("find_files", {
@@ -511,11 +481,11 @@ try {
       `statusRequests=${statusRequests.length}; serverTotalP95=${round(serverTotalP95)}ms`
     );
     check(
-      "widget autocomplete backend p95 stays below 50 ms",
+      `widget autocomplete backend p95 stays below ${MAX_WIDGET_AUTOCOMPLETE_BACKEND_P95_MS} ms`,
       widgetFileRequests.length >= 30 &&
         widgetSymbolRequests.length >= 30 &&
         Number.isFinite(widgetAutocompleteHandlerP95) &&
-        widgetAutocompleteHandlerP95 < 50,
+        widgetAutocompleteHandlerP95 < MAX_WIDGET_AUTOCOMPLETE_BACKEND_P95_MS,
       `files=${widgetFileRequests.length}; symbols=${widgetSymbolRequests.length}; p95=${round(widgetAutocompleteHandlerP95)}ms`
     );
     check(

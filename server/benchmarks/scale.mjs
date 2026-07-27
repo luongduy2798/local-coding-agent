@@ -182,10 +182,28 @@ try {
   }
   assert.equal(fullIndex.value.counts.files, config.files, "primary graph must index every generated file");
   assert.equal(fullIndex.value.coverage.complete, true, "primary graph coverage must be complete");
+  const compactFullIndex = {
+    ms: fullIndex.ms,
+    value: {
+      counts: { files: fullIndex.value.counts.files },
+      coverage: {
+        complete: fullIndex.value.coverage.complete,
+        content_complete: fullIndex.value.coverage.content_complete
+      },
+      changes: { parsed_files: fullIndex.value.changes?.parsed_files ?? 0 },
+      freshness: { state: fullIndex.value.freshness.state },
+      ...(config.coldBuilder ? {
+        external_builder: {
+          counts: { parsed_files: fullIndex.value.external_builder.counts.parsed_files }
+        }
+      } : {})
+    }
+  };
+  fullIndex = compactFullIndex;
   sampleMemory(memorySamples, "indexed");
   captureEventLoopPhase(eventLoopPhases, phaseEventLoop, "full_index");
 
-  const snapshotWarm = await timed(() => graph.snapshot());
+  const snapshotWarm = { ms: (await timed(() => graph.snapshot())).ms };
   const persistedBytes = (await statFile(graphPersistencePath)).size;
   await graph.close();
   graph = null;

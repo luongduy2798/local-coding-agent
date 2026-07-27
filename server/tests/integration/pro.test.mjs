@@ -16,6 +16,10 @@ import {
   registerDisposableRoot,
   safeRemove
 } from "../helpers/test-guard.mjs";
+import {
+  EXPECTED_CATALOG_VERSION,
+  EXPECTED_TOOL_COUNT
+} from "../helpers/catalog-contract.mjs";
 
 const TEST_DIR = path.dirname(fileURLToPath(import.meta.url));
 const SERVER = path.resolve(TEST_DIR, "../..", "server.mjs");
@@ -150,7 +154,7 @@ try {
 
   const info = await callJson(client, "lca_status");
   check("lca_status exposes pro tier", info.tier === "pro", `tier=${info.tier}`);
-  check("lca_status exposes fixed catalog metadata", info.tool_catalog === "fixed" && info.catalog_version === 5 && typeof info.catalog_hash === "string", JSON.stringify(info));
+  check("lca_status exposes fixed catalog metadata", info.tool_catalog === "fixed" && info.catalog_version === EXPECTED_CATALOG_VERSION && typeof info.catalog_hash === "string", JSON.stringify(info));
   check("lca_status exposes policy", typeof info.policy === "string" && info.policy.length > 0);
 
   const workspaceList = await callJson(client, "workspace_list");
@@ -224,7 +228,7 @@ try {
 
   const tools = await client.listTools();
   const toolNames = tools.tools?.map((tool) => tool.name) || [];
-  check("model catalog contains exactly 35 tools", toolNames.length === 35, JSON.stringify(toolNames));
+  check(`model catalog contains exactly ${EXPECTED_TOOL_COUNT} tools`, toolNames.length === EXPECTED_TOOL_COUNT, JSON.stringify(toolNames));
   check(
     "legacy aliases and app-only backend aliases are absent",
     ["lca", "workspace_info", "repo_map", "repo_symbols", "workspace_search", "slash_commands", "compose_prompt", "session_report"].every((name) => !toolNames.includes(name)),

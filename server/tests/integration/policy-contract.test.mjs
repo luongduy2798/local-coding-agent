@@ -7,6 +7,7 @@ import { spawnSync } from "node:child_process";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { EXPECTED_TOOL_COUNT } from "../helpers/catalog-contract.mjs";
 import {
   createIsolatedTestRoot,
   safeRemove
@@ -64,7 +65,7 @@ try {
     params: {}
   });
   const names = listed.message?.result?.tools?.map((tool) => tool.name) || [];
-  assert.equal(names.length, 35);
+  assert.equal(names.length, EXPECTED_TOOL_COUNT);
   assert.equal(names.includes("request_approval"), false);
   assert.equal(names.includes("approve_request"), false);
 

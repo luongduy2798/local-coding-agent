@@ -298,7 +298,13 @@ try {
     task_token: fullTask.task_token,
     operations: [{ op: "create", path: "created.txt", content: "created" }]
   })).text);
-  await changeApi(undoPort, "POST", `/changes/${createdChange.change_id}/undo`, {});
+  const createdUndo = await changeApi(
+    undoPort,
+    "POST",
+    `/changes/${createdChange.change_id}/undo?workspace_id=${encodeURIComponent(fullTask.primary_workspace_id)}&task_id=${encodeURIComponent(fullTask.id)}`,
+    {}
+  );
+  check("Review Changes undo request succeeds", createdUndo.status === 200, JSON.stringify(createdUndo.data));
   check("Review Changes undo removes files created by apply_patch", (await call(full, "read_file", { path: "created.txt", task_token: fullTask.task_token })).isError);
   await call(full, "apply_patch", {
     task_token: fullTask.task_token,
@@ -308,7 +314,13 @@ try {
     task_token: fullTask.task_token,
     operations: [{ op: "rename", path: "source.txt", rename_to: "dest.txt" }]
   })).text);
-  await changeApi(undoPort, "POST", `/changes/${movedChange.change_id}/undo`, {});
+  const movedUndo = await changeApi(
+    undoPort,
+    "POST",
+    `/changes/${movedChange.change_id}/undo?workspace_id=${encodeURIComponent(fullTask.primary_workspace_id)}&task_id=${encodeURIComponent(fullTask.id)}`,
+    {}
+  );
+  check("Review Changes rename undo request succeeds", movedUndo.status === 200, JSON.stringify(movedUndo.data));
   check("Review Changes undo restores renamed file source", !(await call(full, "read_file", { path: "source.txt", task_token: fullTask.task_token })).isError);
   check("Review Changes undo removes renamed file destination", (await call(full, "read_file", { path: "dest.txt", task_token: fullTask.task_token })).isError);
   await full.close();

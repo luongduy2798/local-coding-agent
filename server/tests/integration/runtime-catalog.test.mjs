@@ -9,53 +9,18 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { brotliCompressSync } from "node:zlib";
+import {
+  EXPECTED_TOOLS,
+  MAX_TOOLS_LIST_BYTES
+} from "../helpers/catalog-contract.mjs";
 import { createGitFixture, createIsolatedTestRoot, safeRemove } from "../helpers/test-guard.mjs";
 import { startTestServer, stopTestProcess } from "../helpers/test-runtime.mjs";
 
-const EXPECTED_TOOLS = [
-  "lca_status",
-  "workspace_list",
-  "workspace_register",
-  "workspace_select",
-  "workspace_attach",
-  "workspace_detach",
-  "task_open",
-  "task_reclassify",
-  "task_state",
-  "task_plan",
-  "task_checkpoint",
-  "task_close",
-  "workspace_snapshot",
-  "code_query",
-  "search_text",
-  "find_files",
-  "list_files",
-  "read_file",
-  "read_many",
-  "project_profile",
-  "index_control",
-  "apply_patch",
-  "change_history",
-  "git",
-  "run_command",
-  "run_commands",
-  "process",
-  "run_changed_tests",
-  "verify_changes",
-  "review_diff",
-  "security_scan",
-  "todo_scan",
-  "skills",
-  "notes",
-  "figma",
-  "lca_input"
-];
 
 const EXPECTED_CATALOG_HASH = createHash("sha256")
   .update([...EXPECTED_TOOLS].sort().join("\n"))
   .digest("hex")
   .slice(0, 16);
-const MAX_TOOLS_LIST_BYTES = 35_000;
 const PROTOCOL_VERSION = "2025-06-18";
 
 const context = await createIsolatedTestRoot({

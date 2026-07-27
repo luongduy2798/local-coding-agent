@@ -4,6 +4,7 @@
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { EXPECTED_TOOL_COUNT } from "../helpers/catalog-contract.mjs";
 
 const ENDPOINT = process.env.TEST_ENDPOINT;
 if (!ENDPOINT) throw new Error("agent.test.mjs must run through tests/runners/run-agent-isolated.mjs.");
@@ -37,7 +38,7 @@ async function call(name, args, { expectError = false } = {}) {
 }
 
 const toolNames = tools.tools.map((tool) => tool.name);
-check("fixed catalog exposes exactly 35 tools", toolNames.length === 35, toolNames.join(", "));
+check(`fixed catalog exposes exactly ${EXPECTED_TOOL_COUNT} tools`, toolNames.length === EXPECTED_TOOL_COUNT, toolNames.join(", "));
 check(
   "legacy aliases are absent from the catalog",
   ["workspace_info", "write_file", "replace_in_file", "make_dir", "proc_start"].every((name) => !toolNames.includes(name)),

@@ -20,6 +20,7 @@ import {
   isNodeVersionSupported,
   openWorkspaceDatabase,
   probeSqliteCapability,
+  REGISTRY_SCHEMA_VERSION,
   SqliteWorkerDatabase
 } from "../../src/storage/database.mjs";
 import {
@@ -159,7 +160,7 @@ try {
   });
 
   const registryHealth = await registry.health();
-  assert.equal(registryHealth.schemaVersion, 5);
+  assert.equal(registryHealth.schemaVersion, REGISTRY_SCHEMA_VERSION);
   assert.equal(registryHealth.journalMode.toLowerCase(), "wal");
   assert.equal(registryHealth.foreignKeys, 1);
   assert.equal(registryHealth.busyTimeout, 5_000);

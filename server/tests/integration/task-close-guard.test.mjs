@@ -15,6 +15,8 @@ const context = await createIsolatedTestRoot({
 });
 let runtime;
 let sessionId;
+let primaryWorkspaceId = null;
+let conversationWorkspaceToken = null;
 
 try {
   const fixture = await createGitFixture(context, {
@@ -79,6 +81,9 @@ try {
     method: "notifications/initialized",
     params: {}
   });
+
+  const initialWorkspaceList = await callTool(runtime.port, sessionId, 1000, "workspace_list", {});
+  primaryWorkspaceId = initialWorkspaceList.data.selected_workspace_id;
 
   const missingEvidenceTask = await openTask(runtime.port, sessionId, 2, "Missing evidence");
   const missingEvidenceClose = await callTool(runtime.port, sessionId, 3, "task_close", {
@@ -304,8 +309,8 @@ try {
     entry.startsWith("index.corrupt-")
   ));
 
-  const workspaceList = await callTool(runtime.port, sessionId, 78, "workspace_list", {});
-  const primaryWorkspaceId = workspaceList.data.selected_workspace_id;
+  const multiWorkspaceList = await callTool(runtime.port, sessionId, 78, "workspace_list", {});
+  const multiWorkspacePrimaryId = multiWorkspaceList.data.selected_workspace_id;
   const secondaryRegistration = await callTool(runtime.port, sessionId, 79, "workspace_register", {
     root: secondaryFixture.root,
     label: "task-close-secondary"
@@ -313,14 +318,14 @@ try {
   const secondaryWorkspaceId = secondaryRegistration.data.workspace.workspace_id;
   const multiWorkspaceTask = (await callTool(runtime.port, sessionId, 80, "task_open", {
     title: "Multi-workspace journal rollback",
-    primary_workspace_id: primaryWorkspaceId,
+    primary_workspace_id: multiWorkspacePrimaryId,
     attached_workspace_ids: [secondaryWorkspaceId]
   })).data.task;
   const multiApply = await callTool(runtime.port, sessionId, 81, "apply_patch", {
     task_token: multiWorkspaceTask.task_token,
     operations: [
       {
-        workspace_id: primaryWorkspaceId,
+        workspace_id: multiWorkspacePrimaryId,
         op: "update",
         path: "src/value.js",
         edits: [{ old_text: "value = 6", new_text: "value = 7" }]
@@ -411,7 +416,13 @@ try {
 }
 
 async function openTask(port, currentSessionId, id, title) {
-  const response = await callTool(port, currentSessionId, id, "task_open", { title });
+  const response = await callTool(port, currentSessionId, id, "task_open", {
+    title,
+    ...(conversationWorkspaceToken
+      ? { conversation_workspace_token: conversationWorkspaceToken }
+      : { primary_workspace_id: primaryWorkspaceId })
+  });
+  conversationWorkspaceToken ||= response.data.conversation_workspace_token;
   return response.data.task;
 }
 

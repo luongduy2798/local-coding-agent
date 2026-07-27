@@ -113,7 +113,7 @@ await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1
 
 try {
   const workspaceList = await callJson(client, "workspace_list", {});
-  await callJson(client, "task_open", {
+  const openedIntegrationTask = await callJson(client, "task_open", {
     title: "Review Changes integration",
     primary_workspace_id: workspaceList.selected_workspace_id
   });
@@ -319,7 +319,8 @@ try {
   });
   await writeFile(path.join(workspace, "task-source.txt"), "original\n", "utf8");
   const openedRenameTask = await callJson(client, "task_open", {
-    title: "Rename and refine the task file"
+    title: "Rename and refine the task file",
+    conversation_workspace_token: openedIntegrationTask.conversation_workspace_token
   });
   await callJson(client, "task_plan", {
     goal: "Rename and refine the task file",
@@ -378,7 +379,12 @@ try {
     JSON.stringify(reapplyTask.data)
   );
 
+  const openedNextTask = await callJson(client, "task_open", {
+    title: "Next Review Changes task",
+    conversation_workspace_token: openedIntegrationTask.conversation_workspace_token
+  });
   const nextTask = await callJson(client, "apply_patch", {
+    task_token: openedNextTask.task.task_token,
     operations: [{ op: "create", path: "next-task.txt", content: "next\n" }]
   });
   const nextTaskList = await api(runtime.port, "GET", "/changes?limit=10");
@@ -389,18 +395,30 @@ try {
       && nextTaskList.data.changes[1]?.id === taskRename.task_id,
     JSON.stringify(nextTaskList.data)
   );
+  await callJson(client, "task_close", {
+    task_token: openedNextTask.task.task_token,
+    status: "incomplete"
+  });
   await api(runtime.port, "DELETE", "/changes");
 
+  const openedTitledFirst = await callJson(client, "task_open", {
+    title: "First explicit task",
+    conversation_workspace_token: openedIntegrationTask.conversation_workspace_token
+  });
   const titledFirst = await callJson(client, "apply_patch", {
-    task_title: "First explicit task",
+    task_token: openedTitledFirst.task.task_token,
     operations: [{ op: "create", path: "first-explicit-task.txt", content: "first\n" }]
   });
   await callJson(client, "task_close", {
-    task_token: titledFirst.task_token,
+    task_token: openedTitledFirst.task.task_token,
     status: "incomplete"
   });
+  const openedTitledSecond = await callJson(client, "task_open", {
+    title: "Second explicit task",
+    conversation_workspace_token: openedIntegrationTask.conversation_workspace_token
+  });
   const titledSecond = await callJson(client, "apply_patch", {
-    task_title: "Second explicit task",
+    task_token: openedTitledSecond.task.task_token,
     operations: [{ op: "create", path: "second-explicit-task.txt", content: "second\n" }]
   });
   const titledTasks = await api(runtime.port, "GET", "/changes?limit=10");

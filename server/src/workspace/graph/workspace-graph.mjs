@@ -250,37 +250,43 @@ export class WorkspaceGraph {
       ? requested
       : mergeCoverage(this.coverage, requested);
     const previous = this.records;
+    const nextRecords = new Map();
+    const changes = emptyChanges();
+    const consumeScannedRecords = async (records) => {
+      for (const scannedRecord of records) {
+        const prior = previous.get(scannedRecord.path);
+        if (
+          prior &&
+          prior.fingerprint === scannedRecord.fingerprint &&
+          prior.content_limit >= coverageRequest.max_file_bytes
+        ) {
+          prior.size = scannedRecord.size;
+          prior.mtime_ms = scannedRecord.mtime_ms;
+          prior.ctime_ms = scannedRecord.ctime_ms;
+          nextRecords.set(prior.path, prior);
+          changes.unchanged.push(prior.path);
+          changes.reused_files++;
+        } else {
+          const next = buildRecord(scannedRecord);
+          nextRecords.set(next.path, next);
+          if (prior) changes.changed.push(next.path);
+          else changes.added.push(next.path);
+          changes.parsed_files++;
+        }
+      }
+    };
     const scanned = await scanWorkspace(rootDir, coverageRequest, {
       skipDirs: this.skipDirs,
       previous,
-      concurrency: this.scanConcurrency
+      concurrency: this.scanConcurrency,
+      onRecords: consumeScannedRecords,
+      recordBatchSize: 256
     });
-    const nextRecords = new Map();
-    const changes = emptyChanges();
-
-    for (const scannedRecord of scanned.records) {
-      const prior = previous.get(scannedRecord.path);
-      if (
-        prior &&
-        prior.fingerprint === scannedRecord.fingerprint &&
-        prior.content_limit >= coverageRequest.max_file_bytes
-      ) {
-        prior.size = scannedRecord.size;
-        prior.mtime_ms = scannedRecord.mtime_ms;
-        prior.ctime_ms = scannedRecord.ctime_ms;
-        nextRecords.set(prior.path, prior);
-        changes.unchanged.push(prior.path);
-        changes.reused_files++;
-      } else {
-        const next = buildRecord(scannedRecord);
-        nextRecords.set(next.path, next);
-        if (prior) changes.changed.push(next.path);
-        else changes.added.push(next.path);
-        changes.parsed_files++;
-      }
-    }
+    let processedPriorPaths = 0;
     for (const priorPath of previous.keys()) {
       if (!nextRecords.has(priorPath)) changes.removed.push(priorPath);
+      processedPriorPaths++;
+      if (processedPriorPaths % 256 === 0) await yieldToEventLoop();
     }
 
     const nextFingerprint = await fingerprintRecordsCooperative(nextRecords);

@@ -275,7 +275,13 @@ export function extractStructuralSymbols(lines, language) {
   return symbols;
 }
 
-export async function scanWorkspace(rootDir, coverage, { skipDirs, previous, concurrency }) {
+export async function scanWorkspace(rootDir, coverage, {
+  skipDirs,
+  previous,
+  concurrency,
+  onRecords = null,
+  recordBatchSize = 256
+}) {
   const candidates = [];
   let visitedFiles = 0;
   let visitedDirectories = 0;
@@ -324,32 +330,49 @@ export async function scanWorkspace(rootDir, coverage, { skipDirs, previous, con
       visitedFiles++;
       const relative = normalizeRelativePath(path.relative(rootDir, absolute));
       candidates.push({ absolute, relative });
+      if (candidates.length % 256 === 0) await yieldToEventLoop();
     }
   }
 
   await visit(rootDir, 0);
   const scratchBuffers = new Array(Math.min(candidates.length, Math.max(1, concurrency)));
   const scratchBytes = Math.min(coverage.max_file_bytes, 64 * 1024);
-  const records = await mapWithConcurrency(candidates, concurrency, async ({ absolute, relative }, _index, workerIndex) => {
-    let file;
-    try {
-      scratchBuffers[workerIndex] ||= Buffer.allocUnsafe(scratchBytes);
-      file = await fingerprintFile(
-        absolute,
-        coverage.max_file_bytes,
-        previous?.get(relative),
-        true,
-        scratchBuffers[workerIndex]
-      );
-    } catch (error) {
-      if (!["ENOENT", "EACCES", "EPERM"].includes(error?.code)) throw error;
-      unreadableFiles++;
-      return null;
+  const scanCandidates = async (batch) => mapWithConcurrency(
+    batch,
+    concurrency,
+    async ({ absolute, relative }, _index, workerIndex) => {
+      let file;
+      try {
+        scratchBuffers[workerIndex] ||= Buffer.allocUnsafe(scratchBytes);
+        file = await fingerprintFile(
+          absolute,
+          coverage.max_file_bytes,
+          previous?.get(relative),
+          true,
+          scratchBuffers[workerIndex]
+        );
+      } catch (error) {
+        if (!["ENOENT", "EACCES", "EPERM"].includes(error?.code)) throw error;
+        unreadableFiles++;
+        return null;
+      }
+      if (!file.content_complete && !file.binary) contentTruncatedFiles++;
+      if (file.binary) binaryFiles++;
+      return { path: relative, ...file };
     }
-    if (!file.content_complete && !file.binary) contentTruncatedFiles++;
-    if (file.binary) binaryFiles++;
-    return { path: relative, ...file };
-  }).then((items) => items.filter(Boolean));
+  ).then((items) => items.filter(Boolean));
+
+  let records = [];
+  if (typeof onRecords === "function") {
+    const batchSize = boundedInteger(recordBatchSize, 256, 32, 4_096);
+    for (let offset = 0; offset < candidates.length; offset += batchSize) {
+      const batchRecords = await scanCandidates(candidates.slice(offset, offset + batchSize));
+      await onRecords(batchRecords);
+      await yieldToEventLoop();
+    }
+  } else {
+    records = await scanCandidates(candidates);
+  }
   return {
     records,
     visitedFiles,

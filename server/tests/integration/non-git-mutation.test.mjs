@@ -31,12 +31,14 @@ test("non-Git shell mutation fingerprint ignores reads and detects same-size sou
     });
     sessionId = await initialize(runtime.port);
 
-    const opened = await callTool(runtime.port, sessionId, 2, "task_open", {
-      title: "Non-Git mutation detection"
+    const workspaces = await callTool(runtime.port, sessionId, 2, "workspace_list", {});
+    const opened = await callTool(runtime.port, sessionId, 3, "task_open", {
+      title: "Non-Git mutation detection",
+      primary_workspace_id: workspaces.data.selected_workspace_id
     });
     const taskToken = opened.data.task.task_token;
 
-    const readOnly = await callTool(runtime.port, sessionId, 3, "run_command", {
+    const readOnly = await callTool(runtime.port, sessionId, 5, "run_command", {
       task_token: taskToken,
       command: "node -e \"process.stdout.write('read-only')\""
     });
@@ -51,7 +53,7 @@ test("non-Git shell mutation fingerprint ignores reads and detects same-size sou
     assert.equal(sourceEdit.data.unmanaged_changes, true);
     assert.equal((await readFile(sourcePath, "utf8")).length, "export const value = 1;\n".length);
 
-    const blocked = await callTool(runtime.port, sessionId, 5, "verify_changes", {
+    const blocked = await callTool(runtime.port, sessionId, 7, "verify_changes", {
       task_token: taskToken
     });
     assert.notEqual(blocked.data.status, "PASS");
