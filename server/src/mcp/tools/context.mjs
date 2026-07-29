@@ -155,10 +155,10 @@ export function registerContextTools(mcp, dependencies) {
     mcp,
     "search_text",
     {
-      title: "Search text",
-      description: "Search text with ripgrep, git or scan fallback. Prefer one focused query with context; avoid repeating an unchanged query unless evidence_gap states what new question remains.",
+      title: "Search file contents",
+      description: "Canonical literal or regex search for occurrences inside file contents, using ripgrep, Git or scan fallback. Use find_files for file names and code_query for symbols, definitions or references. Prefer one focused content query with context; avoid repeating unchanged evidence unless evidence_gap states the unresolved question.",
       inputSchema: {
-        query: z.string().min(1),
+        query: z.string().min(1).describe("Literal string or regex pattern to find inside file contents."),
         patterns: z.array(z.string().min(1)).max(16).optional().describe("Additional patterns searched in the same ripgrep process."),
         path: z.string().optional(),
         workspace_id: z.string().optional(),

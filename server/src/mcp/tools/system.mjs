@@ -71,7 +71,7 @@ export function registerSystemTools(mcp, dependencies) {
     "task_checkpoint",
     {
       title: "Task checkpoint",
-      description: "Save a compact resumable checkpoint for the active task.",
+      description: "Save compact progress, next steps and relevant paths for resuming this same active task after a pause or reconnect. Do not use it for durable knowledge needed by future tasks; that belongs in workspace_memory.",
       inputSchema: {
         summary: z.string().min(1),
         task_token: z.string().optional(),
@@ -350,7 +350,7 @@ export function registerSystemTools(mcp, dependencies) {
     "process",
     {
       title: "Background process",
-      description: "Start, list, inspect or stop background processes owned by LCA.",
+      description: "Start, list, inspect output from, or stop long-running programs owned by the active task. Use run_command for one bounded foreground command.",
       inputSchema: {
         action: z.enum(["start", "list", "output", "stop"]),
         id: z.string().optional(),
@@ -496,7 +496,7 @@ export function registerSystemTools(mcp, dependencies) {
     "change_history",
     {
       title: "Change history",
-      description: "List, inspect, diff, undo or reapply tracked filesystem changes.",
+      description: "Inspect journaled LCA filesystem changes by change ID and perform undo, partial undo or reapply. action=diff is for one recorded change; use review_diff to review the entire current task and git for raw repository history.",
       inputSchema: {
         action: z.enum(["list", "get", "diff", "content", "undo", "reapply", "undo_all", "clear"]).optional(),
         id: z.string().optional(),

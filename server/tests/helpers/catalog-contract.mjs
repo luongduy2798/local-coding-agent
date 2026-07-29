@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Lương Duy
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-export const EXPECTED_CATALOG_VERSION = 14;
+export const EXPECTED_CATALOG_VERSION = 15;
 export const EXPECTED_TOOLS = Object.freeze([
   "lca_status",
   "workspace_list",
@@ -12,7 +12,6 @@ export const EXPECTED_TOOLS = Object.freeze([
   "workspace_detach",
   "task_open",
   "task_reclassify",
-  "task_state",
   "task_plan",
   "task_checkpoint",
   "task_close",
@@ -31,13 +30,11 @@ export const EXPECTED_TOOLS = Object.freeze([
   "run_command",
   "run_commands",
   "process",
-  "run_changed_tests",
   "verify_changes",
   "review_diff",
   "security_scan",
   "todo_scan",
   "skills",
-  "notes",
   "workspace_memory",
   "figma",
   "lca_input"

@@ -88,7 +88,7 @@ try {
   assert.equal(resumed.data.task.id, originalTask.id);
   assert.equal(resumed.data.task.primary_workspace_id, primaryWorkspaceId);
 
-  const state = await callTool(secondRuntime.port, secondSessionId, 23, "task_state", {});
+  const state = await callTool(secondRuntime.port, secondSessionId, 23, "task_plan", { action: "get" });
   assert.equal(state.result?.isError, undefined);
   assert.equal(state.data.task.id, originalTask.id);
   assert.equal(state.data.plan.goal, "Persisted restart plan");

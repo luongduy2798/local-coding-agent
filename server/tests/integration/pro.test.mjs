@@ -237,7 +237,8 @@ try {
   const staleLcaAlias = await client.callTool({ name: "lca", arguments: {} });
   check("legacy lca alias is not callable", staleLcaAlias.isError === true && /Tool lca not found/.test(staleLcaAlias.content?.[0]?.text || ""), JSON.stringify(staleLcaAlias));
   const lcaInputTool = tools.tools?.find((t) => t.name === "lca_input");
-  check("planner tools remain available", ["task_plan", "task_state", "task_checkpoint", "task_close"].every((name) => toolNames.includes(name)), JSON.stringify(toolNames));
+  check("planner tools remain available", ["task_plan", "task_checkpoint", "task_close"].every((name) => toolNames.includes(name)), JSON.stringify(toolNames));
+  check("consolidated tools are absent", ["task_state", "run_changed_tests", "notes"].every((name) => !toolNames.includes(name)), JSON.stringify(toolNames));
   check("Apps SDK lca_input tool is listed", Boolean(lcaInputTool), JSON.stringify(toolNames));
   check("Apps SDK render tool has output template", lcaInputTool?._meta?.["openai/outputTemplate"] === "ui://widget/lca-compact-input-v2.html", JSON.stringify({ lcaInput: lcaInputTool?._meta }));
   const resources = await client.listResources();

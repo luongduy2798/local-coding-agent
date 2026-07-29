@@ -4,6 +4,16 @@ All notable changes to Local Coding Agent are documented in this file.
 
 ## [Unreleased]
 
+### Catalog v15 tool-selection cleanup
+
+- Reduced the fixed model-visible catalog from 37 to 34 tools and bumped `catalog_version` to 15 with tool-name hash `fc8b432ebdde919a`.
+- Consolidated `task_state` into action-based `task_plan` and `run_changed_tests` into strategy-based `verify_changes`; removed the task-scoped `notes` tool while retaining historical note storage for compatibility.
+- Made `search_text` canonical for literal/regex content and reserved model-facing `code_query` for symbols, definitions, references, imports, callers, callees and types.
+- Tightened discovery groups so workspace selection, index control, checkpointing, command execution and verification appear only in workflows that need them.
+- Removed stale `proc_start` and `git_status`/`git_diff` guidance, clarified checkpoint/Memory/history/diff boundaries, and made `verify_changes` the only official completion-guard evidence path.
+- Changed app-level discovery instructions to publish the `discovery-group:` prefix separately from routing labels, preventing a group query from matching the whole connector catalog.
+- Expanded tool-selection evaluation with adversarial search, Memory/checkpoint, diff/history, process/command and verification scenarios across both the full catalog and each discovery subset. The verified v15 catalog measures 45,486 bytes raw/7,641 bytes Brotli and scores 96.43% top-1, 100% top-2, median/p95 rank 1, with every adversarial subset scenario selecting the canonical tool at rank 1.
+
 ### Cross-host Control Center
 
 - Extracted a serializable Control Center host protocol and adapter boundary so the existing React UI can run in VS Code, JetBrains/JCEF and a standalone local browser without duplicating task, activity or Review Changes presentation logic.

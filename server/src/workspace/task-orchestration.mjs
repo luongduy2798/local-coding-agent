@@ -35,13 +35,12 @@ const DISCOVERY_TOOLS = new Set([
   "figma"
 ]);
 const VERIFICATION_TOOLS = new Set([
-  "run_changed_tests",
   "verify_changes",
   "review_diff",
   "security_scan",
   "todo_scan"
 ]);
-const PLANNING_TOOLS = new Set(["task_plan", "task_state", "task_checkpoint"]);
+const PLANNING_TOOLS = new Set(["task_plan", "task_checkpoint"]);
 const CONTROL_TOOLS = new Set([
   "task_open",
   "task_reclassify",
@@ -180,7 +179,6 @@ export function classifyTaskTool(tool, args = {}) {
     return ["undo", "reapply", "undo_all", "clear"].includes(String(args.action || "")) ? "mutation" : "discovery";
   }
   if (name === "skills") return ["create", "delete"].includes(String(args.action || "")) ? "mutation" : "planning";
-  if (name === "notes") return String(args.action || "list") === "save" ? "mutation" : "planning";
   if (EXECUTION_TOOLS.has(name)) return "execution";
   return "utility";
 }
@@ -201,9 +199,9 @@ export function inspectTaskTool({ task, tool, args = {} } = {}) {
   const previous = state.recent_fingerprints.find((entry) => entry.fingerprint === fingerprint) || null;
   const executionInspection = inspectTaskExecutionControl({ task, orchestration: state, tool, args });
   const evidenceGap = executionInspection.evidence_gap || normalizeOptionalString(args.evidence_gap, 1_000);
-  const statusNormalized = tool === "task_state" ? normalizeStatusText(args.status) : null;
-  const statusOnly = tool === "task_state" && Boolean(statusNormalized) &&
-    args.set_step_done === undefined && (!Array.isArray(args.add_steps) || args.add_steps.length === 0);
+  const planStatusUpdate = tool === "task_plan" && String(args.action || "") === "set_status";
+  const statusNormalized = planStatusUpdate ? normalizeStatusText(args.status) : null;
+  const statusOnly = planStatusUpdate && Boolean(statusNormalized);
   const statusDuplicate = statusOnly && statusTextSimilar(statusNormalized, state.last_status_normalized);
   let skip = false;
   let notice = null;

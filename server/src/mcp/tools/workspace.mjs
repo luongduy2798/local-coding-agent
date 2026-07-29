@@ -413,10 +413,10 @@ export function registerWorkspaceTools(mcp, dependencies) {
     "code_query",
     {
       title: "Code query",
-      description: "Query text, symbols, definitions, references, imports, callers, callees or types with fast-first semantic fallback metadata.",
+      description: "Query symbols, definitions, references, imports, callers, callees or types with fast-first semantic fallback metadata. Use search_text for literal, regex, or general file-content search.",
       inputSchema: {
         query: z.string().min(1),
-        mode: z.enum(["text", "symbol", "definition", "references", "imports", "callers", "callees", "type"]).optional(),
+        mode: z.enum(["symbol", "definition", "references", "imports", "callers", "callees", "type"]).optional().describe("Defaults to symbol. Literal and regex content search belongs in search_text."),
         depth: z.enum(["fast", "auto", "semantic"]).optional(),
         limit: z.number().int().min(1).max(500).optional(),
         cursor: z.string().max(2048).optional(),
@@ -429,10 +429,11 @@ export function registerWorkspaceTools(mcp, dependencies) {
     async ({ workspace_id, task_token, cursor, ...query }) => {
       const selected = await selectWorkspace({ workspaceId: workspace_id, taskToken: task_token });
       const pageLimit = boundedNumber(query.limit, 50, 1, 500);
+      const mode = query.mode || "symbol";
       const scope = pageScope("code_query", {
         workspace_id: selected.workspace.id,
         query: query.query,
-        mode: query.mode || "text",
+        mode,
         depth: query.depth || "auto",
         case_sensitive: Boolean(query.case_sensitive),
         refresh: Boolean(query.refresh)
@@ -440,7 +441,7 @@ export function registerWorkspaceTools(mcp, dependencies) {
       const offset = decodePageCursor(cursor, { kind: "code_query", scope });
       if (offset >= 500) throw invalidPageCursor();
       const windowLimit = Math.min(500, offset + pageLimit + 1);
-      const result = await selected.runtime.query.query({ ...query, limit: windowLimit });
+      const result = await selected.runtime.query.query({ ...query, mode, limit: windowLimit });
       const page = result.results.slice(offset, offset + pageLimit);
       const fitted = fitJsonItems(page, DEFAULT_RESPONSE_CHARS - 8_192);
       const beyondWindow = result.completeness?.result_truncated === true;
@@ -472,7 +473,7 @@ export function registerWorkspaceTools(mcp, dependencies) {
     "index_control",
     {
       title: "Index control",
-      description: "Inspect, refresh, rebuild or evict a workspace's lightweight code graph.",
+      description: "Inspect, refresh, rebuild or evict a workspace's lightweight code graph. Use only when index state is explicitly requested or appears stale/degraded; ordinary repository orientation belongs in workspace_snapshot.",
       inputSchema: {
         action: z.enum(["status", "refresh", "rebuild", "evict"]).optional(),
         workspace_id: z.string().optional(),

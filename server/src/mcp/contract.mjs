@@ -4,7 +4,7 @@
 
 import { createHash } from "node:crypto";
 
-export const CATALOG_VERSION = 14;
+export const CATALOG_VERSION = 15;
 
 export const MODEL_TOOL_NAMES = new Set([
   "lca_status",
@@ -15,7 +15,6 @@ export const MODEL_TOOL_NAMES = new Set([
   "workspace_detach",
   "task_open",
   "task_reclassify",
-  "task_state",
   "task_plan",
   "task_checkpoint",
   "task_close",
@@ -34,13 +33,11 @@ export const MODEL_TOOL_NAMES = new Set([
   "run_command",
   "run_commands",
   "process",
-  "run_changed_tests",
   "verify_changes",
   "review_diff",
   "security_scan",
   "todo_scan",
   "skills",
-  "notes",
   "workspace_memory",
   "figma",
   "lca_input"
@@ -59,7 +56,6 @@ export const STORAGE_REQUIRED_TOOLS = new Set([
   "workspace_detach",
   "task_open",
   "task_reclassify",
-  "task_state",
   "task_plan",
   "task_checkpoint",
   "task_close",
@@ -69,13 +65,11 @@ export const STORAGE_REQUIRED_TOOLS = new Set([
   "run_command",
   "run_commands",
   "process",
-  "run_changed_tests",
   "verify_changes",
   "review_diff",
   "security_scan",
   "todo_scan",
   "skills",
-  "notes",
   "workspace_memory"
 ]);
 
@@ -83,7 +77,6 @@ export const TASK_CONTEXT_TOOLS = new Set([
   "workspace_attach",
   "workspace_detach",
   "task_reclassify",
-  "task_state",
   "task_plan",
   "task_checkpoint",
   "task_close",
@@ -102,13 +95,11 @@ export const TASK_CONTEXT_TOOLS = new Set([
   "run_command",
   "run_commands",
   "process",
-  "run_changed_tests",
   "verify_changes",
   "review_diff",
   "security_scan",
   "todo_scan",
   "skills",
-  "notes",
   "workspace_memory"
 ]);
 
@@ -123,9 +114,7 @@ export const TASK_ACTIVITY_TOOLS = new Set([
   "run_command",
   "run_commands",
   "process",
-  "run_changed_tests",
   "verify_changes",
   "skills",
-  "notes",
   "workspace_memory"
 ]);

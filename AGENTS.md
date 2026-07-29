@@ -104,8 +104,8 @@ Chi tiết: [docs/CHATGPT_WEB_CONNECTOR.md](docs/CHATGPT_WEB_CONNECTOR.md).
 - `objective` là metadata tùy chọn, bền vững và hiển thị cho user về kết quả cần đạt cùng constraint riêng của task; không chứa private reasoning, secret, hội thoại không liên quan hoặc policy chung. `title` là nhãn UI ngắn; chỉ truyền title thì objective phải để trống, còn thiếu title có thể sinh title từ objective.
 - LCA không hiểu intent như model và không được tự đổi `effective_profile`. `suggested_profile`, `scope_signal` và `scope_reasons` chỉ là telemetry/advisory dựa trên tool evidence.
 - Chỉ gọi `task_reclassify` sau khi agent tự đánh giá context và xác nhận profile mới, luôn kèm lý do cụ thể.
-- Với `quick_edit`, ưu tiên flow ngắn: discovery `task-mutation` một lần, mở task, đọc evidence mục tiêu, quyết định nội bộ, patch, review diff và đóng task. Không mặc định gọi `task_plan`, kể tiến độ bằng `task_state`, hoặc list `skills`.
-- Lint, test, typecheck, build, security audit và format chỉ chạy khi user yêu cầu trực tiếp. Nếu không được yêu cầu, đóng task ngay sau source/diff review; `incomplete` chỉ là evidence state nội bộ, UI vẫn hiển thị Completed.
+- Với `quick_edit`, ưu tiên flow ngắn: discovery `task-mutation` một lần, mở task, đọc evidence mục tiêu, quyết định nội bộ, patch, review diff và đóng task. Không mặc định gọi `task_plan` hoặc list `skills`; `task_plan action=set_status` chỉ dùng cho phase transition hoặc blocker thật.
+- Lint, test, typecheck, build, security audit và format chỉ chạy khi user yêu cầu trực tiếp. Khi được yêu cầu, dùng `verify_changes`: `required` cho required gates, `impacted` cho affected tests, `full` cho lint/typecheck/test/build; raw command output không thay thế official evidence. Nếu không được yêu cầu, đóng task ngay sau source/diff review; `incomplete` chỉ là evidence state nội bộ, UI vẫn hiển thị Completed.
 - Soft budget chỉ tạo cảnh báo. Không được coi việc vượt budget là bằng chứng đủ để đổi profile, dừng task hoặc ép mutation.
 - Không đọc/search lặp cùng evidence nếu không có câu hỏi mới. Khi cần đọc tương tự, nêu rõ evidence gap cụ thể.
 

@@ -239,8 +239,8 @@ export function registerMemoryTools(mcp, dependencies) {
     mcp,
     "workspace_memory",
     {
-      title: "Workspace memory",
-      description: "Inspect and manage bounded persistent workspace memory used across ChatGPT conversations. Memory is explicit durable project context—not raw chat, private reasoning, command output, credentials, or copied file contents. task_open already returns adaptive skip/light/full Memory according to task policy; call this tool for deeper inspection or explicit save/update/transition/delete/settings operations.",
+      title: "Remember workspace context",
+      description: "Save, inspect and manage durable workspace knowledge needed by future tasks and ChatGPT conversations, including architecture decisions, constraints, project goals, preferences, known issues and verification results. Use task_checkpoint instead for progress needed only to resume the same active task. Memory is not raw chat, private reasoning, command output, credentials or copied file contents; task_open already supplies bounded adaptive skip/light/full Memory according to task policy.",
       inputSchema: memoryToolInputSchema()
     },
     async (args) => {

@@ -170,9 +170,10 @@ try {
   check("strict policy blocks run_commands", (await call(client, "run_commands", { commands: [{ command: "node --version" }] })).isError);
   check("strict policy blocks aggregate process start", (await call(client, "process", { action: "start", command: "node --version", task_token: strictTask.task_token })).isError);
   check("strict policy blocks aggregate skill creation", (await call(client, "skills", { action: "create", name: "blocked", description: "blocked", body: "blocked", task_token: strictTask.task_token })).isError);
-  check("strict policy blocks aggregate note writes", (await call(client, "notes", { action: "save", title: "blocked", body: "blocked", task_token: strictTask.task_token })).isError);
+  check("removed notes tool is not callable", (await call(client, "notes", { action: "save", title: "blocked", body: "blocked", task_token: strictTask.task_token })).isError);
   check("strict policy blocks verification command execution", (await call(client, "verify_changes", { task_token: strictTask.task_token })).isError);
-  check("strict policy still allows read-only task state", !(await call(client, "task_state", { task_token: strictTask.task_token })).isError);
+  check("strict policy blocks task plan mutation", (await call(client, "task_plan", { action: "create", goal: "blocked", steps: ["blocked"], task_token: strictTask.task_token })).isError);
+  check("strict policy still allows read-only task plan inspection", !(await call(client, "task_plan", { action: "get", task_token: strictTask.task_token })).isError);
   await call(client, "lca_status");
   await client.close();
 

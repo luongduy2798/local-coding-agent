@@ -39,7 +39,7 @@ export function registerRepositoryTools(mcp, dependencies) {
     "workspace_snapshot",
     {
       title: "Workspace snapshot Pro",
-      description: "Bounded workspace tree, profile, Git state and optional focused evidence.",
+      description: "Primary bounded repository-orientation snapshot: tree, profile, Git state, important files, graph status and optional focused evidence. Use project_profile only when manifest, framework or script details are needed without a full snapshot.",
       inputSchema: {
         path: z.string().optional(),
         workspace_id: z.string().optional(),
@@ -176,7 +176,7 @@ export function registerRepositoryTools(mcp, dependencies) {
     "project_profile",
     {
       title: "Project profile",
-      description: "Detect languages, frameworks, package managers, and scripts in the workspace. Reads root manifests (package.json, pubspec.yaml, go.mod, Cargo.toml, etc.). Results are cached for 5 min.",
+      description: "Targeted manifest profile for languages, frameworks, package managers and runnable scripts. Use when those details are specifically needed; workspace_snapshot is the canonical initial repository-orientation tool. Results are cached for 5 min.",
       inputSchema: {
         path: z.string().optional().describe("Root dir to inspect (default: primary root)."),
         workspace_id: z.string().optional(),

@@ -82,8 +82,8 @@ function registerExecTools(mcp) {
     mcp,
     "run_command",
     {
-      title: "Run command",
-      description: "Run a command and wait for it to finish. Use proc_start for long-running servers. Output is trimmed to keep payloads small — use tail_lines/head_lines or max_output_chars to control it.",
+      title: "Run one command",
+      description: "Run exactly one bounded foreground shell command and wait for it to finish. Use process action=start for long-running servers. Use verify_changes for official test, lint, typecheck or build evidence; raw command output does not satisfy the completion guard. Output is trimmed to keep payloads small.",
       inputSchema: {
         command: z.string().min(1),
         cwd: z.string().optional().describe("Working directory inside a root."),
@@ -162,8 +162,8 @@ function registerExecTools(mcp) {
     mcp,
     "run_commands",
     {
-      title: "Run command batch",
-      description: "Run up to 12 guarded commands sequentially or in parallel.",
+      title: "Run multiple commands",
+      description: "Run two or more custom guarded shell commands sequentially or in parallel, up to 12 total. Use verify_changes for official quality-gate evidence rather than manually batching standard test, lint, typecheck or build commands.",
       inputSchema: {
         commands: z.array(z.object({
           command: z.string().min(1),
@@ -315,7 +315,7 @@ function registerGitTool(mcp) {
     "git",
     {
       title: "Git",
-      description: "Run a git command. Pass args as an array, e.g. [\"status\",\"--short\"].",
+      description: "Run a raw Git command for status, history, or low-level repository inspection. Use review_diff to review all current task changes and change_history action=diff for one journaled LCA change ID. Pass args as an array, e.g. [\"status\",\"--short\"].",
       inputSchema: {
         args: z.array(z.string()).min(1).describe('Git arguments, e.g. ["log","--oneline","-n","10"].'),
         cwd: z.string().optional().describe("Repository directory inside a workspace."),
@@ -339,7 +339,7 @@ function registerGitTool(mcp) {
         // require AGENT_MODE=full.
         if (!infoFlag && !GIT_READONLY.has(sub)) {
           throw new Error(
-            `Git "${sub || args[0] || ""}" is blocked in safe mode (only read-only git is allowed). Use git_status/git_diff, or set AGENT_MODE=full.`
+            `Git "${sub || args[0] || ""}" is blocked in safe mode. Use git with read-only args such as ["status"] or ["diff"], or set AGENT_MODE=full.`
           );
         }
       }

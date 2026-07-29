@@ -38,7 +38,7 @@ export function registerReviewTools(mcp, dependencies) {
     "review_diff",
     {
       title: "Review diff",
-      description: "Review staged, unstaged and untracked changes across the active task. Incomplete evidence never returns CLEAN or PASS.",
+      description: "Canonical review of all staged, unstaged and untracked changes across the active task. Use raw git diff only for low-level Git inspection and change_history action=diff only for one journaled change ID. Incomplete evidence never returns CLEAN or PASS.",
       inputSchema: {
         staged: z.boolean().optional().describe("Compatibility hint from V4; V5 still inventories and reviews all three change sources."),
         cwd: z.string().optional(),

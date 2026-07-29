@@ -1,13 +1,16 @@
-// Local Coding Agent fixed-catalog/tool-selection golden evaluation
+// Local Coding Agent catalog and discovery-group tool-selection evaluation
 // Copyright (c) 2026 Lương Duy
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import assert from "node:assert/strict";
 import path from "node:path";
+import { DISCOVERY_GROUPS } from "../server/src/mcp/discovery-groups.mjs";
 import { createIsolatedTestRoot, safeRemove } from "../server/tests/helpers/test-guard.mjs";
 import { startTestServer, stopTestProcess } from "../server/tests/helpers/test-runtime.mjs";
 
 const PROTOCOL_VERSION = "2025-06-18";
+const EXPECTED_FIXED_COUNT = 34;
+const REMOVED_CONSOLIDATED_TOOLS = new Set(["task_state", "run_changed_tests", "notes"]);
 const STOP_WORDS = new Set([
   "the", "and", "for", "with", "one", "all", "then", "this", "that", "into", "from", "only", "under", "current"
 ]);
@@ -28,33 +31,34 @@ const FROZEN_LEGACY_65 = new Set([
 ]);
 
 const SCENARIOS = [
-  scenario("call lca", ["lca_status"], ["workspace_info"]),
-  scenario("open the input composer widget in PiP", ["lca_input"], []),
-  scenario("return LCA health status, active sessions and current policy", ["lca_status"], ["workspace_info", "workspace_doctor", "policy_status"]),
-  scenario("create a concrete implementation plan with ordered steps", ["task_plan"], ["task_plan"]),
-  scenario("save a resumable checkpoint with progress and next steps", ["task_checkpoint"], ["checkpoint", "session_report"]),
-  scenario("list files recursively under the source folder", ["list_files"], ["list_files"]),
-  scenario("read one source file with line numbers", ["read_file"], ["read_file"]),
-  scenario("read several related files in one bounded request", ["read_many"], ["read_many"]),
-  scenario("search exact text and regex matches across the repository", ["search_text"], ["search_text"]),
-  scenario("find files by glob name and extension", ["find_files"], ["find_files"]),
-  scenario("get a compact repository architecture snapshot and important files", ["workspace_snapshot"], ["repo_overview", "repo_map", "workspace_snapshot", "important_files"]),
-  scenario("detect project languages manifests packages and scripts", ["project_profile"], ["project_profile"]),
-  scenario("find a symbol definition references callers and type", ["code_query"], ["repo_symbols"]),
-  scenario("atomically update multiple files with stale version checks", ["apply_patch"], ["apply_patch", "validate_patch", "preview_patch"]),
-  scenario("execute one foreground shell command in the workspace", ["run_command"], ["run_command"]),
-  scenario("execute several independent shell commands as one request", ["run_commands"], ["run_commands"]),
-  scenario("start inspect output and stop a background process", ["process"], ["proc_start", "proc_list", "proc_output", "proc_stop"]),
-  scenario("show git status and diff then run a safe git operation", ["git"], ["git", "git_status", "git_diff"]),
-  scenario("run only tests impacted by changed files", ["run_changed_tests"], ["run_changed_tests"]),
-  scenario("verify every required test lint typecheck and build quality gate", ["verify_changes"], ["quality_gate", "run_tests", "run_lint", "run_build"]),
-  scenario("review the current diff for correctness and blockers", ["review_diff"], ["review_diff"]),
-  scenario("scan changed code for security vulnerabilities and secrets", ["security_scan"], ["security_scan"]),
-  scenario("scan the repository for TODO FIXME and unfinished work", ["todo_scan"], ["todo_scan"]),
-  scenario("list and read a project skill before implementing", ["skills"], ["list_skills", "read_skill"]),
-  scenario("save and list durable workspace notes", ["notes"], ["save_note", "list_notes"]),
-  scenario("inspect Figma desktop design context through the integration", ["figma"], ["figma_status", "figma_list_tools", "figma_call_tool"]),
-  scenario("inspect change history and summarize tracked edits", ["change_history"], ["change_summary"])
+  scenario("call lca and return runtime health status", "lca_status", ["workspace_info"], "workspace-management", true),
+  scenario("open the Apps SDK input composer widget in PiP", "lca_input", [], "workspace-management", true),
+  scenario("select a different default workspace for future conversations", "workspace_select", [], "workspace-management", true),
+  scenario("inspect or rebuild a stale code index", "index_control", ["index_status"], "workspace-management", true, ["workspace_snapshot"]),
+  scenario("create a persistent implementation plan with ordered steps", "task_plan", ["task_plan"], "task-planning", true),
+  scenario("save progress and next steps so this same active task can resume after reconnect", "task_checkpoint", ["checkpoint", "session_report"], "task-planning", true, ["workspace_memory"]),
+  scenario("remember an architecture constraint for future tasks and conversations", "workspace_memory", ["decision_log"], "task-planning", true, ["task_checkpoint"]),
+  scenario("get the primary bounded repository architecture orientation snapshot", "workspace_snapshot", ["repo_overview", "repo_map", "workspace_snapshot", "important_files"], "task-investigation", true, ["project_profile"]),
+  scenario("inspect only package manifests frameworks and runnable scripts", "project_profile", ["project_profile"], "task-investigation", true, ["workspace_snapshot"]),
+  scenario("list files recursively under the source folder", "list_files", ["list_files"], "task-investigation"),
+  scenario("read one targeted source file range", "read_file", ["read_file"], "task-investigation"),
+  scenario("read several related files in one bounded concurrent request", "read_many", ["read_many"], "task-investigation"),
+  scenario("find every literal or regex occurrence of a string in file contents", "search_text", ["search_text"], "task-investigation", true, ["code_query"]),
+  scenario("find files by glob name and extension", "find_files", ["find_files"], "task-investigation"),
+  scenario("find callers references and the type of a code symbol", "code_query", ["repo_symbols"], "task-investigation", true, ["search_text"]),
+  scenario("atomically update multiple files with stale version checks", "apply_patch", ["apply_patch", "validate_patch", "preview_patch"], "task-code-change", true),
+  scenario("review all staged unstaged and untracked changes in the active task", "review_diff", ["review_diff"], "task-verification", true, ["git", "change_history"]),
+  scenario("inspect the diff for one journaled LCA change id and optionally undo it", "change_history", ["change_summary"], "change-management", true, ["review_diff", "git"]),
+  scenario("show raw git status log or low level repository history", "git", ["git", "git_status", "git_diff"], "change-management", true, ["review_diff", "change_history"]),
+  scenario("run package-aware tests impacted by changed files and persist official evidence", "verify_changes", ["run_changed_tests"], "task-verification", true, ["run_command", "run_commands"]),
+  scenario("verify every required lint typecheck test and build gate", "verify_changes", ["quality_gate", "run_tests", "run_lint", "run_build"], "task-verification", true, ["run_command", "run_commands"]),
+  scenario("scan changed code for secrets and unsafe security patterns", "security_scan", ["security_scan"], "task-verification", true),
+  scenario("execute one bounded foreground custom shell command", "run_command", ["run_command"], "task-process", true, ["process"]),
+  scenario("execute several custom shell commands sequentially or in parallel", "run_commands", ["run_commands"], "task-process", true),
+  scenario("start inspect output from and stop a long running background process", "process", ["proc_start", "proc_list", "proc_output", "proc_stop"], "task-process", true, ["run_command"]),
+  scenario("scan the repository for TODO FIXME HACK and XXX comments", "todo_scan", ["todo_scan"], "task-investigation"),
+  scenario("list and read a named project skill before implementation", "skills", ["list_skills", "read_skill"], "task-code-change"),
+  scenario("inspect Figma desktop design context and screenshot", "figma", ["figma_status", "figma_list_tools", "figma_call_tool"], "figma-workflow", true)
 ];
 
 assert.equal(FROZEN_LEGACY_65.size, 65, "the comparison baseline must remain the frozen 65-tool catalog");
@@ -68,34 +72,59 @@ let runtime = null;
 try {
   const fixedCatalog = await readCatalog();
   const legacyCatalog = [...FROZEN_LEGACY_65].map(frozenLegacyTool);
-  assert.equal(fixedCatalog.length, 36, `Fixed catalog drifted to ${fixedCatalog.length} tools`);
+  assert.equal(fixedCatalog.length, EXPECTED_FIXED_COUNT, `Fixed catalog drifted to ${fixedCatalog.length} tools`);
   assert.equal(legacyCatalog.length, 65);
+  assert.equal(
+    fixedCatalog.some((tool) => REMOVED_CONSOLIDATED_TOOLS.has(tool.name)),
+    false,
+    "removed consolidated tools must not remain model-visible"
+  );
 
-  const fixedResult = evaluateCatalog(fixedCatalog, "fixed-36", "expectedFixed");
-  const legacyResult = evaluateCatalog(legacyCatalog, "legacy-65", "expectedLegacy");
+  const fixedResult = evaluateCatalog(fixedCatalog, SCENARIOS, "fixed-34", "expectedFixed");
+  const legacyScenarios = SCENARIOS.filter((item) => item.expectedLegacy.length);
+  const legacyResult = evaluateCatalog(legacyCatalog, legacyScenarios, "legacy-65", "expectedLegacy");
+  const groupResults = evaluateDiscoveryGroups(fixedCatalog);
+  const adversarialFailures = groupResults.flatMap((group) => group.scenarios.filter((item) =>
+    (item.must_top_1 && item.rank !== 1) || item.rejected_rank_before_expected
+  ));
   const report = {
-    eval: "lca-tool-selection",
+    eval: "lca-tool-selection-v15",
     scenarios: SCENARIOS.length,
     fixed: fixedResult,
     baseline_legacy_65: legacyResult,
-    primary_metric: "top_2_accuracy",
+    discovery_groups: groupResults,
+    primary_metric: "discovery_group_top_1_accuracy",
     top_1_accuracy_delta: round(fixedResult.top_1_accuracy - legacyResult.top_1_accuracy, 4),
     gates: {
-      top_2_accuracy_not_lower_than_legacy_65: fixedResult.top_2_accuracy >= legacyResult.top_2_accuracy,
-      median_discovery_calls_at_most_2: fixedResult.median_discovery_calls <= 2
-    }
+      catalog_count_34: fixedCatalog.length === EXPECTED_FIXED_COUNT,
+      removed_tools_absent: [...REMOVED_CONSOLIDATED_TOOLS].every((name) => !fixedCatalog.some((tool) => tool.name === name)),
+      full_catalog_top_2_not_lower_than_legacy_65: fixedResult.top_2_accuracy >= legacyResult.top_2_accuracy,
+      discovery_group_all_expected_within_top_2: groupResults.every((group) => group.scenarios.every((item) => item.rank && item.rank <= 2)),
+      adversarial_canonical_tools_top_1: adversarialFailures.length === 0,
+      discovery_group_median_rank_at_most_1: groupResults.every((group) => group.median_rank <= 1),
+      discovery_group_p95_rank_at_most_2: groupResults.every((group) => group.p95_rank <= 2)
+    },
+    adversarial_failures: adversarialFailures
   };
   console.log(JSON.stringify(report, null, 2));
-  assert.equal(report.gates.top_2_accuracy_not_lower_than_legacy_65, true);
-  assert.equal(report.gates.median_discovery_calls_at_most_2, true);
+  for (const [name, passed] of Object.entries(report.gates)) {
+    assert.equal(passed, true, `tool-selection gate failed: ${name}`);
+  }
 } finally {
   if (runtime) await stopTestProcess(runtime.child);
   await safeRemove(context.fixtureDir, context, { recursive: true, force: true });
   await safeRemove(context.dataDir, context, { recursive: true, force: true });
 }
 
-function scenario(prompt, expectedFixed, expectedLegacy) {
-  return { prompt, expectedFixed, expectedLegacy };
+function scenario(prompt, expectedFixed, expectedLegacy, group, mustTop1 = false, rejected = []) {
+  return {
+    prompt,
+    expectedFixed: [expectedFixed],
+    expectedLegacy,
+    group,
+    mustTop1,
+    rejected
+  };
 }
 
 function frozenLegacyTool(name) {
@@ -128,17 +157,8 @@ async function readCatalog() {
   });
   const sessionId = initialized.sessionId;
   assert.ok(sessionId);
-  await rpc(runtime.port, {
-    sessionId,
-    method: "notifications/initialized",
-    params: {}
-  });
-  const listed = await rpc(runtime.port, {
-    id: 2,
-    sessionId,
-    method: "tools/list",
-    params: {}
-  });
+  await rpc(runtime.port, { sessionId, method: "notifications/initialized", params: {} });
+  const listed = await rpc(runtime.port, { id: 2, sessionId, method: "tools/list", params: {} });
   await fetch(`http://127.0.0.1:${runtime.port}/mcp`, {
     method: "DELETE",
     headers: {
@@ -152,8 +172,42 @@ async function readCatalog() {
   return tools;
 }
 
-function evaluateCatalog(catalog, label, expectedKey) {
-  const rankedScenarios = SCENARIOS.map((item) => {
+function evaluateDiscoveryGroups(catalog) {
+  const byName = new Map(catalog.map((tool) => [tool.name, tool]));
+  return Object.entries(DISCOVERY_GROUPS).map(([group, names]) => {
+    const subset = names.map((name) => byName.get(name)).filter(Boolean);
+    assert.equal(subset.length, names.length, `${group} contains a missing model tool`);
+    const scenarios = SCENARIOS.filter((item) => item.group === group).map((item) => {
+      const ranked = rankCatalog(subset, item.prompt);
+      const rank = ranked.findIndex((entry) => item.expectedFixed.includes(entry.name)) + 1;
+      const expectedRank = rank || null;
+      const rejectedRanks = item.rejected
+        .map((name) => ({ name, rank: ranked.findIndex((entry) => entry.name === name) + 1 }))
+        .filter((entry) => entry.rank > 0);
+      return {
+        prompt: item.prompt,
+        expected: item.expectedFixed,
+        rank: expectedRank,
+        must_top_1: item.mustTop1,
+        rejected_rank_before_expected: rejectedRanks.some((entry) => !expectedRank || entry.rank < expectedRank),
+        rejected_ranks: rejectedRanks,
+        top_3: ranked.slice(0, 3).map(({ name, score }) => ({ name, score: round(score) }))
+      };
+    });
+    const ranks = scenarios.map((item) => item.rank || subset.length + 1);
+    return {
+      group,
+      catalog_size: subset.length,
+      scenarios,
+      top_1_accuracy: scenarios.length ? round(ranks.filter((rank) => rank === 1).length / ranks.length, 4) : null,
+      median_rank: scenarios.length ? percentile(ranks, 50) : 0,
+      p95_rank: scenarios.length ? percentile(ranks, 95) : 0
+    };
+  });
+}
+
+function evaluateCatalog(catalog, scenarios, label, expectedKey) {
+  const rankedScenarios = scenarios.map((item) => {
     const ranked = rankCatalog(catalog, item.prompt);
     const accepted = new Set(item[expectedKey]);
     const rank = ranked.findIndex((entry) => accepted.has(entry.name)) + 1;

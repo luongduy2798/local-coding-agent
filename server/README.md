@@ -32,18 +32,19 @@ The root `server.mjs` remains intentionally small so existing launchers continue
 
 ## Tools
 
+The runtime exposes a fixed 34-tool catalog (`catalog_version=15`). Dynamic discovery loads workflow subsets rather than presenting every tool for every task.
+
 | Group | Tools |
 |-------|-------|
-| Info | `lca` |
-| Read | `workspace_snapshot`, `repo_map`, `repo_symbols`, `project_profile`, `important_files`, `index_status`, `list_files`, `find_files`, `read_file`, `read_many` (SHA-256 versions, concurrent + line ranges), `stat_path`, `search_text` (ripgrep/git, with context + glob) |
-| Figma Desktop | `figma_status`, `figma_list_tools`, `figma_call_tool`, `figma_get_design_context`, `figma_get_screenshot`, `figma_get_metadata`, `figma_get_variable_defs`, `figma_get_code_connect_map`, `figma_get_figjam` |
-| Write | `apply_patch` (create/update/delete/rename batch), `make_dir` |
-| Execute | `run_command`, `run_commands` (bounded batch; cmd/powershell/bash/sh/zsh) |
-| Processes | `proc_start`, `proc_list`, `proc_output`, `proc_stop` |
-| Git | `git` |
-| Pro | `workspace_snapshot`, `workspace_doctor`, `repo_map`, `repo_symbols`, `review_diff`, `session_report` |
-| Manual verification | `quality_gate`, `run_changed_tests` |
-| Notes & session | `save_note`, `list_notes`, `checkpoint`, `resume` |
+| Runtime/workspaces | `lca_status`, `lca_input`, `workspace_list`, `workspace_register`, `workspace_select`, `workspace_attach`, `workspace_detach` |
+| Tasks | `task_open`, `task_reclassify`, action-based `task_plan`, `task_checkpoint`, `task_close` |
+| Context | `workspace_snapshot`, `project_profile`, `search_text`, `code_query`, `find_files`, `list_files`, `read_file`, `read_many`, `index_control` |
+| Mutation/history | `apply_patch`, `change_history`, `review_diff`, `git` |
+| Execution | `run_command`, `run_commands`, action-based `process` |
+| Verification | strategy-based `verify_changes`, `security_scan`, `todo_scan` |
+| Integration/context | `skills`, `workspace_memory`, action-based `figma` |
+
+`search_text` is the canonical literal/regex content search; `code_query` handles symbols and relationships. `verify_changes` owns required, impacted and full quality-gate evidence. `task_checkpoint` resumes the same task, `change_history` retains Undo/Reapply, and `workspace_memory` stores durable future-task context. Historical notes remain in SQLite for data compatibility but are not model-visible.
 
 ## Run
 

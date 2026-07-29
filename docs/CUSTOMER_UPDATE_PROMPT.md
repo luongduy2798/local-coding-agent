@@ -40,7 +40,7 @@ Các bước:
    tiết; không in instance nonce hoặc gọi `/healthz/details` khi chưa có local
    companion auth.
 6. Nhắc tôi refresh ChatGPT custom MCP connector một lần, mở chat mới
-   và gọi `lca_status` để xác minh `catalog_version=14`/fixed 37-tool catalog.
+   và gọi `lca_status` để xác minh `catalog_version=15`/fixed 34-tool catalog.
 7. Báo lại commit hiện tại, supervisor/server/tunnel status, workspace đã chọn,
    active session/task count và vị trí rollback point; không in secret.
 

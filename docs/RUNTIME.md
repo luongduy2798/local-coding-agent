@@ -45,14 +45,14 @@ Progress should be observable at meaningful phase transitions or blockers, witho
 
 Do not edit SQLite files while LCA is running. Index data can be rebuilt with `index_control`; task, journal, and transaction data should be treated as durable state.
 
-## Fixed 37-tool catalog
+## Fixed 34-tool catalog
 
 The runtime always publishes the same model-visible catalog:
 
 ```text
 System/task
 lca_status, workspace_list, workspace_register, workspace_select,
-workspace_attach, workspace_detach, task_open, task_reclassify, task_state,
+workspace_attach, workspace_detach, task_open, task_reclassify,
 task_plan, task_checkpoint, task_close
 
 Context
@@ -61,13 +61,13 @@ read_file, read_many, project_profile, index_control
 
 Mutation/execution
 apply_patch, change_history, git, run_command, run_commands, process,
-run_changed_tests, verify_changes, review_diff, security_scan, todo_scan
+verify_changes, review_diff, security_scan, todo_scan
 
 Utilities/integration
-skills, notes, workspace_memory, figma, lca_input
+skills, workspace_memory, figma, lca_input
 ```
 
-The catalog does not change when mode or policy changes. Legacy tool names are not registered or callable; stale clients receive an unknown-tool/catalog-refresh error. `lca_status` reports `catalog_version=14` and `catalog_hash` after the updated runtime is restarted.
+The catalog does not change when mode or policy changes. `task_state`, `run_changed_tests`, and `notes` are consolidated out of the model catalog: their active responsibilities belong to action-based `task_plan`, strategy-based `verify_changes`, checkpoint, and Workspace Memory. The historical notes table remains for data compatibility. Legacy tool names are not registered or callable; stale clients receive an unknown-tool/catalog-refresh error. `lca_status` reports `catalog_version=15` and `catalog_hash` after the updated runtime is restarted.
 
 Catalog size is guarded by broad transport safety ceilings—96,000 raw bytes and 24,000 compressed-equivalent bytes—not by a schema-minification target. Tool descriptions, typed enums, field constraints, and argument guidance must not be shortened merely to stay near the former 35 KB measurement. Runtime catalog tests also assert that `workspace_memory` and `task_close.memory_updates` continue to publish their supported actions and typed memory fields.
 
@@ -155,11 +155,11 @@ LCA updates an orchestration phase independently from the routing lifecycle: `op
 
 LCA may report `suggested_profile`, `scope_signal`, and `scope_reasons` from observable scope evidence such as multiple attached workspaces or the model creating a persistent multi-step plan. Objective text is not interpreted for complexity classification. Discovery-call count and raw search-result path count do not by themselves trigger a profile suggestion. These are advisory signals only. LCA never updates `effective_profile` from those signals. After evaluating the actual request and code context, the model may keep the current profile or call `task_reclassify(complexity, reason)` to confirm a change.
 
-Repeated unchanged discovery calls are fingerprinted. For supported reads, LCA checks the source version before reusing cached evidence; changed files are read again. Repeated requests without new evidence can return advisory notices and eventually a loop guard. A model that genuinely needs a similar read should state the concrete unresolved evidence gap rather than narrating progress through repeated `task_state` calls.
+Repeated unchanged discovery calls are fingerprinted. For supported reads, LCA checks the source version before reusing cached evidence; changed files are read again. Repeated requests without new evidence can return advisory notices and eventually a loop guard. A model that genuinely needs a similar read should state the concrete unresolved evidence gap rather than narrating progress through repeated `task_plan action=set_status` calls.
 
 For ChatGPT clients that dynamically load connector tools, every tool description publishes one or more exact `discovery-group:*` tags. The initial `api_tool.list_resources` call must use one routing group: `task-mutation`, `task-investigation`, `task-planning`, `task-code-change`, `task-verification`, `task-process`, `workspace-management`, `change-management`, or `figma-workflow`. Do not invent free-form queries such as `write` and do not silently load the full catalog if a group is missing. A second group is justified only when the requested scope genuinely changes.
 
-A typical quick edit is one `task-mutation` discovery → `workspace_list`/`workspace_select` as needed → `task_open` → targeted read → model decision → `apply_patch` → `review_diff` → `task_close`. Persistent `task_plan`, progress narration, and unrelated `skills` discovery are normally unnecessary for this profile. Lint, test, typecheck, build, security audit, and other quality gates run only when explicitly requested. When they are not requested, call `task_close(status=incomplete)` once as an internal evidence state; the companion UI presents successfully closed work as Completed.
+A typical quick edit is one `task-mutation` discovery → `workspace_list` → `task_open` → targeted read → model decision → `apply_patch` → `review_diff` → `task_close`. `workspace_select` is reserved for changing the default advertised to future conversations and is not part of ordinary task routing. Persistent `task_plan`, progress narration, and unrelated `skills` discovery are normally unnecessary for this profile. Lint, test, typecheck, build, security audit, and other quality gates run only when explicitly requested. When they are not requested, call `task_close(status=incomplete)` once as an internal evidence state; the companion UI presents successfully closed work as Completed.
 
 Every path returned by runtime coding tools is qualified by `workspace_id` and is relative to that workspace. Two sessions can therefore work on different repositories concurrently without changing each other's reads, writes, process handles, journals, or task selection.
 
@@ -167,7 +167,7 @@ Every path returned by runtime coding tools is qualified by `workspace_id` and i
 
 Each hot workspace owns an incremental, packed `WorkspaceGraph` containing file metadata, manifests, package/dependency information, and symbol/import/reference shards. Git state is joined by `workspace_snapshot`, verification, and review rather than duplicated inside the disposable index. runtime keeps at most two hot workspace runtimes by default and unloads idle runtimes after ten minutes. Lexical scans yield cooperatively on large graphs so a 100k-file query does not monopolize the event loop. If watcher invalidation arrives during a large search or fingerprint probe, that stale pass yields to exact-path reconciliation and retries; matching evidence from the small changed-path set is surfaced first. Aggregate fingerprints remain canonical across incremental replacement, persistence, restart, and independent full refresh. Without a healthy watcher, freshness remains explicitly non-authoritative until reconciliation. Runtime unload is an idempotent barrier that waits for accepted graph mutations and flushes their final index. Eviction is single-flight per workspace, and a replacement waits for old prewarm, semantic workers, and graph persistence to close.
 
-`code_query` supports text, symbol, definition, references, imports, callers, callees, and type queries. The fast path is universal lexical/graph evidence. A built-in structural parser covers JavaScript/TypeScript/TSX, Python, Go, Rust, Java/Kotlin, C#, and Dart in a disposable worker; JSON/YAML/Shell use structural/lexical parsing. The parser worker is materialized under the LCA data directory from a release-pinned manifest and SHA-256, and a corrupt regular cached artifact is replaced before execution while symlinks fail closed.
+The model-facing `code_query` supports symbol, definition, references, imports, callers, callees, and type queries; literal and regex file-content search belongs to `search_text`. The internal query engine retains bounded lexical text mode for snapshot focus and benchmark plumbing. The fast path is universal lexical/graph evidence. A built-in structural parser covers JavaScript/TypeScript/TSX, Python, Go, Rust, Java/Kotlin, C#, and Dart in a disposable worker; JSON/YAML/Shell use structural/lexical parsing. The parser worker is materialized under the LCA data directory from a release-pinned manifest and SHA-256, and a corrupt regular cached artifact is replaced before execution while symlinks fail closed.
 
 For JavaScript/TypeScript, a bounded project-local TypeScript Language Service can provide compiler-grade definitions, references, types, callers, and callees. Discovery accepts only `<workspace>/node_modules/typescript`, verifies package and entrypoint realpaths, loads lazily, and never installs or searches for a global, ancestor, or PnP compiler. Both structural parsing and the synchronous TypeScript compiler run outside the MCP event loop; timeout or cancellation terminates the worker, so pathological semantic work is hard-preemptible and lexical evidence remains available. AST uses an 800 ms budget; warm/cold Language Service calls use 2/5 seconds and fall back rather than hanging.
 
@@ -187,7 +187,7 @@ The filesystem transaction and each workspace's Review Changes journal are separ
 
 `run_command`, `run_commands`, background `process`, and mutating Git commands are not atomic or automatically undoable. The runtime records a privacy-preserving activity plus before/after change fingerprints. It does not store command text, stdout, stderr, environment variables, or secrets in the activity journal.
 
-If a command changes tracked source outside `apply_patch`, the workspace is marked `unmanaged_changes`. `verify_changes` must not return `PASS` while that flag remains. Review the resulting diff, then explicitly adopt the changes through the verification flow only when they are understood. Missing/unsupported required gates also produce `INCOMPLETE`, not a false pass.
+If a command changes tracked source outside `apply_patch`, the workspace is marked `unmanaged_changes`. `verify_changes` is the canonical evidence path: `strategy=required` runs required gates, `impacted` runs package-aware affected tests, and `full` requests lint/typecheck/test/build. Raw `run_command`/`run_commands` output is not completion-guard evidence, and `verify_changes` must not return `PASS` while unmanaged changes remain. Review the resulting diff, then explicitly adopt the changes through the verification flow only when they are understood. Missing/unsupported required gates also produce `INCOMPLETE`, not a false pass.
 
 ## Upgrade and rollback
 
@@ -204,7 +204,7 @@ Both commands avoid destructive Git cleanup by default. Recovery never passes Gi
 
 ## Measured release status and known limits
 
-The local release gates cover catalog/session, storage, task isolation, Persistent Workspace Memory, cross-workspace transaction, task-close recovery, shell-mutation detection, journal, coding intelligence, agent, performance, hardening, Figma, security, CLI/supervisor, and VS Code extension checks. The source catalog has 37 tools, `catalog_version=14`, and tool-name hash `1bb9360cb91fa941`. The last pre-expansion version-9 measurement was 34,942 bytes raw / 5,487 bytes compressed-equivalent; versions 10–14 intentionally expand the Memory schemas, adaptive retrieval, task-close outbox and model-visible guidance, so the post-version-9 catalog must be re-measured before publishing a replacement exact size. Its release gates use the broad 96,000-byte raw and 24,000-byte compressed safety ceilings so schema clarity is not traded away for the former 35 KB target. The focused performance gate measured stateful dispatch p95 0.006 ms, `lca_status` handler/server-total p95 0.3/1.3 ms, warm `workspace_snapshot` p95 40.02 ms, warm `code_query` p95 2.31 ms, widget autocomplete backend/end-to-end p95 36.3/37.82 ms, and compose 1.5/2.50 ms.
+The local release gates cover catalog/session, storage, task isolation, Persistent Workspace Memory, cross-workspace transaction, task-close recovery, shell-mutation detection, journal, coding intelligence, agent, performance, hardening, Figma, security, CLI/supervisor, and VS Code extension checks. Catalog v15 has 34 tools, tool-name hash `fc8b432ebdde919a`, and a measured `tools/list` payload of 45,486 bytes raw / 7,641 bytes Brotli, below the broad 96,000/24,000-byte safety ceilings. The 28-scenario tool-selection eval measured 96.43% full-catalog top-1 accuracy, 100% top-2 accuracy, and median/p95 rank 1; every adversarial discovery-subset scenario selected its canonical tool at rank 1 and every expected tool remained within rank 2. The focused v15 performance gate measured stateful dispatch p95 0.003 ms, `lca_status` handler/server-total p95 0.8/1.3 ms, warm `workspace_snapshot` p95 26.15 ms, warm `code_query` p95 6.17 ms, widget autocomplete backend/end-to-end p95 10.6/32.46 ms, and widget render backend/end-to-end p95 1.2/2.95 ms.
 
 The release-scale cold-builder benchmark creates 10 registered workspaces, keeps two hot, runs 1,000 warm queries, mutates a watched file, and commits a two-workspace patch. The latest 10k run measured index 1.15 seconds, query p95 0.04 ms, freshness 43.5 ms, post-GC RSS 111.77 MB, cache 2.33 MB, forced-GC heap growth 1.26%, and event-loop p99 18.73 ms. The final 100k run measured index 9.89 seconds, warm snapshot 0.04 ms, query p95 0.04 ms, freshness 238.80 ms, post-GC RSS 120.17 MB, cache 23.46 MB, heap growth 3.00%, and event-loop p99 11.96 ms. Every measured 10k and 100k SLA is true. Runtime timing starts after isolated fixture generation so synthetic file creation is not misreported as LCA event-loop work.
 

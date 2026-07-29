@@ -81,13 +81,19 @@ try {
   const instructions = String(initialized.message?.result?.instructions || "");
   assert.match(instructions, /task_open/);
   assert.match(instructions, /workspace_set|workspace set/i);
-  assert.match(instructions, /discovery-group:task-mutation/);
-  assert.match(instructions, /discovery-group:task-planning/);
+  assert.match(instructions, /prefix `discovery-group:`/);
+  assert.match(instructions, /task-mutation/);
+  assert.match(instructions, /task-planning/);
+  assert.doesNotMatch(
+    instructions,
+    /discovery-group:task-(mutation|investigation|planning|code-change|verification|process)/,
+    "server-level instructions must not make every tool match a specific discovery-group query"
+  );
   assert.match(instructions, /Do not invent free-form discovery queries/);
   assert.match(instructions, /do not fall back to the full catalog/i);
   assert.match(instructions, /Use `lca_input` only when the user explicitly requests/i);
   assert.match(instructions, /Do not call `workspace_memory` as a mandatory startup step/i);
-  assert.doesNotMatch(instructions, /\bworkspace_doctor\b|\brepo_symbols\b|\bsession_report\b|\brequest_approval\b/);
+  assert.doesNotMatch(instructions, /\bworkspace_doctor\b|\brepo_symbols\b|\bsession_report\b|\brequest_approval\b|\bproc_start\b|\bgit_status\b|\bgit_diff\b/);
 
   await rpc(runtime.port, {
     sessionId,
@@ -105,7 +111,7 @@ try {
   const tools = listed.message?.result?.tools;
   assert.ok(Array.isArray(tools), "tools/list must return a tools array");
   const names = tools.map((tool) => tool.name);
-  assert.equal(names.length, 37, `expected 37 production tools, received ${names.length}`);
+  assert.equal(names.length, EXPECTED_TOOLS.length, `expected ${EXPECTED_TOOLS.length} production tools, received ${names.length}`);
   assert.deepEqual([...names].sort(), [...EXPECTED_TOOLS].sort());
   for (const tool of tools) {
     assert.match(tool.description || "", /discovery-group:/, `${tool.name} must publish a discovery group tag`);
@@ -119,11 +125,9 @@ try {
     "change_history",
     "read_file",
     "review_diff",
-    "task_checkpoint",
     "task_close",
     "task_open",
-    "workspace_list",
-    "workspace_select"
+    "workspace_list"
   ].sort());
   const applyPatchTool = tools.find((tool) => tool.name === "apply_patch");
   assert.equal(
@@ -136,6 +140,27 @@ try {
   assert.match(applyPatchTool?.description || "", /all-before\/all-after transaction recovery/i);
   const patchOperationProperties = applyPatchTool?.inputSchema?.properties?.operations?.items?.properties || {};
   assert.match(patchOperationProperties.expected_version?.description || "", /reject stale/i);
+
+  const removedConsolidatedTools = ["task_state", "run_changed_tests", "notes"];
+  assert.ok(removedConsolidatedTools.every((name) => !names.includes(name)));
+
+  const taskPlanTool = tools.find((tool) => tool.name === "task_plan");
+  assert.deepEqual(
+    taskPlanTool?.inputSchema?.properties?.action?.enum,
+    ["create", "get", "complete_step", "add_steps", "set_status"]
+  );
+  assert.ok(taskPlanTool?.inputSchema?.properties?.step_index);
+
+  const verifyTool = tools.find((tool) => tool.name === "verify_changes");
+  assert.deepEqual(verifyTool?.inputSchema?.properties?.strategy?.enum, ["required", "impacted", "full"]);
+  assert.match(verifyTool?.description || "", /Canonical verification tool/i);
+
+  const codeQueryTool = tools.find((tool) => tool.name === "code_query");
+  assert.deepEqual(
+    codeQueryTool?.inputSchema?.properties?.mode?.enum,
+    ["symbol", "definition", "references", "imports", "callers", "callees", "type"]
+  );
+  assert.equal(codeQueryTool?.inputSchema?.properties?.mode?.enum?.includes("text"), false);
 
   const taskOpenTool = tools.find((tool) => tool.name === "task_open");
   const taskOpenProperties = taskOpenTool?.inputSchema?.properties || {};
@@ -349,7 +374,7 @@ try {
   await callTool(runtime.port, sessionId, 65, "workspace_select", {
     workspace_id: status.configured_primary_workspace_id
   });
-  const taskAfterReselect = await callTool(runtime.port, sessionId, 66, "task_state", {});
+  const taskAfterReselect = await callTool(runtime.port, sessionId, 66, "task_plan", { action: "get" });
   assert.equal(taskAfterReselect.data.task.primary_workspace_id, workspaceBId);
   const openedBaseline = opened.data.task.workspace_state[0];
   assert.equal(openedBaseline.workspace_id, workspaceBId);
@@ -375,7 +400,7 @@ try {
   });
   assert.equal(patchValidation.data.status, "validated");
   assert.equal(existsSync(path.join(workspaceB, "validate-only.txt")), false);
-  const taskAfterPatchPreview = await callTool(runtime.port, sessionId, 703, "task_state", {});
+  const taskAfterPatchPreview = await callTool(runtime.port, sessionId, 703, "task_plan", { action: "get" });
   assert.equal(taskAfterPatchPreview.data.task.workspace_set_frozen, false);
   const indexStatus = await callTool(runtime.port, sessionId, 76, "index_control", {
     action: "status",
@@ -500,7 +525,14 @@ try {
   });
   assert.equal(mismatchedCursor.result?.isError, true);
   assert.equal(JSON.parse(mismatchedCursor.text).code, "INVALID_CURSOR");
-  for (const removedTool of ["workspace_search", "slash_commands", "compose_prompt"]) {
+  for (const removedTool of [
+    "workspace_search",
+    "slash_commands",
+    "compose_prompt",
+    "task_state",
+    "run_changed_tests",
+    "notes"
+  ]) {
     const removed = await callTool(runtime.port, sessionId, 74, removedTool, {});
     assert.equal(removed.result?.isError, true);
     assert.match(removed.text, /unknown tool|not found/i);
@@ -520,24 +552,6 @@ try {
     workspace_id: workspaceBId
   });
   assert.equal(command.data.stdout, workspaceB);
-
-  const savedNote = await callTool(runtime.port, sessionId, 9, "notes", {
-    action: "save",
-    workspace_id: workspaceBId,
-    title: "Scoped note",
-    body: "workspace B only"
-  });
-  assert.ok(
-    savedNote.data?.note,
-    `notes save must return a note: ${savedNote.text || JSON.stringify(savedNote.data)}`
-  );
-  assert.equal(savedNote.data.note.workspace_id, workspaceBId);
-  const listedNotes = await callTool(runtime.port, sessionId, 10, "notes", {
-    action: "list",
-    workspace_id: workspaceBId
-  });
-  assert.equal(listedNotes.data.count, 1);
-  assert.equal(listedNotes.data.notes[0].task_id, opened.data.task.id);
 
   const createdSkill = await callTool(runtime.port, sessionId, 11, "skills", {
     action: "create",
@@ -601,11 +615,13 @@ try {
   assert.ok(hitPaths.has("untracked-secret.pem"), "security_scan must inspect untracked content");
   assert.equal(JSON.stringify(changedSecurity.data).includes(stagedValue), false, "security result must not echo secret values");
   assert.equal(JSON.stringify(changedSecurity.data).includes(unstagedValue), false, "security result must not echo secret values");
-  const impactedTestPlan = await callTool(runtime.port, sessionId, 72, "run_changed_tests", {
+  const impactedTestPlan = await callTool(runtime.port, sessionId, 72, "verify_changes", {
+    strategy: "impacted",
     workspace_id: workspaceBId,
     dry_run: true
   });
   assert.equal(impactedTestPlan.data.status, "DRY_RUN");
+  assert.equal(impactedTestPlan.data.requested_strategy, "impacted");
   assert.equal(impactedTestPlan.data.strategy, "package_impacted_tests");
   assert.ok(
     impactedTestPlan.data.test_files.some((location) => location.path === "src/math.test.js"),

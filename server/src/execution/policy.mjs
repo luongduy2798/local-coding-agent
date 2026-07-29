@@ -71,9 +71,7 @@ const STRICT_ALWAYS_BLOCKED_TOOLS = new Set([
   "apply_patch",
   "run_command",
   "run_commands",
-  "run_changed_tests",
   "verify_changes",
-  "task_plan",
   "task_checkpoint",
   "task_close"
 ]);
@@ -144,14 +142,12 @@ function strictMutationRequested(tool, args = {}) {
   if (STRICT_ALWAYS_BLOCKED_TOOLS.has(tool)) return true;
   if (tool === "process") return ["start", "stop"].includes(args.action);
   if (tool === "skills") return ["create", "delete"].includes(args.action);
-  if (tool === "notes") return (args.action || "list") === "save";
   if (tool === "change_history") {
     return ["undo", "reapply", "undo_all", "clear"].includes(args.action);
   }
-  if (tool === "task_state") {
-    return args.set_step_done !== undefined ||
-      (Array.isArray(args.add_steps) && args.add_steps.length > 0) ||
-      args.status !== undefined;
+  if (tool === "task_plan") {
+    const action = args.action || ((args.goal || args.steps?.length) ? "create" : "get");
+    return action !== "get";
   }
   return false;
 }

@@ -277,16 +277,16 @@ async function runEvals(workspace) {
       );
     }
 
-    // ---- eval 11: task_plan + task_state ----
-    console.log("EVAL: task_plan + task_state");
+    // ---- eval 11: action-based task_plan ----
+    console.log("EVAL: action-based task_plan");
     {
       const plan = await call(client, "task_plan", { goal: "Eval test goal", steps: ["Step A", "Step B", "Step C"] });
       const pd = await parseJSON(plan.text);
       check("task_plan: created", pd && pd.ok && pd.steps_count === 3);
 
-      const state = await call(client, "task_state", { set_step_done: 0 });
+      const state = await call(client, "task_plan", { action: "complete_step", step_index: 0 });
       const sd = await parseJSON(state.text);
-      check("task_state: step marked done", sd?.plan?.steps?.[0]?.done === true);
+      check("task_plan: step marked done", sd?.plan?.steps?.[0]?.done === true);
     }
 
     // ---- eval 12: lca_status ----
@@ -296,7 +296,7 @@ async function runEvals(workspace) {
       const d = await parseJSON(r.text);
       check(
         "lca_status: returns fixed catalog and policy info",
-        d?.catalog_version === 5 &&
+        d?.catalog_version === 15 &&
           typeof d.policy === "string" &&
           ["strict", "balanced", "full"].includes(d.policy)
       );

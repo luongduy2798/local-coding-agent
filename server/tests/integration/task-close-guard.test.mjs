@@ -188,7 +188,8 @@ try {
       content: "export const scopedVerification = 1;\n"
     }]
   });
-  const scopedVerification = await callTool(runtime.port, sessionId, 1102, "run_changed_tests", {
+  const scopedVerification = await callTool(runtime.port, sessionId, 1102, "verify_changes", {
+    strategy: "impacted",
     task_token: scopedVerificationTask.task_token
   });
   assert.equal(scopedVerification.data.status, "PASS", JSON.stringify(scopedVerification.data));
@@ -203,7 +204,8 @@ try {
   });
   assert.equal(scopedStaleClose.data.ok, false);
   assert.ok(scopedStaleClose.data.incomplete_reasons.includes("VERIFICATION_EVIDENCE_STALE"));
-  assert.equal((await callTool(runtime.port, sessionId, 1104, "run_changed_tests", {
+  assert.equal((await callTool(runtime.port, sessionId, 1104, "verify_changes", {
+    strategy: "impacted",
     task_token: scopedVerificationTask.task_token
   })).data.status, "PASS");
   const scopedClose = await callTool(runtime.port, sessionId, 1105, "task_close", {
@@ -277,7 +279,8 @@ try {
   });
   assert.equal(staleClose.data.ok, false);
   assert.ok(staleClose.data.incomplete_reasons.includes("VERIFICATION_EVIDENCE_STALE"));
-  assert.equal((await callTool(runtime.port, sessionId, 11, "task_state", {
+  assert.equal((await callTool(runtime.port, sessionId, 11, "task_plan", {
+    action: "get",
     task_token: staleTask.task_token
   })).data.task.status, "open");
   assert.equal((await callTool(runtime.port, sessionId, 12, "verify_changes", {
@@ -468,7 +471,8 @@ try {
   });
   assert.equal(multiCloseBlocked.data.ok, false, JSON.stringify(multiCloseBlocked.data));
   assert.ok(multiCloseBlocked.data.incomplete_reasons.includes("JOURNAL_FINALIZATION_FAILED"));
-  assert.equal((await callTool(runtime.port, sessionId, 84, "task_state", {
+  assert.equal((await callTool(runtime.port, sessionId, 84, "task_plan", {
+    action: "get",
     task_token: multiWorkspaceTask.task_token
   })).data.task.status, "open");
 

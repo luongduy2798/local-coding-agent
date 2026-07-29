@@ -16,23 +16,17 @@ let FIGMA_DESKTOP_MCP_URL;
 let FIGMA_DESKTOP_TIMEOUT_MS;
 let MAX_READ_CHARS;
 let buildFigmaDesktopArguments;
-let currentTask;
-let decodePageCursor;
 let discoverSkills;
 let isWorkspaceSkillsDir;
 let jsonResult;
-let pageMetadata;
-let pageScope;
 let preparePatchTaskContext;
 let reg;
-let registry;
 let resolveWorkspacePath;
 let runPatchTransactionWithJournals;
 let sanitizeSkillName;
 let selectWorkspace;
 let getSkillDirs;
 let toWorkspaceRel;
-let verifyWorkspaceChanges;
 
 export function registerUtilityTools(mcp, dependencies) {
   ({
@@ -40,79 +34,20 @@ export function registerUtilityTools(mcp, dependencies) {
     FIGMA_DESKTOP_TIMEOUT_MS,
     MAX_READ_CHARS,
     buildFigmaDesktopArguments,
-    currentTask,
-    decodePageCursor,
     discoverSkills,
     isWorkspaceSkillsDir,
     jsonResult,
-    pageMetadata,
-    pageScope,
     preparePatchTaskContext,
     reg,
-    registry,
     resolveWorkspacePath,
     runPatchTransactionWithJournals,
     sanitizeSkillName,
     selectWorkspace,
     getSkillDirs,
-    toWorkspaceRel,
-    verifyWorkspaceChanges
+    toWorkspaceRel
   } = dependencies);
-  return registerUtilityToolsInternal(mcp);
-}
-
-function registerUtilityToolsInternal(mcp) {
   registerSkillsTool(mcp);
-  registerNotesTool(mcp);
   registerFigmaTool(mcp);
-  reg(
-    mcp,
-    "verify_changes",
-    {
-      title: "Verify changes",
-      description: "Verify every required test, lint, typecheck and build gate; return PASS, FAIL or INCOMPLETE, never success for skipped/unanalysed changes.",
-      inputSchema: {
-        cwd: z.string().optional(),
-        workspace_id: z.string().optional(),
-        task_token: z.string().optional(),
-        include: z.array(z.enum(["lint", "typecheck", "test", "build"])).optional(),
-        timeout_ms: z.number().int().min(1000).max(600000).optional(),
-        stop_on_failure: z.boolean().optional(),
-        dry_run: z.boolean().optional(),
-        adopt_unmanaged: z.boolean().optional().describe("After reviewing the reported diff, explicitly adopt shell-made tracked changes into this task.")
-      }
-    },
-    async (input) => {
-      const routedTask = await currentTask({ taskToken: input.task_token, required: false });
-      const workspaceIds = input.workspace_id
-        ? [input.workspace_id]
-        : routedTask?.workspace_ids?.length
-          ? routedTask.workspace_ids
-          : [(await selectWorkspace({ taskToken: input.task_token })).workspace.id];
-      const results = [];
-      for (const workspaceId of workspaceIds) {
-        results.push(await verifyWorkspaceChanges({ ...input, workspace_id: workspaceId }));
-      }
-      if (results.length === 1) return jsonResult(results[0]);
-      const status = results.some((result) => result.status === "FAIL")
-        ? "FAIL"
-        : results.every((result) => result.status === "PASS")
-          ? "PASS"
-          : "INCOMPLETE";
-      return jsonResult({
-        ok: status === "PASS",
-        status,
-        task_id: routedTask?.id || null,
-        workspaces: results,
-        summary: {
-          total: results.length,
-          pass: results.filter((result) => result.status === "PASS").length,
-          fail: results.filter((result) => result.status === "FAIL").length,
-          incomplete: results.filter((result) => result.status === "INCOMPLETE").length
-        }
-      });
-    }
-  );
 }
 
 function registerFigmaTool(mcp) {
@@ -121,7 +56,7 @@ function registerFigmaTool(mcp) {
     "figma",
     {
       title: "Figma Desktop",
-      description: "Check, list or call the official Figma Desktop MCP bridge.",
+      description: "Check, list or call the official Figma Desktop MCP bridge. Use this only for an explicit Figma workflow, not ordinary repository inspection.",
       inputSchema: {
         action: z.enum(["status", "list", "call", "design_context", "screenshot", "metadata", "variables", "code_connect", "figjam"]).optional(),
         tool: z.string().optional(),
@@ -175,15 +110,7 @@ function registerSkillsTool(mcp) {
         task_token: z.string().optional()
       }
     },
-    async ({
-      action,
-      name,
-      description,
-      body = "",
-      dir,
-      workspace_id,
-      task_token
-    }) => {
+    async ({ action, name, description, body = "", dir, workspace_id, task_token }) => {
       const selected = await selectWorkspace({
         workspaceId: workspace_id,
         taskToken: task_token,
@@ -196,10 +123,7 @@ function registerSkillsTool(mcp) {
           workspace_id: selected.workspace.id,
           task_id: selected.task.id,
           count: skills.length,
-          skills: skills.map((item) => ({
-            name: item.name,
-            description: item.description
-          }))
+          skills: skills.map((item) => ({ name: item.name, description: item.description }))
         });
       }
       if (!name) throw new Error(`name is required for action=${action}`);
@@ -231,10 +155,7 @@ function registerSkillsTool(mcp) {
       }
       const folderName = sanitizeSkillName(name);
       if (!folderName) throw new Error("Invalid skill name.");
-      const relativeFolder = toWorkspaceRel(
-        selected.workspace,
-        path.join(resolvedDir.path, folderName)
-      );
+      const relativeFolder = toWorkspaceRel(selected.workspace, path.join(resolvedDir.path, folderName));
       let operations;
       if (action === "create") {
         if (!description) throw new Error("description is required for action=create");
@@ -277,74 +198,6 @@ function registerSkillsTool(mcp) {
         transaction: applied.transaction,
         changes: applied.changes,
         journal_errors: applied.journalErrors
-      });
-    }
-  );
-}
-
-function registerNotesTool(mcp) {
-  reg(
-    mcp,
-    "notes",
-    {
-      title: "Notes",
-      description: "List or save workspace-local notes.",
-      inputSchema: {
-        action: z.enum(["list", "save"]).optional(),
-        title: z.string().optional(),
-        body: z.string().max(100_000).optional(),
-        limit: z.number().int().min(1).max(500).optional(),
-        cursor: z.string().max(2048).optional(),
-        workspace_id: z.string().optional(),
-        task_token: z.string().optional()
-      }
-    },
-    async ({ action = "list", title, body, limit = 100, cursor, workspace_id, task_token }) => {
-      const selected = await selectWorkspace({
-        workspaceId: workspace_id,
-        taskToken: task_token,
-        requireTask: true
-      });
-      const database = await registry.openWorkspace(selected.workspace.id);
-      if (action === "list") {
-        const scope = pageScope("notes", {
-          workspace_id: selected.workspace.id,
-          task_id: selected.task.id
-        });
-        const offset = decodePageCursor(cursor, { kind: "notes", scope });
-        const notes = await database.listNotes({
-          taskId: selected.task.id,
-          limit: limit + 1,
-          offset
-        });
-        const page = notes.slice(0, limit);
-        const hasMore = notes.length > page.length;
-        return jsonResult({
-          workspace_id: selected.workspace.id,
-          task_id: selected.task.id,
-          count: page.length,
-          pagination: pageMetadata({
-            kind: "notes",
-            scope,
-            offset,
-            limit,
-            returned: page.length,
-            hasMore
-          }),
-          notes: page
-        });
-      }
-      if (!title || !body) throw new Error("title and body are required for action=save");
-      const note = await database.saveNote({
-        taskId: selected.task.id,
-        title,
-        body
-      });
-      return jsonResult({
-        ok: true,
-        workspace_id: selected.workspace.id,
-        task_id: selected.task.id,
-        note
       });
     }
   );
