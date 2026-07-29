@@ -315,7 +315,7 @@ function registerGitTool(mcp) {
     "git",
     {
       title: "Git",
-      description: "Run a raw Git command for status, history, or low-level repository inspection. Use review_diff to review all current task changes and change_history action=diff for one journaled LCA change ID. Pass args as an array, e.g. [\"status\",\"--short\"].",
+      description: "Run a raw Git command for status, diff, history, or other low-level repository inspection. Use review_diff with scope=task for analyzed review of the current task, scope=workspace for analyzed review of all staged, unstaged and untracked Git changes, and change_history action=diff for one journaled LCA change ID. Pass args as an array, e.g. [\"status\",\"--short\"].",
       inputSchema: {
         args: z.array(z.string()).min(1).describe('Git arguments, e.g. ["log","--oneline","-n","10"].'),
         cwd: z.string().optional().describe("Repository directory inside a workspace."),

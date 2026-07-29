@@ -8,6 +8,7 @@ import path from "node:path";
 import { z } from "zod";
 import { WorkspaceRegistryError } from "../../workspace/registry.mjs";
 import { confirmTaskComplexity } from "../../workspace/task-orchestration.mjs";
+import { RESPONSE_MODES, normalizeResponseMode } from "../response-mode.mjs";
 
 const CONVERSATION_WORKSPACE_TOKEN_PATTERN = /^cws_[A-Za-z0-9_-]{32,160}$/;
 
@@ -222,6 +223,11 @@ export function registerWorkspaceTools(mcp, dependencies) {
         complexity_override: z.boolean().optional().describe("Compatibility field; LCA no longer changes the effective profile automatically."),
         memory_mode: z.enum(["auto", "skip", "full"]).optional().describe("New tasks only. auto maps quick_edit to light path-aware Memory and normal/complex to full Memory; skip bypasses Memory; full forces full retrieval. Defaults to auto."),
         include_recent_tasks: z.boolean().optional().describe("New tasks only. Request recent closed-task context for a continuation task. Defaults to false and is still limited by workspace Memory settings."),
+        verification_policy: z.object({
+          mode: z.enum(["not_requested", "requested", "required"]),
+          gates: z.array(z.enum(["lint", "typecheck", "test", "build"])).max(4).optional()
+        }).optional().describe("Completion verification policy. Defaults to not_requested; required blocks a complete close until current evidence passes."),
+        response_mode: z.enum(RESPONSE_MODES).optional().describe("auto, compact, full, or diagnostic response shaping."),
         relevant_paths: z.array(z.object({
           workspace_id: z.string().optional().describe("Attached workspace for this relevance hint; defaults to the primary workspace."),
           path: z.string().min(1).max(2000).describe("Workspace-relative file or directory used by light Memory matching.")
@@ -237,7 +243,8 @@ export function registerWorkspaceTools(mcp, dependencies) {
         }).optional()
       }
     },
-    async ({ objective, title, complexity_hint, complexity_override = false, memory_mode = "auto", include_recent_tasks = false, relevant_paths = [], primary_workspace_id, conversation_workspace_token, attached_workspace_ids = [], task_token, resume }) => {
+    async ({ objective, title, complexity_hint, complexity_override = false, memory_mode = "auto", include_recent_tasks = false, verification_policy, response_mode = "auto", relevant_paths = [], primary_workspace_id, conversation_workspace_token, attached_workspace_ids = [], task_token, resume }) => {
+      const responseMode = normalizeResponseMode(response_mode);
       if (!taskRouter || !registry) {
         throw new Error(`Multi-workspace task storage unavailable: ${storageError?.message || "unknown error"}`);
       }
@@ -262,7 +269,7 @@ export function registerWorkspaceTools(mcp, dependencies) {
             conversation_workspace_token: conversationToken,
             conversation_workspace_id: resumed.primary_workspace_id
           } : {}),
-          task: await taskOpenPayload(resumed)
+          task: await taskOpenPayload(resumed, { responseMode })
         });
       }
 
@@ -289,13 +296,12 @@ export function registerWorkspaceTools(mcp, dependencies) {
       }
 
       const workspaceIds = dedupe([primaryId, ...attached_workspace_ids]);
-      const workspaceBaselines = [];
-      for (const workspaceId of workspaceIds) {
+      const workspaceBaselines = await Promise.all(workspaceIds.map(async (workspaceId) => {
         const workspace = await registry.getWorkspace(workspaceId);
         if (workspace.availability !== "available") throw new Error(`Workspace is unavailable: ${workspaceId}`);
         if (workspace.metadata?.trusted !== true) throw new Error(`Workspace is not explicitly trusted: ${workspaceId}`);
-        workspaceBaselines.push(await captureTaskWorkspaceBaseline(workspaceId));
-      }
+        return captureTaskWorkspaceBaseline(workspaceId, { detailed: responseMode === "diagnostic" });
+      }));
       if (!conversationToken) {
         conversationToken = createConversationWorkspaceToken();
       }
@@ -314,6 +320,7 @@ export function registerWorkspaceTools(mcp, dependencies) {
         memoryMode: memory_mode,
         includeRecentTasks: include_recent_tasks,
         relevantPaths: relevant_paths,
+        verificationPolicy: verification_policy,
         primaryWorkspaceId: primaryId,
         attachedWorkspaceIds: workspaceIds.slice(1),
         ownerSessionId: sessionId,
@@ -324,7 +331,7 @@ export function registerWorkspaceTools(mcp, dependencies) {
         resumed: false,
         conversation_workspace_token: conversationToken,
         conversation_workspace_id: primaryId,
-        task: await taskOpenPayload(task)
+        task: await taskOpenPayload(task, { responseMode })
       });
     }
   );

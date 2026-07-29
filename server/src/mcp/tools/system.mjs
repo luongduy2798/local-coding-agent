@@ -6,6 +6,14 @@ import { mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import { TaskRouterError } from "../../workspace/task-router.mjs";
+import { withRequestSpan } from "../../shared/utils.mjs";
+import { finalizeTaskOrchestration } from "../../workspace/task-orchestration.mjs";
+import {
+  RESPONSE_MODES,
+  compactCompletionGuard,
+  compactTask,
+  shouldCompactResponse
+} from "../response-mode.mjs";
 import {
   MAX_TASK_CLOSE_MEMORY_OPERATIONS,
   prepareTaskMemoryOutbox
@@ -117,17 +125,18 @@ export function registerSystemTools(mcp, dependencies) {
     "task_close",
     {
       title: "Close task",
-      description: "Close the active Review Changes task and return its final summary. When verification evidence is missing, a requested complete close is automatically downgraded to incomplete and completed in the same call.",
+      description: "Close the active Review Changes task and return its final summary. Verification is evaluated only when requested; not-requested verification does not make completed work incomplete.",
       inputSchema: {
         title: z.string().max(180).optional(),
         status: z.enum(["complete", "incomplete", "failed"]).optional(),
         task_token: z.string().optional(),
+        response_mode: z.enum(RESPONSE_MODES).optional().describe("auto, compact, full, or diagnostic response shaping."),
         memory_updates: z.array(TASK_CLOSE_MEMORY_UPDATE_SCHEMA).max(MAX_TASK_CLOSE_MEMORY_OPERATIONS).optional().describe(
           "Optional compact durable workspace Memory operations. Default to zero updates; routine edits and task logs do not belong in Memory. Normal tasks should usually save at most one item and complex tasks at most two. Accepted updates are durably queued with task closure and persisted asynchronously."
         )
       }
     },
-    async ({ title, status = "complete", task_token, memory_updates = [] }) => {
+    async ({ title, status = "complete", task_token, response_mode = "auto", memory_updates = [] }) => {
       if (!taskRouter) {
         const reviewTasks = [{
           workspace_id: primaryWorkspaceId,
@@ -137,18 +146,17 @@ export function registerSystemTools(mcp, dependencies) {
       }
 
       const openTask = await currentTask({ taskToken: task_token, required: true });
+      const compact = shouldCompactResponse(response_mode, openTask.effective_profile);
+      const respond = (payload) => {
+        const enriched = enrichTaskClosePayload(payload, openTask);
+        return jsonResult(compact ? compactTaskClosePayload(enriched) : enriched);
+      };
       await applyTaskCloseTestDelay(openTask);
-      const preflight = await preflightTaskClose(openTask);
-      const hardBlockers = preflight.incomplete_reasons.filter((reason) =>
-        ["TASK_PROCESS_RUNNING", "TRANSACTION_IN_DOUBT"].includes(reason)
-      );
-      const missingVerificationOnly = preflight.incomplete_reasons.length > 0 &&
-        preflight.incomplete_reasons.every((reason) => reason === "VERIFICATION_EVIDENCE_MISSING");
-      const effectiveStatus = status === "complete" && missingVerificationOnly
-        ? "incomplete"
-        : status;
-      if (!preflight.ok && (effectiveStatus === "complete" || hardBlockers.length > 0)) {
-        return jsonResult({
+      const preflight = await withRequestSpan("task_close_preflight", () => preflightTaskClose(openTask));
+      const effectiveStatus = status;
+      const integrityBlockers = preflight.integrity_reasons || [];
+      if (!preflight.ok && (effectiveStatus === "complete" || integrityBlockers.length > 0)) {
+        return respond({
           ok: false,
           status: "INCOMPLETE",
           requested_status: status,
@@ -163,7 +171,7 @@ export function registerSystemTools(mcp, dependencies) {
       // during the workspace preflight cannot be hidden by a stale first read.
       const runningProcesses = taskRunningProcesses(openTask.id);
       if (runningProcesses.length) {
-        return jsonResult({
+        return respond({
           ok: false,
           status: "INCOMPLETE",
           requested_status: status,
@@ -202,9 +210,9 @@ export function registerSystemTools(mcp, dependencies) {
 
       // Validate every journal before publishing a durable close intent. This
       // keeps ordinary corruption failures in all-before state.
-      const prepared = await prepareTaskJournals(openTask);
+      const prepared = await withRequestSpan("task_close_prepare_journals", () => prepareTaskJournals(openTask));
       if (!prepared.ok) {
-        return jsonResult({
+        return respond({
           ok: false,
           status: "INCOMPLETE",
           requested_status: status,
@@ -214,6 +222,7 @@ export function registerSystemTools(mcp, dependencies) {
             ...preflight,
             ok: false,
             status: "INCOMPLETE",
+            integrity_status: "journal_failed",
             journal_finalization_failed_workspace_ids: prepared.failed_workspace_ids,
             incomplete_reasons: ["JOURNAL_FINALIZATION_FAILED"]
           },
@@ -236,13 +245,13 @@ export function registerSystemTools(mcp, dependencies) {
       try {
         await atomicWriteJson(intentPath, intent);
       } catch {
-        return jsonResult({
+        return respond({
           ok: false,
           status: "INCOMPLETE",
           requested_status: status,
           task: openTask,
           review_changes_tasks: [],
-          completion_guard: preflight,
+          completion_guard: { ...preflight, integrity_status: "recovery_required" },
           incomplete_reasons: ["TASK_CLOSE_INTENT_PERSIST_FAILED"]
         });
       }
@@ -257,7 +266,10 @@ export function registerSystemTools(mcp, dependencies) {
             entry.workspace_id,
             workspaceIndex
           );
-          const completedTask = await entry.journal.completeTask({ title, taskId: openTask.id });
+          const completedTask = await withRequestSpan("task_close_finalize_journal", () => entry.journal.completeTask({
+            title,
+            taskId: openTask.id
+          }));
           finalized.push({ workspace_id: entry.workspace_id, task: completedTask });
           intent.completed_workspace_ids.push(entry.workspace_id);
           intent.updated_at = isoNow();
@@ -279,26 +291,36 @@ export function registerSystemTools(mcp, dependencies) {
         intent.failed_workspace_id = journalFailureWorkspaceId;
         intent.rollback_failed_workspace_ids = rolledBack.failed_workspace_ids;
         await atomicWriteJson(intentPath, intent).catch(() => {});
-        return jsonResult({
+        return respond({
           ok: false,
           status: "INCOMPLETE",
           requested_status: status,
           task: openTask,
           review_changes_tasks: [],
-          completion_guard: preflight,
+          completion_guard: {
+            ...preflight,
+            integrity_status: rolledBack.ok ? "journal_failed" : "recovery_required"
+          },
           incomplete_reasons: [
             rolledBack.ok ? "JOURNAL_FINALIZATION_FAILED" : "TASK_CLOSE_RECOVERY_REQUIRED"
           ]
         });
       }
 
+      const reviewTasks = finalized.filter((entry) => entry.task);
+      const finalOrchestration = finalizeTaskOrchestration(openTask.orchestration, {
+        requested_status: effectiveStatus,
+        preflight,
+        close_transaction_status: "complete"
+      });
       let routedTask;
       try {
         routedTask = await taskRouter.closeTask({
           taskToken: task_token,
           sessionId: currentMcpSessionId(),
           status: effectiveStatus === "failed" ? "failed" : "closed",
-          memoryJobs: preparedMemory.jobs
+          memoryJobs: preparedMemory.jobs,
+          finalOrchestration
         });
       } catch {
         const rolledBack = await rollbackCompletedTaskJournals(
@@ -310,13 +332,16 @@ export function registerSystemTools(mcp, dependencies) {
         intent.updated_at = isoNow();
         intent.rollback_failed_workspace_ids = rolledBack.failed_workspace_ids;
         await atomicWriteJson(intentPath, intent).catch(() => {});
-        return jsonResult({
+        return respond({
           ok: false,
           status: "INCOMPLETE",
           requested_status: status,
           task: openTask,
           review_changes_tasks: [],
-          completion_guard: preflight,
+          completion_guard: {
+            ...preflight,
+            integrity_status: rolledBack.ok ? preflight.integrity_status : "recovery_required"
+          },
           incomplete_reasons: [
             rolledBack.ok ? "TASK_ROUTER_CLOSE_FAILED" : "TASK_CLOSE_RECOVERY_REQUIRED"
           ]
@@ -328,18 +353,23 @@ export function registerSystemTools(mcp, dependencies) {
       intent.router_status = routedTask.status;
       const intentDurable = await atomicWriteJson(intentPath, intent).then(() => true, () => false);
       if (preparedMemory.jobs.length) memoryOutbox.wake();
-      return jsonResult({
+      const lifecycle = routedTask.orchestration || finalOrchestration;
+      return respond({
         ok: true,
         status: effectiveStatus,
         requested_status: status,
-        auto_downgraded: effectiveStatus !== status,
+        auto_downgraded: false,
+        execution_status: lifecycle.execution_status,
+        verification_status: lifecycle.verification_status,
+        integrity_status: intentDurable ? lifecycle.integrity_status : "recovery_required",
+        review_status: lifecycle.review_status,
         task: routedTask,
         completion_guard: preflight,
         close_transaction: {
           status: intentDurable ? "complete" : "recovery_pending",
           workspace_count: intent.workspace_ids.length
         },
-        review_changes_tasks: finalized.filter((entry) => entry.task),
+        review_changes_tasks: reviewTasks,
         memory_persistence: preparedMemory.response
       });
     }
@@ -496,7 +526,7 @@ export function registerSystemTools(mcp, dependencies) {
     "change_history",
     {
       title: "Change history",
-      description: "Inspect journaled LCA filesystem changes by change ID and perform undo, partial undo or reapply. action=diff is for one recorded change; use review_diff to review the entire current task and git for raw repository history.",
+      description: "Inspect journaled LCA filesystem changes by change ID and perform undo, partial undo or reapply. action=diff is for one recorded change; use review_diff with scope=task for the current task change set or scope=workspace for all staged, unstaged and untracked Git changes. Use git for raw repository inspection.",
       inputSchema: {
         action: z.enum(["list", "get", "diff", "content", "undo", "reapply", "undo_all", "clear"]).optional(),
         id: z.string().optional(),
@@ -626,4 +656,38 @@ export function registerSystemTools(mcp, dependencies) {
     }
   );
 
+}
+
+function enrichTaskClosePayload(payload, task) {
+  const guard = payload.completion_guard || null;
+  const orchestration = payload.task?.orchestration || task?.orchestration || null;
+  return {
+    ...payload,
+    execution_status: payload.execution_status || (payload.ok === false ? "blocked" : orchestration?.execution_status) || null,
+    verification_status: payload.verification_status || guard?.verification_status || orchestration?.verification_status || null,
+    integrity_status: payload.integrity_status || guard?.integrity_status || orchestration?.integrity_status || null,
+    review_status: payload.review_status || orchestration?.review_status || null
+  };
+}
+
+function compactTaskClosePayload(payload) {
+  return {
+    ok: payload.ok === true,
+    status: payload.status,
+    requested_status: payload.requested_status,
+    auto_downgraded: payload.auto_downgraded === true,
+    execution_status: payload.execution_status || payload.task?.orchestration?.execution_status || null,
+    verification_status: payload.verification_status || payload.completion_guard?.verification_status || null,
+    integrity_status: payload.integrity_status || payload.completion_guard?.integrity_status || null,
+    review_status: payload.review_status || payload.task?.orchestration?.review_status || null,
+    task: compactTask(payload.task),
+    completion_guard: compactCompletionGuard(payload.completion_guard),
+    incomplete_reasons: payload.incomplete_reasons || [],
+    close_transaction: payload.close_transaction || null,
+    review_changes: {
+      count: (payload.review_changes_tasks || []).length,
+      workspaces: (payload.review_changes_tasks || []).map((entry) => entry.workspace_id)
+    },
+    memory_persistence: payload.memory_persistence || null
+  };
 }

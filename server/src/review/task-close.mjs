@@ -5,6 +5,7 @@
 import { createHash } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { normalizeVerificationPolicy } from "../workspace/task-orchestration.mjs";
 
 export function createTaskCloseService({
   atomicWriteJson,
@@ -28,112 +29,162 @@ export function createTaskCloseService({
   async function preflightTaskClose(task) {
     const workspaceResults = [];
     const runningProcesses = taskRunningProcesses(task.id);
+    const verificationPolicy = normalizeVerificationPolicy(task?.orchestration?.verification_policy);
+    const verificationRequested = verificationPolicy.mode !== "not_requested";
     for (const workspaceId of task.workspace_ids) {
-      const reasons = [];
+      const integrityReasons = [];
+      const verificationReasons = [];
       const transactionBlocked = transactionInDoubt(workspaceId);
-      if (transactionBlocked) reasons.push("TRANSACTION_IN_DOUBT");
+      if (transactionBlocked) integrityReasons.push("TRANSACTION_IN_DOUBT");
 
       let unmanaged = { detected: false, adopted: false, unknown: true };
       try {
         unmanaged = await unmanagedChangeState(workspaceId, task.id);
-        if (unmanaged.unknown === true) reasons.push("UNMANAGED_STATE_UNKNOWN");
-        else if (unmanaged.detected === true && unmanaged.adopted !== true) reasons.push("UNMANAGED_CHANGES");
+        if (unmanaged.unknown === true) integrityReasons.push("UNMANAGED_STATE_UNKNOWN");
+        else if (unmanaged.detected === true && unmanaged.adopted !== true) integrityReasons.push("UNMANAGED_CHANGES");
       } catch {
-        reasons.push("UNMANAGED_STATE_UNKNOWN");
+        integrityReasons.push("UNMANAGED_STATE_UNKNOWN");
       }
 
-      let verification = null;
-      try {
-        const runtime = await getWorkspaceRuntime(workspaceId);
-        const baseline = taskWorkspaceBaseline(task, workspaceId);
-        const evidence = await readTaskVerificationEvidence(task.id, workspaceId);
-        const currentPlan = await runtime.verification.plan({
-          include: evidence.ok ? evidence.artifact.requested_gates : undefined,
-          unmanaged_changes: unmanaged.detected === true && unmanaged.adopted !== true,
-          unmanaged_state_unknown: unmanaged.unknown === true,
-          transaction_in_doubt: transactionBlocked,
-          refresh: true,
-          base_head: baseline.known === true ? baseline.base_head : null,
-          require_baseline: true
-        });
-        const currentState = await captureVerificationWorkspaceState(runtime.workspace, currentPlan.changes);
-        if (!evidence.ok) {
-          reasons.push(evidence.reason);
-        } else {
-          const artifact = evidence.artifact;
-          const requestedGatesMatch = JSON.stringify(artifact.requested_gates) === JSON.stringify(currentPlan.requested_gates);
-          const signatureMatches = JSON.stringify(artifact.gate_signature) === JSON.stringify(
-            verificationGateSignature(currentPlan.gates)
-          );
-          const stateMatches = artifact.state?.state_known === true && currentState.state_known === true &&
-            artifact.state.head === currentState.head && artifact.state.fingerprint === currentState.fingerprint;
-          if (!requestedGatesMatch) reasons.push("VERIFICATION_SCOPE_INCOMPLETE");
-          if (!signatureMatches || !stateMatches) reasons.push("VERIFICATION_EVIDENCE_STALE");
-          if (artifact.status !== "PASS") reasons.push("VERIFICATION_NOT_PASS");
-
-          const gateResults = Object.fromEntries(artifact.gates.map((gate) => [gate.id, {
-            status: gate.status,
-            exit_code: gate.exit_code,
-            timed_out: gate.timed_out,
-            duration_ms: gate.duration_ms
-          }]));
-          const evaluated = runtime.verification.evaluate(currentPlan, gateResults, {
+      let verification = verificationRequested ? null : { status: "NOT_REQUESTED" };
+      if (verificationRequested) {
+        try {
+          const runtime = await getWorkspaceRuntime(workspaceId);
+          const baseline = taskWorkspaceBaseline(task, workspaceId);
+          const evidence = await readTaskVerificationEvidence(task.id, workspaceId);
+          const currentPlan = await runtime.verification.plan({
+            include: evidence.ok ? evidence.artifact.requested_gates : verificationPolicy.gates,
             unmanaged_changes: unmanaged.detected === true && unmanaged.adopted !== true,
             unmanaged_state_unknown: unmanaged.unknown === true,
-            transaction_in_doubt: transactionBlocked
+            transaction_in_doubt: transactionBlocked,
+            refresh: true,
+            base_head: baseline.known === true ? baseline.base_head : null,
+            require_baseline: true
           });
-          if (evaluated.status !== "PASS") reasons.push("VERIFICATION_NOT_PASS", ...(evaluated.reasons || []));
-          verification = {
-            status: evaluated.status,
-            recorded_at: artifact.recorded_at,
-            state_matches: stateMatches,
-            evidence_hash: createHash("sha256").update(JSON.stringify(artifact)).digest("hex"),
-            gate_summary: evaluated.gate_summary,
-            baseline_head: currentPlan.changes.baseline_head || null,
-            current_head: currentPlan.changes.head || null,
-            head_changed: currentPlan.changes.head_changed === true,
-            change_summary: currentPlan.changes.summary,
-            files: (currentPlan.changes.files || []).slice(0, 1_000).map((entry) => ({
-              workspace_id: workspaceId,
-              path: entry.location?.path || null,
-              original_path: entry.original_location?.path || null,
-              staged: entry.staged === true,
-              unstaged: entry.unstaged === true,
-              untracked: entry.untracked === true,
-              committed: entry.committed === true,
-              deleted: entry.deleted === true
-            })),
-            files_truncated: (currentPlan.changes.files || []).length > 1_000
-          };
+          const currentState = await captureVerificationWorkspaceState(runtime.workspace, currentPlan.changes);
+          if (!evidence.ok) {
+            verificationReasons.push(evidence.reason);
+          } else {
+            const artifact = evidence.artifact;
+            const requestedGatesMatch = JSON.stringify(artifact.requested_gates) === JSON.stringify(currentPlan.requested_gates);
+            const signatureMatches = JSON.stringify(artifact.gate_signature) === JSON.stringify(
+              verificationGateSignature(currentPlan.gates)
+            );
+            const stateMatches = artifact.state?.state_known === true && currentState.state_known === true &&
+              artifact.state.head === currentState.head && artifact.state.fingerprint === currentState.fingerprint;
+            if (!requestedGatesMatch) verificationReasons.push("VERIFICATION_SCOPE_INCOMPLETE");
+            if (!signatureMatches || !stateMatches) verificationReasons.push("VERIFICATION_EVIDENCE_STALE");
+            if (artifact.status !== "PASS") verificationReasons.push("VERIFICATION_NOT_PASS");
+
+            const gateResults = Object.fromEntries(artifact.gates.map((gate) => [gate.id, {
+              status: gate.status,
+              exit_code: gate.exit_code,
+              timed_out: gate.timed_out,
+              duration_ms: gate.duration_ms
+            }]));
+            const evaluated = runtime.verification.evaluate(currentPlan, gateResults, {
+              unmanaged_changes: unmanaged.detected === true && unmanaged.adopted !== true,
+              unmanaged_state_unknown: unmanaged.unknown === true,
+              transaction_in_doubt: transactionBlocked
+            });
+            if (evaluated.status !== "PASS") {
+              verificationReasons.push("VERIFICATION_NOT_PASS", ...(evaluated.reasons || []));
+            }
+            verification = {
+              status: evaluated.status,
+              recorded_at: artifact.recorded_at,
+              state_matches: stateMatches,
+              evidence_hash: createHash("sha256").update(JSON.stringify(artifact)).digest("hex"),
+              gate_summary: evaluated.gate_summary,
+              baseline_head: currentPlan.changes.baseline_head || null,
+              current_head: currentPlan.changes.head || null,
+              head_changed: currentPlan.changes.head_changed === true,
+              change_summary: currentPlan.changes.summary,
+              files: (currentPlan.changes.files || []).slice(0, 1_000).map((entry) => ({
+                workspace_id: workspaceId,
+                path: entry.location?.path || null,
+                original_path: entry.original_location?.path || null,
+                staged: entry.staged === true,
+                unstaged: entry.unstaged === true,
+                untracked: entry.untracked === true,
+                committed: entry.committed === true,
+                deleted: entry.deleted === true
+              })),
+              files_truncated: (currentPlan.changes.files || []).length > 1_000
+            };
+          }
+        } catch {
+          verificationReasons.push("VERIFICATION_PREFLIGHT_FAILED");
         }
-      } catch {
-        reasons.push("VERIFICATION_PREFLIGHT_FAILED");
       }
 
+      const blockingReasons = dedupe([
+        ...integrityReasons,
+        ...(verificationPolicy.mode === "required" ? verificationReasons : [])
+      ]);
       workspaceResults.push({
         workspace_id: workspaceId,
-        ok: reasons.length === 0,
+        ok: blockingReasons.length === 0,
         transaction_in_doubt: transactionBlocked,
         unmanaged_changes: unmanaged.detected === true && unmanaged.adopted !== true,
         unmanaged_state_known: unmanaged.unknown !== true,
         baseline: taskWorkspaceBaseline(task, workspaceId),
         verification,
-        reasons: dedupe(reasons)
+        verification_reasons: dedupe(verificationReasons),
+        integrity_reasons: dedupe(integrityReasons),
+        reasons: blockingReasons
       });
     }
 
-    const incompleteReasons = dedupe([
+    const integrityReasons = dedupe([
       ...(runningProcesses.length ? ["TASK_PROCESS_RUNNING"] : []),
-      ...workspaceResults.flatMap((workspace) => workspace.reasons)
+      ...workspaceResults.flatMap((workspace) => workspace.integrity_reasons)
+    ]);
+    const verificationReasons = dedupe(workspaceResults.flatMap((workspace) => workspace.verification_reasons));
+    const incompleteReasons = dedupe([
+      ...integrityReasons,
+      ...(verificationPolicy.mode === "required" ? verificationReasons : [])
     ]);
     return {
       ok: incompleteReasons.length === 0,
       status: incompleteReasons.length ? "INCOMPLETE" : "PASS",
       task_id: task.id,
+      verification_policy: verificationPolicy,
+      verification_status: verificationStatusFor(verificationPolicy, workspaceResults, verificationReasons),
+      integrity_status: integrityStatusFor(integrityReasons),
       workspaces: workspaceResults,
       running_processes: runningProcesses,
+      integrity_reasons: integrityReasons,
+      verification_reasons: verificationReasons,
       incomplete_reasons: incompleteReasons
     };
+  }
+
+  function verificationStatusFor(policy, workspaceResults, reasons) {
+    if (policy.mode === "not_requested") return "not_requested";
+    if (reasons.includes("VERIFICATION_EVIDENCE_STALE") || reasons.includes("VERIFICATION_SCOPE_INCOMPLETE")) {
+      return "stale";
+    }
+    if (reasons.includes("VERIFICATION_NOT_PASS")) return "failed";
+    if (reasons.some((reason) => [
+      "VERIFICATION_EVIDENCE_MISSING",
+      "VERIFICATION_EVIDENCE_CORRUPT",
+      "VERIFICATION_PREFLIGHT_FAILED"
+    ].includes(reason))) return "unavailable";
+    if (workspaceResults.length && workspaceResults.every((workspace) => workspace.verification?.status === "PASS")) {
+      return "passed";
+    }
+    return "pending";
+  }
+
+  function integrityStatusFor(reasons) {
+    if (reasons.includes("TASK_CLOSE_RECOVERY_REQUIRED")) return "recovery_required";
+    if (reasons.includes("TRANSACTION_IN_DOUBT")) return "transaction_in_doubt";
+    if (reasons.includes("TASK_PROCESS_RUNNING")) return "process_running";
+    if (reasons.includes("UNMANAGED_CHANGES")) return "unmanaged_changes";
+    if (reasons.includes("UNMANAGED_STATE_UNKNOWN")) return "unmanaged_state_unknown";
+    if (reasons.includes("JOURNAL_FINALIZATION_FAILED")) return "journal_failed";
+    return "clean";
   }
 
   function taskRunningProcesses(taskId) {

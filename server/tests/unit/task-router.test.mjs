@@ -65,6 +65,12 @@ test("TaskRouter locks an explicit multi-workspace set and resumes by token", {
     });
     assert.ok(opened.task_token);
     assert.equal(opened.title, "Cross repo");
+    assert.equal(opened.orchestration.execution_status, "open");
+    assert.equal(opened.orchestration.verification_status, "not_requested");
+    assert.equal(opened.orchestration.integrity_status, "clean");
+    assert.equal(opened.orchestration.review_status, "not_started");
+    assert.equal(opened.orchestration.budgets.total_soft_limit, 18);
+    assert.equal(opened.orchestration.budgets.phase_soft_limits.implementation, 10);
     assert.equal(opened.objective, null, "title-only tasks must not duplicate title into objective");
     assert.deepEqual(opened.workspace_ids, ["ws_aaaaaaaaaaaaaaaa", "ws_bbbbbbbbbbbbbbbb"]);
     assert.deepEqual(opened.workspaces[0].baseline, {
@@ -89,6 +95,23 @@ test("TaskRouter locks an explicit multi-workspace set and resumes by token", {
     });
     assert.equal(defaultMetadata.title, "LCA task");
     assert.equal(defaultMetadata.objective, null);
+    const quickPolicyTask = await router.openTask({
+      title: "Quick policy",
+      complexityHint: "quick_edit",
+      verificationPolicy: { mode: "requested", gates: ["test"] },
+      primaryWorkspaceId: "ws_aaaaaaaaaaaaaaaa"
+    });
+    assert.equal(quickPolicyTask.orchestration.budgets.total_soft_limit, 9);
+    assert.equal(quickPolicyTask.orchestration.verification_policy.mode, "requested");
+    assert.deepEqual(quickPolicyTask.orchestration.verification_policy.gates, ["test"]);
+    assert.equal(quickPolicyTask.orchestration.verification_status, "pending");
+    const complexTask = await router.openTask({
+      title: "Complex budget",
+      complexityHint: "complex",
+      primaryWorkspaceId: "ws_aaaaaaaaaaaaaaaa"
+    });
+    assert.equal(complexTask.orchestration.budgets.total_soft_limit, 36);
+    assert.equal(complexTask.orchestration.budgets.phase_soft_limits.verification, 10);
 
     const bySession = await router.getTask({ sessionId: "session-a" });
     assert.equal(bySession.id, opened.id);
@@ -206,8 +229,19 @@ test("TaskRouter locks an explicit multi-workspace set and resumes by token", {
     const tokenOnlyAfterReset = await router.getTaskById(objectiveOnly.id);
     assert.equal(tokenOnlyAfterReset.detached_at, null, "startup cleanup must detach only tasks that had a session binding");
 
-    const closed = await router.closeTask({ taskToken: resetCandidate.task_token });
+    const closed = await router.closeTask({
+      taskToken: resetCandidate.task_token,
+      finalOrchestration: {
+        ...resetCandidate.orchestration,
+        execution_status: "completed",
+        verification_status: "not_requested",
+        integrity_status: "clean",
+        review_status: "not_applicable"
+      }
+    });
     assert.equal(closed.status, "closed");
+    assert.equal(closed.orchestration.execution_status, "completed");
+    assert.equal(closed.orchestration.review_status, "not_applicable");
 
     const raced = await router.openTask({
       title: "Attach freeze race",

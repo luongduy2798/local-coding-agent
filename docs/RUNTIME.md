@@ -13,11 +13,11 @@ This separation is intentional. Do not evaluate LCA by whether it independently 
 - managed file changes pass through `apply_patch` and the Review Changes journal;
 - users can inspect progress and final diffs, then Undo or Reapply supported changes;
 - task, journal, snapshot, and history state survive reconnect and runtime restart;
-- review remains part of the normal mutation lifecycle;
+- review is task-scoped and proportional: journal transaction evidence is sufficient for mechanical mutations, while meaningful code or risky changes use `review_diff`;
 - verification is proportional to the requested scope and runs only when explicitly requested;
 - runtime responses and context retrieval remain bounded and efficient.
 
-Low round-trip count means batching work **inside this managed lifecycle**, not deleting the lifecycle. Prefer one focused discovery, batched reads/searches, one atomic multi-file patch, one diff review, and one close. Do not bypass `task_open`, journaled mutation, `review_diff`, or durable close merely to make a demo appear faster. Direct shell/source mutation is intentionally treated as unmanaged because it cannot provide the same conflict, history, and recovery guarantees.
+Low round-trip count means batching work **inside this managed lifecycle**, not deleting task isolation, journaling, or durable close. Prefer one focused discovery, batched reads/searches, one atomic multi-file patch, an optional task-scoped diff review when the change needs evaluation, and one close. Mechanical mutations may close directly from clean journaled transaction evidence. Direct shell/source mutation is intentionally treated as unmanaged because it cannot provide the same conflict, history, and recovery guarantees.
 
 The intended minimal mutation flow is:
 
@@ -27,7 +27,7 @@ resolve/pin workspace
 → targeted or batched evidence acquisition
 → model decision
 → journaled apply_patch transaction
-→ review_diff
+→ optional task-scoped review_diff for code/risky changes
 → optional explicitly requested verification
 → task_close with durable history
 ```
@@ -159,7 +159,7 @@ Repeated unchanged discovery calls are fingerprinted. For supported reads, LCA c
 
 For ChatGPT clients that dynamically load connector tools, every tool description publishes one or more exact `discovery-group:*` tags. The initial `api_tool.list_resources` call must use one routing group: `task-mutation`, `task-investigation`, `task-planning`, `task-code-change`, `task-verification`, `task-process`, `workspace-management`, `change-management`, or `figma-workflow`. Do not invent free-form queries such as `write` and do not silently load the full catalog if a group is missing. A second group is justified only when the requested scope genuinely changes.
 
-A typical quick edit is one `task-mutation` discovery → `workspace_list` → `task_open` → targeted read → model decision → `apply_patch` → `review_diff` → `task_close`. `workspace_select` is reserved for changing the default advertised to future conversations and is not part of ordinary task routing. Persistent `task_plan`, progress narration, and unrelated `skills` discovery are normally unnecessary for this profile. Lint, test, typecheck, build, security audit, and other quality gates run only when explicitly requested. When they are not requested, call `task_close(status=incomplete)` once as an internal evidence state; the companion UI presents successfully closed work as Completed.
+A typical mechanical quick edit is one `task-mutation` discovery → `workspace_list` for the conversation's first task → `task_open` → targeted read when needed → model decision → `apply_patch` → `task_close`. Add `review_diff` between patch and close for code, behavioral, multi-file, permission, data, important configuration, or otherwise risky changes. `review_diff.scope` defaults to `task`: it uses the exact journaled before/after diff and limits Git evidence to paths changed by the current task, so dirty files that existed before `task_open` are excluded from findings and summary. Use `scope=workspace` only when the user explicitly wants every staged, unstaged and untracked Git change under `cwd` reviewed. `workspace_select` is reserved for changing the default advertised to future conversations and is not part of ordinary task routing. Persistent `task_plan`, progress narration, and unrelated `skills` discovery are normally unnecessary for this profile. Lint, test, typecheck, build, security audit, and other quality gates run only when explicitly requested; otherwise close with verification status `not_requested`.
 
 Every path returned by runtime coding tools is qualified by `workspace_id` and is relative to that workspace. Two sessions can therefore work on different repositories concurrently without changing each other's reads, writes, process handles, journals, or task selection.
 

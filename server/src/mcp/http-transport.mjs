@@ -100,6 +100,8 @@ export function createMcpHttpTransport({
         transportMs: roundMs(finishedMs - bodyParsedMs),
         handlerMs: requestMetrics.handlerMs ?? undefined,
         serializationMs: requestMetrics.serializationMs ?? undefined,
+        serializedPayloadBytes: requestMetrics.serializedPayloadBytes ?? undefined,
+        spans: requestMetrics.spans || undefined,
         outChars: requestMetrics.outChars ?? undefined,
         outBytes: requestMetrics.outBytes ?? undefined,
         responseTruncated: requestMetrics.responseTruncated || undefined,

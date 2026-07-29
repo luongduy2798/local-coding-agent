@@ -88,20 +88,87 @@ function emptyReviewSourceState() {
   };
 }
 
-export async function collectReviewInventory(selected, rootDir) {
+function resolveReviewPathScope(selected, rootDir, reviewPaths) {
   const scopePath = toWorkspaceRel(selected.workspace, rootDir);
-  const pathspec = scopePath === "." ? "." : `:(top,literal)${scopePath}`;
+  if (!Array.isArray(reviewPaths)) {
+    return {
+      mode: "workspace",
+      paths: null,
+      pathspecs: [scopePath === "." ? "." : `:(top,literal)${scopePath}`],
+      failed_paths: []
+    };
+  }
+  const scopeRoot = canonicalize(rootDir);
+  const paths = [];
+  const failedPaths = [];
+  for (const value of reviewPaths) {
+    const raw = String(value || "").replaceAll("\\", "/").replace(/^\.\/+/, "");
+    if (!raw || path.posix.isAbsolute(raw) || /^[A-Za-z]:\//.test(raw)) {
+      failedPaths.push({
+        workspace_id: selected.workspace.id,
+        path: safeReviewPath(raw),
+        source: "scope",
+        reason: "invalid_task_review_path"
+      });
+      continue;
+    }
+    const absolutePath = path.resolve(selected.workspace.canonicalRoot, raw);
+    const canonicalPath = canonicalize(absolutePath);
+    if (
+      !isWithinRoots(canonicalPath, [selected.workspace.canonicalRoot]) ||
+      !isWithinRoots(canonicalPath, [scopeRoot])
+    ) {
+      failedPaths.push({
+        workspace_id: selected.workspace.id,
+        path: safeReviewPath(raw),
+        source: "scope",
+        reason: "task_review_path_outside_scope"
+      });
+      continue;
+    }
+    paths.push(toWorkspaceRel(selected.workspace, absolutePath));
+  }
+  const uniquePaths = dedupe(paths).sort();
+  return {
+    mode: "task",
+    paths: uniquePaths,
+    pathspecs: uniquePaths.map((relativePath) =>
+      relativePath === "." ? "." : `:(top,literal)${relativePath}`
+    ),
+    failed_paths: failedPaths
+  };
+}
+
+export async function collectReviewInventory(selected, rootDir, reviewPaths = null) {
+  const scope = resolveReviewPathScope(selected, rootDir, reviewPaths);
+  if (scope.mode === "task" && scope.pathspecs.length === 0) {
+    const sourceStatus = Object.fromEntries(REVIEW_SOURCES.map((source) => [source, {
+      complete: scope.failed_paths.length === 0,
+      truncated: false,
+      timed_out: false,
+      error_code: scope.failed_paths.length ? "TASK_REVIEW_SCOPE_INVALID" : null
+    }]));
+    return {
+      items: [],
+      source_counts: { staged: 0, unstaged: 0, untracked: 0 },
+      source_status: sourceStatus,
+      complete: scope.failed_paths.length === 0,
+      truncated: false,
+      failed_paths: scope.failed_paths,
+      scope: { mode: scope.mode, paths: scope.paths }
+    };
+  }
   const specifications = [
-    ["staged", ["diff", "--staged", "--name-only", "-z", "--", pathspec]],
-    ["unstaged", ["diff", "--name-only", "-z", "--", pathspec]],
-    ["untracked", ["ls-files", "--others", "--exclude-standard", "-z", "--", pathspec]]
+    ["staged", ["diff", "--staged", "--name-only", "-z", "--", ...scope.pathspecs]],
+    ["unstaged", ["diff", "--name-only", "-z", "--", ...scope.pathspecs]],
+    ["untracked", ["ls-files", "--others", "--exclude-standard", "-z", "--", ...scope.pathspecs]]
   ];
   const collected = await Promise.all(specifications.map(async ([source, args]) => ({
     source,
     result: await spawnCapture("git", args, selected.workspace.canonicalRoot, DEFAULT_CMD_TIMEOUT)
   })));
   const items = new Map();
-  const failedPaths = [];
+  const failedPaths = [...scope.failed_paths];
   const sourceStatus = {};
   const scopeRoot = canonicalize(rootDir);
 
@@ -164,7 +231,8 @@ export async function collectReviewInventory(selected, rootDir) {
     source_status: sourceStatus,
     complete,
     truncated,
-    failed_paths: failedPaths
+    failed_paths: failedPaths,
+    scope: { mode: scope.mode, paths: scope.paths }
   };
 }
 
@@ -173,19 +241,36 @@ export async function collectTrackedReviewDiff(
   rootDir,
   source,
   inventory = null,
-  maxBytes = trackedReviewMaxBytes()
+  maxBytes = trackedReviewMaxBytes(),
+  reviewPaths = null
 ) {
-  const scopePath = toWorkspaceRel(selected.workspace, rootDir);
-  const pathspec = scopePath === "." ? "." : `:(top,literal)${scopePath}`;
+  const scope = resolveReviewPathScope(selected, rootDir, reviewPaths);
+  if (scope.mode === "task" && scope.pathspecs.length === 0) {
+    return {
+      source,
+      strategy: "task_paths",
+      diff: "",
+      files: [],
+      rendered_files: [],
+      chunk_count: 0,
+      max_bytes: maxBytes,
+      complete: scope.failed_paths.length === 0,
+      truncated: false,
+      timed_out: false,
+      failed_paths: scope.failed_paths,
+      bytes: 0,
+      error_code: scope.failed_paths.length ? "TASK_REVIEW_SCOPE_INVALID" : null
+    };
+  }
   const result = await spawnCapture(
     "git",
-    trackedDiffArgs(source, [pathspec]),
+    trackedDiffArgs(source, scope.pathspecs),
     selected.workspace.canonicalRoot,
     DEFAULT_CMD_TIMEOUT
   );
   const aggregateDiff = String(result.stdout || "");
   const aggregateTruncated = reviewOutputTruncated(result);
-  const aggregateFailed = result.exit_code !== 0 || result.timed_out === true;
+  const aggregateFailed = result.exit_code !== 0 || result.timed_out === true || scope.failed_paths.length > 0;
   const knownFiles = inventory?.items?.filter((item) => item.sources.includes(source)) || null;
   if (aggregateFailed || !aggregateTruncated) {
     return {
@@ -199,19 +284,21 @@ export async function collectTrackedReviewDiff(
       complete: !aggregateFailed && !aggregateTruncated,
       truncated: aggregateTruncated,
       timed_out: result.timed_out === true,
-      failed_paths: [],
+      failed_paths: scope.failed_paths,
       bytes: Buffer.byteLength(aggregateDiff),
       error_code: result.timed_out
         ? "GIT_DIFF_TIMED_OUT"
-        : result.exit_code !== 0
-          ? "GIT_DIFF_FAILED"
-          : aggregateTruncated
-            ? "GIT_DIFF_TRUNCATED"
-            : null
+        : scope.failed_paths.length
+          ? "TASK_REVIEW_SCOPE_INVALID"
+          : result.exit_code !== 0
+            ? "GIT_DIFF_FAILED"
+            : aggregateTruncated
+              ? "GIT_DIFF_TRUNCATED"
+              : null
     };
   }
 
-  const fallbackInventory = inventory || await collectReviewInventory(selected, rootDir);
+  const fallbackInventory = inventory || await collectReviewInventory(selected, rootDir, reviewPaths);
   const enumeration = fallbackInventory.source_status[source] || emptyReviewSourceState();
   const files = fallbackInventory.items.filter((item) => item.sources.includes(source));
   if (enumeration.complete !== true || files.length === 0) {
@@ -500,22 +587,33 @@ function failedReviewWorkspace(workspaceId, error) {
   };
 }
 
-export async function reviewWorkspaceDiff({ workspaceId, taskToken, taskId, cwd }) {
+export async function reviewWorkspaceDiff({
+  workspaceId,
+  taskToken,
+  taskId,
+  cwd,
+  reviewPaths = null,
+  managedDiff = null,
+  managedDiffUnavailable = [],
+  taskScopeError = null
+}) {
   let selected;
   try {
     selected = await resolveWorkspacePath(cwd, { workspaceId, taskToken });
   } catch (error) {
     return failedReviewWorkspace(workspaceId, error);
   }
-  const inventory = await collectReviewInventory(selected, selected.path);
+  const inventory = await collectReviewInventory(selected, selected.path, reviewPaths);
   const [stagedEvidence, unstagedEvidence, untrackedEvidence, unmanagedState] = await Promise.all([
-    collectTrackedReviewDiff(selected, selected.path, "staged", inventory),
-    collectTrackedReviewDiff(selected, selected.path, "unstaged", inventory),
+    collectTrackedReviewDiff(selected, selected.path, "staged", inventory, undefined, reviewPaths),
+    collectTrackedReviewDiff(selected, selected.path, "unstaged", inventory, undefined, reviewPaths),
     collectUntrackedReviewDiff(selected, inventory),
     unmanagedChangeState(selected.workspace.id, taskId)
   ]);
   const transactionBlocked = transactionInDoubt(selected.workspace.id);
   const incompleteReasons = [];
+  if (taskScopeError) incompleteReasons.push("task_review_scope_unavailable");
+  if (managedDiffUnavailable.length) incompleteReasons.push("journal_diff_unavailable");
   for (const source of REVIEW_SOURCES) {
     const status = inventory.source_status[source] || emptyReviewSourceState();
     if (status.truncated) incompleteReasons.push(`${source}_enumeration_truncated`);
@@ -538,9 +636,10 @@ export async function reviewWorkspaceDiff({ workspaceId, taskToken, taskId, cwd 
     incompleteReasons.push("untracked_content_missing");
   }
 
-  const combinedDiff = [stagedEvidence.diff, unstagedEvidence.diff, untrackedEvidence.diff]
+  const gitCombinedDiff = [stagedEvidence.diff, unstagedEvidence.diff, untrackedEvidence.diff]
     .filter(Boolean)
     .join("\n");
+  const combinedDiff = typeof managedDiff === "string" ? managedDiff : gitCombinedDiff;
   const analyzed = combinedDiff.trim()
     ? analyzeDiff(combinedDiff)
     : {
@@ -578,6 +677,13 @@ export async function reviewWorkspaceDiff({ workspaceId, taskToken, taskId, cwd 
     verdict,
     risk_verdict: riskVerdict,
     complete: reasons.length === 0,
+    scope: {
+      mode: inventory.scope?.mode || "workspace",
+      paths: inventory.scope?.paths,
+      paths_count: Array.isArray(inventory.scope?.paths) ? inventory.scope.paths.length : null,
+      exact_journal_diff: typeof managedDiff === "string",
+      task_scope_error: taskScopeError
+    },
     summary: {
       ...analyzed.summary,
       untracked_files: inventory.source_counts.untracked,

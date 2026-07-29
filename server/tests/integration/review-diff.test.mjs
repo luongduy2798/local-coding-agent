@@ -175,6 +175,99 @@ test("review_diff aggregates task workspaces, inventories every source and pagin
   }
 });
 
+test("review_diff restricts managed findings and summary to the current task paths", async () => {
+  const context = await createIsolatedTestRoot({
+    prefix: "lca-runtime-review-task-scope-",
+    protectedPaths: [path.resolve("..")] 
+  });
+  const workspace = (await createGitFixture(context, {
+    initialFiles: {
+      "src/preexisting.js": "export const preexisting = 1;\n",
+      "src/managed.js": "console.log('existing debug line');\nexport const managed = 1;\n"
+    }
+  })).root;
+  let runtime;
+  let sessionId;
+  try {
+    await writeFile(
+      path.join(workspace, "src/preexisting.js"),
+      "console.log('pre-existing dirty change');\n",
+      "utf8"
+    );
+    runtime = await startTestServer({
+      workspace,
+      dataDir: context.dataDir,
+      runId: context.runId,
+      mode: "full",
+      policy: "full",
+      env: { LCA_TEST_RUNTIME_DIAGNOSTICS: "0" }
+    });
+    sessionId = await initialize(runtime.port);
+    const listed = await callTool(runtime.port, sessionId, 100, "workspace_list", {});
+    await callTool(runtime.port, sessionId, 101, "task_open", {
+      title: "Scoped managed review",
+      primary_workspace_id: listed.data.selected_workspace_id
+    });
+    const patched = await callTool(runtime.port, sessionId, 102, "apply_patch", {
+      operations: [{
+        op: "update",
+        path: "src/managed.js",
+        edits: [{ old_text: "managed = 1", new_text: "managed = 2" }]
+      }]
+    });
+    assert.equal(patched.data.ok, true, patched.text);
+
+    const review = await callTool(runtime.port, sessionId, 103, "review_diff", {});
+    assert.equal(review.result?.isError, undefined, review.text);
+    assert.equal(review.data.scope.mode, "task");
+    assert.equal(review.data.scope.paths_count, 1);
+    assert.equal(review.data.scope.workspaces[0].exact_journal_diff, true);
+    assert.deepEqual(
+      review.data.inventory.items.map((item) => item.path),
+      ["src/managed.js"]
+    );
+    assert.deepEqual(
+      review.data.summary.files.map((item) => item.path),
+      ["src/managed.js"]
+    );
+    assert.equal(
+      review.data.findings.some((item) => item.location?.path === "src/preexisting.js"),
+      false
+    );
+    assert.equal(review.data.summary.changed_files, 1);
+    assert.equal(review.data.summary.added_lines, 1);
+    assert.equal(review.data.summary.deleted_lines, 1);
+    assert.equal(review.data.findings_count, 0, "unchanged debug lines must not be reclassified as additions");
+
+    const workspaceReview = await callTool(runtime.port, sessionId, 104, "review_diff", {
+      scope: "workspace"
+    });
+    assert.equal(workspaceReview.result?.isError, undefined, workspaceReview.text);
+    assert.equal(workspaceReview.data.scope.mode, "workspace");
+    assert.equal(workspaceReview.data.scope.workspaces[0].exact_journal_diff, false);
+    assert.deepEqual(
+      workspaceReview.data.inventory.items.map((item) => item.path),
+      ["src/managed.js", "src/preexisting.js"]
+    );
+    assert.deepEqual(
+      workspaceReview.data.summary.files.map((item) => item.path),
+      ["src/managed.js", "src/preexisting.js"]
+    );
+    assert.equal(workspaceReview.data.summary.changed_files, 2);
+    assert.equal(
+      workspaceReview.data.findings.some((item) => item.location?.path === "src/preexisting.js"),
+      true,
+      "workspace scope must include pre-existing dirty changes"
+    );
+    await callTool(runtime.port, sessionId, 105, "task_close", {});
+  } finally {
+    if (runtime && sessionId) await closeSession(runtime.port, sessionId);
+    if (runtime) await stopTestProcess(runtime.child);
+    await safeRemove(context.fixtureDir, context, { recursive: true, force: true });
+    await safeRemove(context.dataDir, context, { recursive: true, force: true });
+  }
+});
+
 test("review_diff never reports CLEAN while the transaction coordinator is in doubt", async () => {
   const context = await createIsolatedTestRoot({
     prefix: "lca-runtime-review-transaction-",
@@ -271,11 +364,14 @@ async function closeSession(port, sessionId) {
 }
 
 async function callTool(port, sessionId, id, name, args) {
+  const effectiveArgs = name === "review_diff"
+    ? { response_mode: "full", ...args }
+    : args;
   const response = await rpc(port, {
     id,
     sessionId,
     method: "tools/call",
-    params: { name, arguments: args }
+    params: { name, arguments: effectiveArgs }
   });
   assert.equal(response.status, 200);
   const result = response.message?.result;

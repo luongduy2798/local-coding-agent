@@ -93,11 +93,99 @@ try {
     task_token: missingEvidenceTask.task_token
   });
   assert.equal(missingEvidenceClose.data.ok, true);
-  assert.equal(missingEvidenceClose.data.status, "incomplete");
+  assert.equal(missingEvidenceClose.data.status, "complete");
   assert.equal(missingEvidenceClose.data.requested_status, "complete");
-  assert.equal(missingEvidenceClose.data.auto_downgraded, true);
-  assert.ok(missingEvidenceClose.data.completion_guard.incomplete_reasons.includes("VERIFICATION_EVIDENCE_MISSING"));
+  assert.equal(missingEvidenceClose.data.auto_downgraded, false);
+  assert.equal(missingEvidenceClose.data.execution_status, "completed");
+  assert.equal(missingEvidenceClose.data.verification_status, "not_requested");
+  assert.equal(missingEvidenceClose.data.integrity_status, "clean");
+  assert.equal(missingEvidenceClose.data.completion_guard.status, "PASS");
+  assert.equal(missingEvidenceClose.data.completion_guard.incomplete_reasons.length, 0);
   assert.equal(missingEvidenceClose.data.task.status, "closed");
+
+  const mechanicalTask = await openTask(runtime.port, sessionId, 1210, "Mechanical fast path");
+  const mechanicalPatch = await callTool(runtime.port, sessionId, 1211, "apply_patch", {
+    task_token: mechanicalTask.task_token,
+    operations: [{ op: "create", path: "src/review-fast-path.txt", content: "" }]
+  });
+  assert.equal(mechanicalPatch.data.ok, true, JSON.stringify(mechanicalPatch.data));
+  const mechanicalClose = await callTool(runtime.port, sessionId, 1212, "task_close", {
+    task_token: mechanicalTask.task_token
+  });
+  assert.equal(mechanicalClose.data.ok, true, JSON.stringify(mechanicalClose.data));
+  assert.equal(mechanicalClose.data.review_status, "not_applicable");
+  assert.equal(mechanicalClose.data.review_changes_tasks.length, 1);
+
+  const reviewedTask = await openTask(runtime.port, sessionId, 1220, "Reviewed task close");
+  await callTool(runtime.port, sessionId, 1221, "apply_patch", {
+    task_token: reviewedTask.task_token,
+    operations: [{
+      op: "create",
+      path: "src/reviewed-task.js",
+      content: "export const reviewedTask = 1;\n"
+    }]
+  });
+  const reviewedEvidence = await callTool(runtime.port, sessionId, 1222, "review_diff", {
+    task_token: reviewedTask.task_token
+  });
+  assert.equal(reviewedEvidence.data.scope.mode, "task");
+  assert.equal(reviewedEvidence.data.orchestration.review_status, "complete");
+  const reviewedClose = await callTool(runtime.port, sessionId, 1223, "task_close", {
+    task_token: reviewedTask.task_token
+  });
+  assert.equal(reviewedClose.data.ok, true, JSON.stringify(reviewedClose.data));
+  assert.equal(reviewedClose.data.review_status, "complete");
+
+  const staleReviewTask = await openTask(runtime.port, sessionId, 1230, "Stale task review");
+  await callTool(runtime.port, sessionId, 1231, "apply_patch", {
+    task_token: staleReviewTask.task_token,
+    operations: [{
+      op: "create",
+      path: "src/stale-task-review.js",
+      content: "export const staleTaskReview = 1;\n"
+    }]
+  });
+  const initialReview = await callTool(runtime.port, sessionId, 1232, "review_diff", {
+    task_token: staleReviewTask.task_token
+  });
+  assert.equal(initialReview.data.orchestration.review_status, "complete");
+  const previewOnly = await callTool(runtime.port, sessionId, 12325, "apply_patch", {
+    action: "preview",
+    task_token: staleReviewTask.task_token,
+    operations: [{
+      op: "update",
+      path: "src/stale-task-review.js",
+      edits: [{ old_text: "staleTaskReview = 1", new_text: "staleTaskReview = 2" }]
+    }]
+  });
+  assert.equal(previewOnly.data.mutation_performed, false);
+  assert.equal(previewOnly.data.orchestration.review_status, "complete");
+  const secondMutation = await callTool(runtime.port, sessionId, 1233, "apply_patch", {
+    task_token: staleReviewTask.task_token,
+    operations: [{
+      op: "update",
+      path: "src/stale-task-review.js",
+      edits: [{ old_text: "staleTaskReview = 1", new_text: "staleTaskReview = 2" }]
+    }]
+  });
+  assert.equal(secondMutation.data.orchestration.review_status, "not_started");
+  const staleReviewClose = await callTool(runtime.port, sessionId, 1234, "task_close", {
+    task_token: staleReviewTask.task_token
+  });
+  assert.equal(staleReviewClose.data.ok, true, JSON.stringify(staleReviewClose.data));
+  assert.equal(staleReviewClose.data.review_status, "not_applicable");
+
+  const requiredEvidenceTask = await openTask(runtime.port, sessionId, 1202, "Required evidence", {
+    verification_policy: { mode: "required", gates: ["test"] }
+  });
+  const requiredEvidenceClose = await callTool(runtime.port, sessionId, 1203, "task_close", {
+    task_token: requiredEvidenceTask.task_token
+  });
+  assert.equal(requiredEvidenceClose.data.ok, false);
+  assert.equal(requiredEvidenceClose.data.status, "INCOMPLETE");
+  assert.equal(requiredEvidenceClose.data.verification_status, "unavailable");
+  assert.equal(requiredEvidenceClose.data.integrity_status, "clean");
+  assert.ok(requiredEvidenceClose.data.incomplete_reasons.includes("VERIFICATION_EVIDENCE_MISSING"));
 
   const queuedMemoryTask = await openTask(runtime.port, sessionId, 1200, "Queued Memory close");
   const queuedMemoryClose = await callTool(runtime.port, sessionId, 1201, "task_close", {
@@ -257,8 +345,11 @@ try {
   });
   assert.equal(explicitlyIncompleteClose.data.ok, true);
   assert.equal(explicitlyIncompleteClose.data.status, "incomplete");
-  assert.equal(explicitlyIncompleteClose.data.completion_guard.status, "INCOMPLETE");
-  assert.ok(explicitlyIncompleteClose.data.completion_guard.incomplete_reasons.includes("VERIFICATION_EVIDENCE_MISSING"));
+  assert.equal(explicitlyIncompleteClose.data.execution_status, "blocked");
+  assert.equal(explicitlyIncompleteClose.data.verification_status, "not_requested");
+  assert.equal(explicitlyIncompleteClose.data.integrity_status, "clean");
+  assert.equal(explicitlyIncompleteClose.data.completion_guard.status, "PASS");
+  assert.equal(explicitlyIncompleteClose.data.completion_guard.incomplete_reasons.length, 0);
 
   const staleTask = await openTask(runtime.port, sessionId, 7, "Stale verification");
   await callTool(runtime.port, sessionId, 8, "apply_patch", {
@@ -521,9 +612,10 @@ try {
   await safeRemove(context.dataDir, context, { recursive: true, force: true });
 }
 
-async function openTask(port, currentSessionId, id, title) {
+async function openTask(port, currentSessionId, id, title, extra = {}) {
   const response = await callTool(port, currentSessionId, id, "task_open", {
     title,
+    ...extra,
     ...(conversationWorkspaceToken
       ? { conversation_workspace_token: conversationWorkspaceToken }
       : { primary_workspace_id: primaryWorkspaceId })
@@ -533,11 +625,14 @@ async function openTask(port, currentSessionId, id, title) {
 }
 
 async function callTool(port, currentSessionId, id, name, args) {
+  const effectiveArgs = name === "task_close"
+    ? { response_mode: "full", ...args }
+    : args;
   const response = await rpc(port, {
     id,
     sessionId: currentSessionId,
     method: "tools/call",
-    params: { name, arguments: args }
+    params: { name, arguments: effectiveArgs }
   });
   assert.equal(response.status, 200);
   const result = response.message?.result;

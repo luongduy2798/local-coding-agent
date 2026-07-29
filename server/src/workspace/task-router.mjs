@@ -63,6 +63,7 @@ export class TaskRouter {
     memoryMode = "auto",
     includeRecentTasks = false,
     relevantPaths = [],
+    verificationPolicy,
     primaryWorkspaceId,
     attachedWorkspaceIds = [],
     ownerSessionId = null,
@@ -90,7 +91,9 @@ export class TaskRouter {
       complexityOverride,
       workspaceCount: workspaceIds.length
     });
-    const orchestration = createTaskOrchestration(classification);
+    const orchestration = createTaskOrchestration(classification, {
+      verification_policy: verificationPolicy
+    });
     const taskId = `task_${randomUUID().replaceAll("-", "")}`;
     const taskToken = randomBytes(32).toString("base64url");
     const tokenHash = hashToken(taskToken);
@@ -423,10 +426,19 @@ export class TaskRouter {
     return this.getTaskById(task.id);
   }
 
-  async closeTask({ taskToken, sessionId, status = "closed", memoryJobs = [] } = {}) {
+  async closeTask({
+    taskToken,
+    sessionId,
+    status = "closed",
+    memoryJobs = [],
+    finalOrchestration = null
+  } = {}) {
     const task = await this.getTask({ taskToken, sessionId });
     const nextStatus = status === "failed" ? "failed" : "closed";
     const timestamp = isoNow();
+    const orchestration = finalOrchestration
+      ? normalizeTaskOrchestration(finalOrchestration, task.effective_profile)
+      : task.orchestration;
     await this.database.batch([
       ...taskMemoryOutboxInsertSteps(memoryJobs, task.id, timestamp),
       {
@@ -434,10 +446,19 @@ export class TaskRouter {
         sql: `
           UPDATE task_router_tasks
           SET status = ?, version = version + 1,
+              effective_profile = ?, profile_confidence = ?, orchestration_json = ?,
               owner_session_id = NULL, closed_at = ?, updated_at = ?
           WHERE id = ? AND status = 'open'
         `,
-        params: [nextStatus, timestamp, timestamp, task.id]
+        params: [
+          nextStatus,
+          orchestration.effective_profile,
+          orchestration.confidence,
+          JSON.stringify(orchestration),
+          timestamp,
+          timestamp,
+          task.id
+        ]
       },
       {
         mode: "run",

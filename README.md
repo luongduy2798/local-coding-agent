@@ -24,7 +24,9 @@ pin workspace → mở task/baseline → lấy evidence cần thiết
 → journaled mutation → review diff → đóng task/history
 ```
 
-Tốc độ được tối ưu bằng cách batch evidence và mutation trong ít round-trip hơn, không bằng cách cắt bỏ task boundary, journal, progress, review hay history. Verification vẫn theo scope và chỉ chạy khi user yêu cầu trực tiếp.
+Tốc độ được tối ưu bằng cách cache discovery theo catalog hash, dùng adaptive Memory đúng profile, batch evidence/mutation, baseline summary, journal prewarm, read coalescing, review theo mutation epoch và payload compact; không cắt bỏ task boundary, journal, progress, review hay history. Verification vẫn theo scope và chỉ chạy khi user yêu cầu trực tiếp.
+
+Task completion được biểu diễn theo ba trục độc lập: execution, verification và integrity. Công việc đã hoàn thành mà user không yêu cầu test được ghi là `completed / not_requested / clean`, không còn bị hạ thành `incomplete`. Khi verification được yêu cầu và đặt `required`, evidence thiếu, stale hoặc fail vẫn chặn complete close.
 
 Vì reasoning nằm ở ChatGPT, LCA nên được đánh giá như execution backend có quản trị: task completion, độ chính xác context, isolation, journal/Undo/Reapply, observability, reliability và round-trip efficiency. Việc LCA không sở hữu model/planner tự trị là lựa chọn kiến trúc, không phải thiếu sót về autonomous intelligence.
 

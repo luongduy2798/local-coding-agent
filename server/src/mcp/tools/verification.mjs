@@ -42,6 +42,7 @@ export function registerVerificationTools(mcp, dependencies) {
         cwd: z.string().optional(),
         workspace_id: z.string().optional(),
         task_token: z.string().optional(),
+        completion_policy: z.enum(["requested", "required"]).optional().describe("Whether verification is informational or required before a complete task close. Defaults to required when verify_changes is called."),
         include: z.array(z.enum(ALL_GATES)).optional().describe("Optional gate filter for strategy=required/full. strategy=impacted always selects tests."),
         timeout_ms: z.number().int().min(1000).max(600000).optional(),
         stop_on_failure: z.boolean().optional(),

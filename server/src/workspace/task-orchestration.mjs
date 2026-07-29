@@ -22,6 +22,28 @@ const EVIDENCE_STATES = new Set([
   "mutation_applied",
   "confirmation_complete"
 ]);
+const EXECUTION_STATUSES = new Set(["open", "in_progress", "completed", "failed", "cancelled", "blocked"]);
+const VERIFICATION_STATUSES = new Set([
+  "not_requested",
+  "not_applicable",
+  "pending",
+  "passed",
+  "failed",
+  "stale",
+  "unavailable"
+]);
+const INTEGRITY_STATUSES = new Set([
+  "clean",
+  "unmanaged_changes",
+  "unmanaged_state_unknown",
+  "process_running",
+  "transaction_in_doubt",
+  "journal_failed",
+  "recovery_required"
+]);
+const REVIEW_STATUSES = new Set(["not_started", "pending", "complete", "incomplete", "blocked", "not_applicable"]);
+const VERIFICATION_MODES = new Set(["not_requested", "requested", "required"]);
+const VERIFICATION_GATES = new Set(["lint", "typecheck", "test", "build"]);
 const DISCOVERY_TOOLS = new Set([
   "workspace_snapshot",
   "code_query",
@@ -98,8 +120,9 @@ export function classifyTaskComplexity({
   };
 }
 
-export function createTaskOrchestration(classification = {}) {
+export function createTaskOrchestration(classification = {}, options = {}) {
   const effectiveProfile = normalizeComplexityProfile(classification.effective_profile, "normal");
+  const verificationPolicy = normalizeVerificationPolicy(options.verification_policy);
   return {
     version: 2,
     requested_profile: normalizeComplexityProfile(classification.requested_profile),
@@ -111,6 +134,12 @@ export function createTaskOrchestration(classification = {}) {
     scope_reasons: normalizeReasons(classification.scope_reasons),
     phase: "opened",
     evidence_status: "not_started",
+    execution_status: "open",
+    verification_policy: verificationPolicy,
+    verification_status: verificationPolicy.mode === "not_requested" ? "not_requested" : "pending",
+    integrity_status: "clean",
+    review_status: "not_started",
+    review_evidence: null,
     budgets: profileBudgets(effectiveProfile),
     counters: emptyCounters(),
     mutation_epoch: 0,
@@ -136,6 +165,16 @@ export function normalizeTaskOrchestration(value, fallbackProfile = "normal") {
     scope_reasons: normalizeReasons(source.scope_reasons),
     phase: PHASES.has(source.phase) ? source.phase : "opened",
     evidence_status: EVIDENCE_STATES.has(source.evidence_status) ? source.evidence_status : "not_started",
+    execution_status: EXECUTION_STATUSES.has(source.execution_status) ? source.execution_status : "open",
+    verification_policy: normalizeVerificationPolicy(source.verification_policy),
+    verification_status: VERIFICATION_STATUSES.has(source.verification_status)
+      ? source.verification_status
+      : normalizeVerificationPolicy(source.verification_policy).mode === "not_requested"
+        ? "not_requested"
+        : "pending",
+    integrity_status: INTEGRITY_STATUSES.has(source.integrity_status) ? source.integrity_status : "clean",
+    review_status: REVIEW_STATUSES.has(source.review_status) ? source.review_status : "not_started",
+    review_evidence: normalizeReviewEvidence(source.review_evidence),
     budgets: normalizeBudgets(source.budgets, effectiveProfile),
     counters: normalizeCounters(source.counters),
     mutation_epoch: nonNegativeInteger(source.mutation_epoch),
@@ -160,6 +199,12 @@ export function publicTaskOrchestration(value, fallbackProfile = "normal") {
     scope_reasons: state.scope_reasons,
     phase: state.phase,
     evidence_status: state.evidence_status,
+    execution_status: state.execution_status,
+    verification_policy: state.verification_policy,
+    verification_status: state.verification_status,
+    integrity_status: state.integrity_status,
+    review_status: state.review_status,
+    review_evidence: state.review_evidence,
     budgets: state.budgets,
     counters: state.counters,
     ...publicTaskExecutionControl(state),
@@ -344,12 +389,19 @@ export function advanceTaskOrchestration({
   } else if (skipped && observed.tool_class === "discovery") {
     phase = "decision_ready";
   } else if (observed.tool_class === "mutation") {
-    if (success && !skipped) {
+    const historyMutation = tool === "change_history" &&
+      ["undo", "reapply", "undo_all", "clear"].includes(String(args.action || ""));
+    const mutationPerformed = success && !skipped &&
+      (historyMutation || resultIndicatesWorkspaceMutation(resultPayload));
+    if (mutationPerformed) {
       phase = "mutating";
       evidenceStatus = "mutation_applied";
       mutationEpoch++;
       counters.mutations++;
       evidenceDelta = true;
+    } else if (success && !skipped) {
+      phase = counters.mutations > 0 ? "confirming" : "decision_ready";
+      evidenceDelta = !observed.duplicate;
     }
   } else if (observed.tool_class === "execution") {
     const workspaceMutated = success && !skipped && resultIndicatesWorkspaceMutation(resultPayload);
@@ -445,9 +497,20 @@ export function advanceTaskOrchestration({
     );
   }
 
+  const lifecycleState = advanceLifecycleState({
+    state,
+    tool,
+    args,
+    success,
+    resultPayload,
+    skipped,
+    mutationEpoch
+  });
+
   const next = {
     ...state,
     ...executionControl.state,
+    ...lifecycleState,
     effective_profile: effectiveProfile,
     suggested_profile: suggestedProfile,
     scope_signal: scopeSignal,
@@ -481,6 +544,54 @@ export function advanceTaskOrchestration({
     phase_before: state.phase,
     phase_after: next.phase
   };
+}
+
+export function finalizeTaskOrchestration(value, {
+  requested_status = "complete",
+  preflight,
+  close_transaction_status = "complete"
+} = {}) {
+  const state = normalizeTaskOrchestration(value);
+  const integrityStatus = normalizeIntegrityStatus(preflight?.integrity_status, state.integrity_status);
+  const verificationStatus = VERIFICATION_STATUSES.has(preflight?.verification_status)
+    ? preflight.verification_status
+    : state.verification_status;
+  const requested = String(requested_status || "complete");
+  const executionStatus = requested === "failed"
+    ? "failed"
+    : requested === "incomplete"
+      ? "blocked"
+      : preflight?.ok === false
+        ? "blocked"
+        : "completed";
+  const reviewEvidenceCurrent = state.review_status === "complete" &&
+    state.review_evidence?.complete === true &&
+    state.review_evidence.mutation_epoch === state.mutation_epoch;
+  const reviewStatus = state.mutation_epoch === 0
+    ? "not_applicable"
+    : reviewEvidenceCurrent
+      ? "complete"
+      : ["incomplete", "blocked"].includes(state.review_status)
+        ? state.review_status
+        : "not_applicable";
+  return {
+    ...state,
+    phase: "closing",
+    execution_status: executionStatus,
+    verification_status: verificationStatus,
+    integrity_status: close_transaction_status === "recovery_pending" ? "recovery_required" : integrityStatus,
+    review_status: reviewStatus,
+    updated_at: new Date().toISOString()
+  };
+}
+
+export function normalizeVerificationPolicy(value) {
+  const source = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  const mode = VERIFICATION_MODES.has(source.mode) ? source.mode : "not_requested";
+  const gates = Array.isArray(source.gates)
+    ? [...new Set(source.gates.map((gate) => String(gate)).filter((gate) => VERIFICATION_GATES.has(gate)))]
+    : [];
+  return { mode, gates };
 }
 
 export function resumeTaskOrchestration(value, resume = {}) {
@@ -587,9 +698,25 @@ function normalizeScopeSignal(value) {
 }
 
 function profileBudgets(profile) {
-  if (profile === "quick_edit") return { discovery_soft_limit: 5, total_soft_limit: 9 };
-  if (profile === "normal") return { discovery_soft_limit: 8, total_soft_limit: 18 };
-  return { discovery_soft_limit: null, total_soft_limit: null };
+  if (profile === "quick_edit") {
+    return {
+      discovery_soft_limit: 5,
+      total_soft_limit: 9,
+      phase_soft_limits: { orientation: 3, planning: 1, implementation: 4, verification: 2, closure: 1 }
+    };
+  }
+  if (profile === "normal") {
+    return {
+      discovery_soft_limit: 8,
+      total_soft_limit: 18,
+      phase_soft_limits: { orientation: 6, planning: 3, implementation: 10, verification: 4, closure: 2 }
+    };
+  }
+  return {
+    discovery_soft_limit: 12,
+    total_soft_limit: 36,
+    phase_soft_limits: { orientation: 10, planning: 8, implementation: 22, verification: 10, closure: 4 }
+  };
 }
 
 function recommendedTransition(state) {
@@ -598,6 +725,13 @@ function recommendedTransition(state) {
   if (state.run_state === "retrying") return "retry_once_or_report_blocker";
   if (state.last_notice?.recommended_transition) return state.last_notice.recommended_transition;
   if (state.phase === "decision_ready") return "make_decision_or_gather_specific_evidence";
+  if (state.evidence_status === "mutation_applied" && state.review_status !== "complete") {
+    return "review_or_close";
+  }
+  if (state.phase === "confirming" && state.verification_policy.mode === "not_requested") {
+    return "review_or_close";
+  }
+  if (state.phase === "confirming" && state.verification_status === "passed") return "close_task";
   if (state.phase === "confirming") return "confirm_or_close";
   if (state.phase === "blocked") return "resolve_blocker";
   if (state.phase === "closing") return "close_task";
@@ -633,10 +767,110 @@ function normalizeCounters(value) {
 function normalizeBudgets(value, profile) {
   const defaults = profileBudgets(profile);
   const source = value && typeof value === "object" ? value : {};
+  const phaseSource = source.phase_soft_limits && typeof source.phase_soft_limits === "object"
+    ? source.phase_soft_limits
+    : {};
   return {
     discovery_soft_limit: nullableNonNegativeInteger(source.discovery_soft_limit, defaults.discovery_soft_limit),
-    total_soft_limit: nullableNonNegativeInteger(source.total_soft_limit, defaults.total_soft_limit)
+    total_soft_limit: nullableNonNegativeInteger(source.total_soft_limit, defaults.total_soft_limit),
+    phase_soft_limits: Object.fromEntries(Object.entries(defaults.phase_soft_limits).map(([key, fallback]) => [
+      key,
+      nullableNonNegativeInteger(phaseSource[key], fallback)
+    ]))
   };
+}
+
+function advanceLifecycleState({ state, tool, args, success, resultPayload, skipped, mutationEpoch }) {
+  let executionStatus = state.execution_status;
+  let verificationPolicy = state.verification_policy;
+  let verificationStatus = state.verification_status;
+  let integrityStatus = state.integrity_status;
+  let reviewStatus = state.review_status;
+  let reviewEvidence = state.review_evidence;
+  const name = String(tool || "");
+  const resultStatus = String(resultPayload?.status || resultPayload?.verdict || "").toUpperCase();
+
+  const historyMutation = name === "change_history" &&
+    ["undo", "reapply", "undo_all", "clear"].includes(String(args?.action || ""));
+  const workspaceMutated = historyMutation || resultIndicatesWorkspaceMutation(resultPayload);
+  if (success && !skipped && workspaceMutated) {
+    executionStatus = "in_progress";
+    reviewStatus = "not_started";
+    reviewEvidence = null;
+  }
+  if (name === "review_diff" && success && !skipped) {
+    reviewStatus = resultStatus === "INCOMPLETE"
+      ? "incomplete"
+      : resultStatus === "BLOCK"
+        ? "blocked"
+        : "complete";
+    reviewEvidence = normalizeReviewEvidence({
+      mutation_epoch: mutationEpoch,
+      evidence_revision: resultPayload?.evidence_revision,
+      verdict: resultPayload?.verdict,
+      complete: resultPayload?.complete,
+      unmanaged_changes: resultPayload?.unmanaged_changes,
+      recorded_at: new Date().toISOString()
+    });
+  }
+  if (name === "verify_changes" && !skipped) {
+    const requestedMode = ["requested", "required"].includes(args?.completion_policy)
+      ? args.completion_policy
+      : verificationPolicy.mode === "required"
+        ? "required"
+        : "required";
+    const gates = Array.isArray(args?.include) && args.include.length
+      ? args.include
+      : args?.strategy === "impacted"
+        ? ["test"]
+        : args?.strategy === "full"
+          ? ["lint", "typecheck", "test", "build"]
+          : verificationPolicy.gates;
+    verificationPolicy = normalizeVerificationPolicy({ mode: requestedMode, gates });
+    verificationStatus = resultStatus === "PASS"
+      ? "passed"
+      : resultStatus === "FAIL"
+        ? "failed"
+        : resultStatus === "DRY_RUN"
+          ? "pending"
+          : "unavailable";
+  }
+  if (resultPayload?.journal_complete === false) integrityStatus = "journal_failed";
+  if (resultPayload?.transaction_in_doubt === true) integrityStatus = "transaction_in_doubt";
+  if (resultPayload?.unmanaged_changes === true) integrityStatus = "unmanaged_changes";
+  if (resultPayload?.unmanaged_state_unknown === true) integrityStatus = "unmanaged_state_unknown";
+  if (!success && resultPayload?.code === "TASK_CLOSE_RECOVERY_REQUIRED") integrityStatus = "recovery_required";
+  if (!success && resultPayload?.code === "TASK_PROCESS_RUNNING") integrityStatus = "process_running";
+  if (name === "task_close") executionStatus = executionStatus === "open" ? "in_progress" : executionStatus;
+
+  return {
+    execution_status: executionStatus,
+    verification_policy: verificationPolicy,
+    verification_status: verificationStatus,
+    integrity_status: integrityStatus,
+    review_status: reviewStatus,
+    review_evidence: reviewEvidence
+  };
+}
+
+function normalizeReviewEvidence(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const revision = normalizeOptionalString(value.evidence_revision, 160);
+  const verdict = normalizeOptionalString(value.verdict, 40);
+  const recordedAt = normalizeTimestamp(value.recorded_at);
+  if (!revision && !verdict && !recordedAt) return null;
+  return {
+    mutation_epoch: nonNegativeInteger(value.mutation_epoch),
+    evidence_revision: revision,
+    verdict,
+    complete: value.complete === true,
+    unmanaged_changes: value.unmanaged_changes === true,
+    recorded_at: recordedAt
+  };
+}
+
+function normalizeIntegrityStatus(value, fallback = "clean") {
+  return INTEGRITY_STATUSES.has(value) ? value : INTEGRITY_STATUSES.has(fallback) ? fallback : "clean";
 }
 
 function normalizeFingerprints(value) {

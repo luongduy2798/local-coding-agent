@@ -227,7 +227,7 @@ The extension in `vscode-extension/` exposes **Control Center** in the Activity 
 
 - **Overview**: supervisor/server/tunnel/session state and Start/Stop/Pause controls;
 - **Workspaces**: the complete registry, global default, availability and Archive/Restore/Permanent Remove;
-- **Tasks**: the public Agent objective followed by real tool start/finish/failure/interruption timers, verification, process and change/file counts, including a Detached lifecycle state for open tasks without a live session;
+- **Tasks**: the public Agent objective followed by real tool start/finish/failure/interruption timers, separate execution/verification/integrity badges, process and change/file counts, including a Detached lifecycle state for open tasks without a live session;
 - **Changes**: task/workspace-scoped review, snapshot diff and safe replay.
 
 It also:
@@ -245,7 +245,7 @@ It also:
 - consumes `/changes/events` revisions—including `workspace_id=all`—while visible, falls back to bounded polling if SSE is unavailable, and reconnects automatically to return to Live;
 - cancels stale requests so an older workspace/task response cannot overwrite a newer selection.
 
-The displayed objective and detached lifecycle metadata come from the durable task record. Operational activity comes separately from the existing rotating runtime `audit.log`, with a seven-day/20,000-event UI bound. The reader handles rotation, partial lines and deduplication. Only invocation/tool/task/workspace IDs, phase, timestamps, duration, safe error code, verification enum and counts are projected from audit data; args, commands, output, prompt, token, thinking and error content never enter the webview.
+The displayed objective, execution status, verification status, integrity status and detached lifecycle metadata come from the durable task record. `not_requested` verification is displayed separately from successful execution instead of being collapsed into an incomplete task. Operational activity comes separately from the existing rotating runtime `audit.log`, with a seven-day/20,000-event UI bound. The reader handles rotation, partial lines and deduplication. Only invocation/tool/task/workspace IDs, phase, timestamps, duration, safe error code, verification enum and counts are projected from audit data; args, commands, output, prompt, token, thinking and error content never enter the webview.
 
 Archived workspaces stay visible in Workspaces/Tasks and their history remains readable, but replay is disabled until Restore. Permanent Remove uses a durable quarantine/intent transaction, leaves source files untouched, and cannot remove a workspace referenced by multi-workspace task history.
 

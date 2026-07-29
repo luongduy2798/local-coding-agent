@@ -59,11 +59,20 @@ export interface TaskOrchestrationDescriptor {
   scope_reasons?: string[];
   phase?: "opened" | "discovering" | "decision_ready" | "mutating" | "confirming" | "blocked" | "closing";
   evidence_status?: "not_started" | "insufficient" | "likely_sufficient" | "target_confirmed" | "mutation_applied" | "confirmation_complete";
+  execution_status?: "open" | "in_progress" | "completed" | "failed" | "cancelled" | "blocked";
+  verification_policy?: {
+    mode?: "not_requested" | "requested" | "required";
+    gates?: Array<"lint" | "typecheck" | "test" | "build">;
+  };
+  verification_status?: "not_requested" | "not_applicable" | "pending" | "passed" | "failed" | "stale" | "unavailable";
+  integrity_status?: "clean" | "unmanaged_changes" | "unmanaged_state_unknown" | "process_running" | "transaction_in_doubt" | "journal_failed" | "recovery_required";
+  review_status?: "not_started" | "pending" | "complete" | "incomplete" | "blocked" | "not_applicable";
   run_state?: "running" | "retrying" | "blocked" | "waiting_for_user";
   blocker?: TaskBlockerDescriptor | null;
   budgets?: {
     discovery_soft_limit?: number | null;
     total_soft_limit?: number | null;
+    phase_soft_limits?: Record<string, number | null>;
   };
   counters?: {
     total_calls?: number;

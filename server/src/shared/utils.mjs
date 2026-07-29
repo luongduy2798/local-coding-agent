@@ -78,8 +78,31 @@ export function jsonResult(value) {
   const started = performance.now();
   const serialized = JSON.stringify(value);
   const requestMetrics = MCP_REQUEST_CONTEXT?.getStore();
-  if (requestMetrics) requestMetrics.serializationMs = roundMs(performance.now() - started);
+  if (requestMetrics) {
+    requestMetrics.serializationMs = roundMs(performance.now() - started);
+    requestMetrics.serializedPayloadBytes = Buffer.byteLength(serialized, "utf8");
+  }
   return textResult(serialized);
+}
+
+export async function withRequestSpan(name, operation) {
+  const started = performance.now();
+  try {
+    return await operation();
+  } finally {
+    const requestMetrics = MCP_REQUEST_CONTEXT?.getStore();
+    if (requestMetrics) {
+      requestMetrics.spans ||= {};
+      const key = String(name || "operation").slice(0, 80);
+      const previous = requestMetrics.spans[key] || { count: 0, total_ms: 0, max_ms: 0 };
+      const duration = roundMs(performance.now() - started);
+      requestMetrics.spans[key] = {
+        count: previous.count + 1,
+        total_ms: roundMs(previous.total_ms + duration),
+        max_ms: Math.max(previous.max_ms, duration)
+      };
+    }
+  }
 }
 
 export function resultBytes(result) {
@@ -120,6 +143,10 @@ export function fitJsonItems(items, maxChars) {
     chars += cost;
   }
   return { items: selected, chars, truncated: selected.length < source.length };
+}
+
+export function currentRequestMetrics() {
+  return MCP_REQUEST_CONTEXT?.getStore() || null;
 }
 
 export function roundMs(value) {

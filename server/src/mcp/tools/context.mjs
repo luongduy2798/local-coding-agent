@@ -6,6 +6,37 @@ import { readFile, readdir, stat } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 
+function recommendedReadRanges(matches, { context = 12, limit = 8 } = {}) {
+  const grouped = new Map();
+  for (const match of matches || []) {
+    const filePath = match.path || match.location?.path;
+    const line = Number(match.line || match.location?.line || 0);
+    if (!filePath || !Number.isInteger(line) || line < 1) continue;
+    const key = `${match.workspace_id || ""}:${filePath}`;
+    const current = grouped.get(key) || {
+      workspace_id: match.workspace_id,
+      path: filePath,
+      first_line: line,
+      last_line: line,
+      matches: 0
+    };
+    current.first_line = Math.min(current.first_line, line);
+    current.last_line = Math.max(current.last_line, line);
+    current.matches++;
+    grouped.set(key, current);
+  }
+  return [...grouped.values()]
+    .sort((left, right) => right.matches - left.matches || left.path.localeCompare(right.path))
+    .slice(0, limit)
+    .map((entry) => ({
+      workspace_id: entry.workspace_id,
+      path: entry.path,
+      start_line: Math.max(1, entry.first_line - context),
+      line_count: Math.min(240, entry.last_line - entry.first_line + 1 + context * 2),
+      match_count: entry.matches
+    }));
+}
+
 export function registerContextTools(mcp, dependencies) {
   const {
     DEFAULT_RESPONSE_CHARS,
@@ -256,6 +287,7 @@ export function registerContextTools(mcp, dependencies) {
           returned: limited.items.length,
           hasMore
         }),
+        recommended_reads: recommendedReadRanges(limited.items),
         matches: limited.items
       });
     }
@@ -343,6 +375,7 @@ export function registerContextTools(mcp, dependencies) {
       if (!items.length) throw new Error("Provide at least one path or read request.");
 
       const files = new Array(items.length);
+      const sharedReads = new Map();
       let cursor = 0;
       const worker = async () => {
         while (true) {
@@ -356,9 +389,17 @@ export function registerContextTools(mcp, dependencies) {
             });
             const fp = selected.path;
             const outputPath = toWorkspaceRel(selected.workspace, fp);
-            const buffer = await readFile(fp);
-            const journal = await getChangeJournal(selected.workspace.id);
-            const version = journal.rememberRead(fp, buffer);
+            let sharedRead = sharedReads.get(fp);
+            if (!sharedRead) {
+              sharedRead = (async () => {
+                const buffer = await readFile(fp);
+                const journal = await getChangeJournal(selected.workspace.id);
+                const version = journal.rememberRead(fp, buffer);
+                return { buffer, version };
+              })();
+              sharedReads.set(fp, sharedRead);
+            }
+            const { buffer, version } = await sharedRead;
             if (request.known_version && request.known_version === version && request.skip_if_unchanged === true) {
               files[index] = { workspace_id: selected.workspace.id, path: outputPath, version, unchanged: true, content_omitted: true };
               continue;
@@ -419,6 +460,8 @@ export function registerContextTools(mcp, dependencies) {
         chars_returned: batchLimit - remaining,
         max_batch_chars: batchLimit,
         batch_truncated: batchTruncated,
+        unique_file_reads: sharedReads.size,
+        coalesced_reads: Math.max(0, items.length - sharedReads.size),
         files
       });
     }

@@ -11,7 +11,8 @@ import {
 } from "../coding/semantic/structural-adapter.mjs";
 import { discoverTypeScriptSemanticAdapter } from "../coding/semantic/typescript-adapter.mjs";
 import { PatchTransactionCoordinator } from "../mutation/patch-transaction.mjs";
-import { boundedNumber } from "../shared/utils.mjs";
+import { boundedNumber, withRequestSpan } from "../shared/utils.mjs";
+import { compactTask, shouldCompactResponse } from "../mcp/response-mode.mjs";
 import { VerificationPlanner } from "../verification/planner.mjs";
 import { WorkspaceGraph } from "../workspace/graph/workspace-graph.mjs";
 import { prewarmWorkspaceGraphInChild } from "../workspace/graph/prewarm.mjs";
@@ -395,9 +396,9 @@ export function createRuntimeManager({
     return journal;
   }
 
-  async function captureTaskWorkspaceBaseline(workspaceId) {
+  async function captureTaskWorkspaceBaseline(workspaceId, { detailed = false } = {}) {
     const runtime = await getWorkspaceRuntime(workspaceId);
-    const changes = await runtime.verification.inspectChanges();
+    const changes = await withRequestSpan("task_open_baseline", () => runtime.verification.inspectChanges());
     const known = changes.is_git_repo === true && changes.dirty_unknown !== true &&
       typeof changes.head === "string" && /^[a-f0-9]{40,64}$/i.test(changes.head);
     return {
@@ -409,7 +410,7 @@ export function createRuntimeManager({
       dirty_unknown: known ? changes.dirty_unknown === true : true,
       dirty: known ? {
         summary: changes.summary || null,
-        files: (changes.files || []).slice(0, 1_000).map((entry) => ({
+        files: detailed ? (changes.files || []).slice(0, 1_000).map((entry) => ({
           path: entry.location?.path || null,
           original_path: entry.original_location?.path || null,
           index_status: entry.index_status || null,
@@ -417,8 +418,9 @@ export function createRuntimeManager({
           staged: entry.staged === true,
           unstaged: entry.unstaged === true,
           untracked: entry.untracked === true
-        })),
-        truncated: (changes.files || []).length > 1_000
+        })) : [],
+        truncated: detailed && (changes.files || []).length > 1_000,
+        detail_level: detailed ? "full" : "summary"
       } : null,
       captured_at: new Date().toISOString()
     };
@@ -428,7 +430,7 @@ export function createRuntimeManager({
     return task?.workspaces?.find((entry) => entry.workspace_id === workspaceId)?.baseline || { known: false };
   }
 
-  async function taskOpenPayload(task) {
+  async function taskOpenPayload(task, { responseMode = "auto" } = {}) {
     const workspaceState = (task.workspaces || []).map((workspace) => {
       const baseline = workspace.baseline || { known: false };
       return {
@@ -443,14 +445,38 @@ export function createRuntimeManager({
       };
     });
     const memoryPolicy = resolveTaskMemoryPolicy(task);
-    const workspaceMemory = memoryPolicy.effective_mode === "skip"
-      ? skippedTaskMemoryBrief(task)
-      : await memoryService?.briefForTask(task) || unavailableTaskMemoryBrief(task);
-    return {
+    const workspaceMemoryPromise = memoryPolicy.effective_mode === "skip"
+      ? Promise.resolve(skippedTaskMemoryBrief(task))
+      : withRequestSpan("task_open_memory", () => memoryService?.briefForTask(task))
+        .then((value) => value || unavailableTaskMemoryBrief(task))
+        || Promise.resolve(unavailableTaskMemoryBrief(task));
+    const journalWarmup = process.env.AGENT_PREWARM_JOURNAL === "0"
+      ? Promise.resolve([])
+      : withRequestSpan("task_open_journal_warmup", () => Promise.allSettled(
+          (task.workspace_ids || []).map((workspaceId) => getChangeJournal(workspaceId))
+        ));
+    const [workspaceMemory] = await Promise.all([workspaceMemoryPromise, journalWarmup]);
+    const fullTask = {
       ...task,
       orchestration: publicTaskOrchestration(task.orchestration, task.effective_profile),
       workspace_set_version: task.version,
       workspace_state: workspaceState,
+      workspace_memory: workspaceMemory
+    };
+    if (!shouldCompactResponse(responseMode, task.effective_profile)) return fullTask;
+    return {
+      ...compactTask(fullTask),
+      workspace_set_version: task.version,
+      workspace_state: workspaceState.map((workspace) => ({
+        workspace_id: workspace.workspace_id,
+        baseline_known: workspace.baseline_known,
+        base_head: workspace.base_head,
+        branch: workspace.branch,
+        clean: workspace.clean,
+        dirty_unknown: workspace.dirty_unknown,
+        dirty_summary: workspace.dirty?.summary || null,
+        captured_at: workspace.captured_at
+      })),
       workspace_memory: workspaceMemory
     };
   }

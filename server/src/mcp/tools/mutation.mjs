@@ -9,6 +9,12 @@ import path from "node:path";
 import { z } from "zod";
 import { PatchTransactionError } from "../../mutation/patch-transaction.mjs";
 import { TaskRouterError } from "../../workspace/task-router.mjs";
+import { withRequestSpan } from "../../shared/utils.mjs";
+import {
+  RESPONSE_MODES,
+  compactTask,
+  shouldCompactResponse
+} from "../response-mode.mjs";
 
 let PRIMARY_ROOT;
 let ROOTS;
@@ -75,6 +81,7 @@ function registerFsWriteTools(mcp) {
         task_title: z.string().min(1).max(180).optional(),
         task_token: z.string().optional(),
         workspace_id: z.string().optional(),
+        response_mode: z.enum(RESPONSE_MODES).optional().describe("auto, compact, full, or diagnostic response shaping."),
         diff: z.string().optional(),
         operations: z
           .array(
@@ -94,7 +101,7 @@ function registerFsWriteTools(mcp) {
           .optional()
       }
     },
-    async ({ action = "apply", task_title, task_token, workspace_id, diff, operations }) => {
+    async ({ action = "apply", task_title, task_token, workspace_id, response_mode = "auto", diff, operations }) => {
       if (!patchCoordinator) {
         throw new PatchTransactionError(
           "PATCH_TRANSACTION_UNAVAILABLE",
@@ -125,7 +132,7 @@ function registerFsWriteTools(mcp) {
           taskToken: context.taskToken,
           sessionId: currentMcpSessionId()
         });
-        return jsonResult({
+        const previewPayload = {
           ...preview,
           action,
           mode: diff && diff.trim() ? "diff" : "operations",
@@ -134,18 +141,24 @@ function registerFsWriteTools(mcp) {
           ...(context.returnTaskToken ? { task_token: context.returnTaskToken } : {}),
           mutation_performed: false,
           workspace_set_frozen: context.task?.workspace_set_frozen === true
-        });
+        };
+        return jsonResult(shouldCompactResponse(response_mode, context.task?.effective_profile)
+          ? compactPatchPayload(previewPayload, context.operations)
+          : previewPayload);
       }
-      const applied = await runPatchTransactionWithJournals({
+      const applied = await withRequestSpan("patch_transaction", () => runPatchTransactionWithJournals({
         operations: context.operations,
         task: context.task,
         taskToken: context.taskToken,
         taskTitle: task_title
-      });
+      }));
       const memoryFreshness = memoryService
-        ? await memoryService.markPathsChanged(context.operations, { taskId: context.task?.id })
+        ? await withRequestSpan("memory_freshness", () => memoryService.markPathsChanged(
+            context.operations,
+            { taskId: context.task?.id }
+          ))
         : [];
-      return jsonResult({
+      const payload = {
         ...applied.transaction,
         routing_task_id: applied.transaction.task_id,
         task_id: TEST_RUNTIME_DIAGNOSTICS && applied.changes.length === 1
@@ -161,13 +174,62 @@ function registerFsWriteTools(mcp) {
         journal_complete: applied.journalErrors.length === 0,
         change_id: applied.changes.length === 1 ? applied.changes[0].change_id : null,
         change_ids: Object.fromEntries(applied.changes.map((entry) => [entry.workspace_id, entry.change_id])),
-        memory_freshness: memoryFreshness
-      });
+        memory_freshness: memoryFreshness,
+        review_index: {
+          ready: applied.journalErrors.length === 0,
+          mutation_epoch: Number(context.task?.orchestration?.mutation_epoch || 0) + 1,
+          operation_count: context.operations.length,
+          paths: context.operations.map((operation) => ({
+            workspace_id: operation.workspace_id,
+            path: operation.path,
+            operation: operation.op,
+            rename_to: operation.rename_to || null
+          }))
+        }
+      };
+      return jsonResult(shouldCompactResponse(response_mode, context.task?.effective_profile)
+        ? compactPatchPayload(payload, context.operations)
+        : payload);
     }
   );
 
 
 
+}
+
+function compactPatchPayload(payload, operations = []) {
+  return {
+    ok: payload.ok !== false,
+    action: payload.action || "apply",
+    status: payload.status,
+    transaction_id: payload.transaction_id || payload.id || null,
+    routing_task_id: payload.routing_task_id || payload.task_id || null,
+    mode: payload.mode,
+    applied: payload.applied ?? payload.operation_count ?? 0,
+    task: compactTask(payload.task),
+    mutation_performed: payload.mutation_performed !== false,
+    workspace_set_frozen: payload.workspace_set_frozen ?? payload.task?.workspace_set_frozen === true,
+    results: payload.results || [],
+    changes: payload.changes || [],
+    change_id: payload.change_id || null,
+    change_ids: payload.change_ids || {},
+    journal_complete: payload.journal_complete !== false,
+    journal_errors: payload.journal_errors || [],
+    undoable: payload.journal_complete !== false && Boolean(payload.change_id || Object.keys(payload.change_ids || {}).length),
+    review_index: payload.review_index || {
+      ready: false,
+      operation_count: operations.length,
+      paths: operations.map((operation) => ({
+        workspace_id: operation.workspace_id,
+        path: operation.path,
+        operation: operation.op
+      }))
+    },
+    memory_freshness: {
+      workspaces: (payload.memory_freshness || []).length,
+      updated: (payload.memory_freshness || []).reduce((total, entry) => total + Number(entry.updated || 0), 0)
+    }
+  };
 }
 
 function collectUnifiedDiffPaths(diffText) {

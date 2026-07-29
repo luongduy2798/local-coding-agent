@@ -58,6 +58,11 @@ export interface TaskOrchestrationView {
   scope_reasons?: string[];
   phase?: string;
   evidence_status?: string;
+  execution_status?: "open" | "in_progress" | "completed" | "failed" | "cancelled" | "blocked";
+  verification_policy?: { mode?: "not_requested" | "requested" | "required"; gates?: string[] };
+  verification_status?: "not_requested" | "not_applicable" | "pending" | "passed" | "failed" | "stale" | "unavailable";
+  integrity_status?: "clean" | "unmanaged_changes" | "unmanaged_state_unknown" | "process_running" | "transaction_in_doubt" | "journal_failed" | "recovery_required";
+  review_status?: "not_started" | "pending" | "complete" | "incomplete" | "blocked" | "not_applicable";
   run_state?: "running" | "retrying" | "blocked" | "waiting_for_user";
   blocker?: {
     code?: string;
@@ -69,7 +74,7 @@ export interface TaskOrchestrationView {
     purpose?: string | null;
     target?: string | null;
   } | null;
-  budgets?: { discovery_soft_limit?: number | null; total_soft_limit?: number | null };
+  budgets?: { discovery_soft_limit?: number | null; total_soft_limit?: number | null; phase_soft_limits?: Record<string, number | null> };
   counters?: {
     total_calls?: number;
     unique_calls?: number;
@@ -729,11 +734,15 @@ function TaskBlock({
     .reduce((count, activity) => count + (activity.repeatCount || 1), 0);
   const profile = item.task.effectiveProfile;
   const runState = item.task.orchestration?.run_state;
+  const executionStatus = item.task.orchestration?.execution_status;
+  const verificationStatus = item.task.orchestration?.verification_status;
+  const integrityStatus = item.task.orchestration?.integrity_status;
   const displayStatus = taskDisplayStatus(
     item.task.status,
     running || item.runningProcessCount > 0,
     detached,
     runState,
+    executionStatus,
   );
   const suggestedProfile = item.task.orchestration?.suggested_profile;
   const notice = item.task.orchestration?.last_notice;
@@ -754,6 +763,15 @@ function TaskBlock({
             <strong>{item.task.title}</strong>
             {profile && <Badge value={profileLabel(profile)} tone={profile === "quick_edit" ? "accent" : ""} />}
             <Badge value={displayStatus.label} tone={displayStatus.badgeTone} />
+            {!isOpenTask(item.task.status) && verificationStatus && (
+              <Badge
+                value={verificationStatus === "not_requested" ? "Verification not requested" : humanizeTool(verificationStatus)}
+                tone={verificationStatus === "passed" ? "pass" : ["failed", "stale", "unavailable"].includes(verificationStatus) ? "fail" : ""}
+              />
+            )}
+            {!isOpenTask(item.task.status) && integrityStatus && integrityStatus !== "clean" && (
+              <Badge value={humanizeTool(integrityStatus)} tone="fail" />
+            )}
           </div>
           <div className="task-card-meta">
             {item.task.createdAt && <span>Started {relativeTime(item.task.createdAt)}</span>}
@@ -1162,6 +1180,7 @@ function taskDisplayStatus(
   hasRunningActivity: boolean,
   detached: boolean,
   runState?: string | null,
+  executionStatus?: string | null,
 ): { label: string; badgeTone: string; stateTone: "running" | "retrying" | "waiting" | "blocked" | "detached" | "complete" | "failed"; icon: IconName | null } {
   const normalized = status.toLowerCase();
   if (runState === "waiting_for_user") {
@@ -1179,11 +1198,14 @@ function taskDisplayStatus(
   if (hasRunningActivity || isOpenTask(normalized)) {
     return { label: "Running", badgeTone: "accent", stateTone: "running", icon: null };
   }
-  if (normalized === "failed") {
+  if (executionStatus === "blocked") {
+    return { label: "Blocked", badgeTone: "fail", stateTone: "blocked", icon: "warning" };
+  }
+  if (executionStatus === "failed" || normalized === "failed") {
     return { label: "Failed", badgeTone: "fail", stateTone: "failed", icon: "warning" };
   }
-  // Internal close evidence such as `incomplete` is intentionally collapsed into
-  // Completed. Detached is a lifecycle state for an open task without a live session.
+  // Durable execution state is independent from verification and integrity badges.
+  // Detached remains a lifecycle state for an open task without a live session.
   return { label: "Completed", badgeTone: "pass", stateTone: "complete", icon: "check" };
 }
 

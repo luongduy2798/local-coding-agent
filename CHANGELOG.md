@@ -4,6 +4,16 @@ All notable changes to Local Coding Agent are documented in this file.
 
 ## [Unreleased]
 
+### Profile-preserving latency and completion semantics
+
+- Kept discovery groups, model-selected `quick_edit`/`normal`/`complex` profiles, adaptive Workspace Memory, task isolation, journaled mutation, Review Changes and Undo/Reapply intact while reducing repeated work around them.
+- Added `auto|compact|full|diagnostic` response shaping to task open/close, patch and review; quick/normal default to compact payloads while durable detail remains server-side and complex stays full by default.
+- Split task outcome into durable execution, verification, integrity and review states. Tasks without requested verification now close as `completed / not_requested / clean`; required missing, stale or failed evidence still blocks complete close.
+- Added verification policy to task orchestration, phase budgets for all profiles, bounded complex budgets, improved transition hints, summary Git baselines, parallel workspace baseline capture, journal prewarm and request spans for baseline, Memory, patch, review and close phases.
+- Added search `recommended_reads`, duplicate-file coalescing in `read_many`, compact patch review indexes, parallel multi-workspace review and payload-byte/span audit telemetry.
+- Restored the mechanical quick-edit fast path (`task_open` → `apply_patch` → `task_close`) and made `review_diff` conditional and task-scoped by default: managed findings use exact journal before/after snapshots, Git evidence is restricted to task paths, and pre-existing dirty changes stay outside the task review. Added explicit `scope=workspace` for reviewing every staged, unstaged and untracked Git change under `cwd`.
+- Updated Control Center to show verification and integrity independently from execution status, and extended catalog/runtime/task-close/review tests for the new contract.
+
 ### Catalog v15 tool-selection cleanup
 
 - Reduced the fixed model-visible catalog from 37 to 34 tools and bumped `catalog_version` to 15 with tool-name hash `fc8b432ebdde919a`.

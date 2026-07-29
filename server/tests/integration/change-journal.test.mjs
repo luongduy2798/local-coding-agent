@@ -23,7 +23,10 @@ function check(name, condition, detail = "") {
 }
 
 async function callRaw(client, name, args = {}) {
-  const result = await client.callTool({ name, arguments: args });
+  const effectiveArgs = ["apply_patch", "task_close", "review_diff"].includes(name)
+    ? { response_mode: "full", ...args }
+    : args;
+  const result = await client.callTool({ name, arguments: effectiveArgs });
   const text = result.content?.[0]?.text || "";
   let data = null;
   try { data = JSON.parse(text); } catch {}
