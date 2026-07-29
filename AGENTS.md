@@ -16,9 +16,22 @@ LCA là **managed coding execution runtime cho một model mạnh bên ngoài** 
 - tiến trình và lifecycle quan sát được mà không log thừa từng tool call;
 - review và durable history vẫn tồn tại sau reconnect;
 - giảm round-trip bằng `workspace_snapshot`, `read_many`, multi-pattern search và batch `apply_patch`, **không** bằng cách bỏ task boundary, journal hoặc review;
-- verification đúng scope và chỉ chạy khi user yêu cầu trực tiếp.
+- verification đúng scope và chỉ chạy khi user yêu cầu trực tiếp;
+- chat mới trong cùng workspace nhận Persistent Workspace Memory ngắn, có provenance và giới hạn, để không phải điều tra lại quyết định cũ.
 
 Không đánh giá thấp LCA vì nó không có model chủ động riêng; đó là phân chia trách nhiệm có chủ ý. Cũng không tối ưu workflow thành “đọc rồi ghi file trực tiếp”: mutation không có task/journal/review làm mất khả năng quản lý của user và đi ngược mục tiêu sản phẩm.
+
+## Persistent Workspace Memory Rules
+
+- `task_open.workspace_memory` là context adaptive, không phải một bước workflow riêng; mặc định `memory_mode=auto`, truyền `relevant_paths` cho quick edit đã biết target, dùng `skip` chỉ khi hoàn toàn cơ học, `full` khi cần context đầy đủ, và chỉ bật `include_recent_tasks` cho task tiếp nối rõ ràng. Không gọi thêm `workspace_memory brief/list` khi payload đã đủ.
+- Memory không thay task boundary, baseline, journal, Review Changes, Undo/Reapply hoặc durable close.
+- Chỉ lưu thông tin cần nhớ lâu dài: project goal, architecture decision, constraint, known issue/open question, workspace-specific user preference hoặc verification result có ý nghĩa. Mặc định mỗi task lưu 0 item mới; normal/quick edit tối đa 1, complex tối đa 2, và ưu tiên update/supersede item cũ.
+- Không lưu routine edit, task log, tiến độ tạm, raw chat, private reasoning, prompt, command/output, environment, error content chưa lọc, credential/secret hoặc nội dung file chỉ vì đã đọc. `task_close.memory_updates` tối đa 6 operation, summary 800 ký tự, 8 path và 8 tag cho mỗi item.
+- Khi memory có `needs_review`, `stale`, `superseded` hoặc provenance thiếu, không coi nó là sự thật hiện tại; kiểm tra source liên quan trước khi dựa vào.
+- Ưu tiên update/supersede/resolve item cũ thay vì tạo nhiều item mâu thuẫn. Dùng optimistic revision và không bỏ qua conflict.
+- Người dùng là bên kiểm soát cuối: Memory route dùng chung trên VS Code/web/JetBrains cho phép preview full-mode brief, sửa, pin, archive/restore, retry failed outbox jobs và delete. Thao tác trực tiếp của user vẫn synchronous.
+- `task_close` không await việc ghi/rebuild/embedding đầy đủ. Accepted Memory updates được validate/compact rồi enqueue cùng transaction đóng task trong `registry.sqlite`; response chỉ chờ durable enqueue. Worker nền xử lý tuần tự, dùng lease/retry/idempotency, rebuild brief một lần mỗi workspace batch và tiếp tục embedding nền. `task_open` không flush hoặc chờ outbox.
+- Performance contract: extra MCP/model round-trip bằng 0. `skip` không gọi Memory service; `auto + quick_edit` dùng light path-aware payload <=1 KiB, tối đa 2 item, không semantic query/recent-task lookup; normal/complex hoặc `full` dùng payload <=4 KiB, tối đa 8 item. Recent task mặc định tắt, chỉ tối đa 3 bản ghi đã nén khi task yêu cầu và workspace cho phép. Không thêm external/LLM call, Git, filesystem scan hoặc code graph vào `task_open` fast path. Optional local embedding chỉ chạy trong full mode qua worker cô lập với hard deadline và phải fallback ngay sang lexical/path ranking; vector chỉ được tạo từ explicit memory cùng title/objective của task, không từ raw chat hay source content.
 
 ## Prerequisites
 

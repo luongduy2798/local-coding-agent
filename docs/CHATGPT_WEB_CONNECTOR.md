@@ -85,7 +85,7 @@ Trong ChatGPT, hỏi:
 call lca
 ```
 
-Prompt ngắn `call lca` phải chọn `lca_status`. Kết quả phải trả `catalog_version=8`, `catalog_hash`, workspace/task và trạng thái session. Dùng `workspace_list`, sau đó `workspace_select` và `task_open` để bind task mới vào repo trước khi gọi các coding/mutation tool. Khi mở task, ChatGPT chọn `complexity_hint`; LCA chỉ trả scope signal tư vấn và không tự đổi effective profile. Khi phạm vi thực sự thay đổi, ChatGPT xác nhận bằng `task_reclassify` kèm lý do. Task đang mở không tự đổi theo lần `workspace_select` sau đó.
+Prompt ngắn `call lca` phải chọn `lca_status`. Kết quả phải trả `catalog_version=14`, `catalog_hash`, workspace/task và trạng thái session. Với chat mới, gọi `workspace_list`, truyền `selected_workspace_id` vào `task_open.primary_workspace_id`, rồi giữ `conversation_workspace_token` trả về cho mọi task tiếp theo trong cùng chat. `workspace_select` chỉ đổi workspace mặc định cho conversation tương lai và không phải bước bắt buộc trước task hiện tại. Khi mở task, ChatGPT chọn `complexity_hint` và Memory policy. Mặc định `memory_mode=auto`: `quick_edit` dùng light path-aware Memory với `relevant_paths`, không semantic/recent-task; normal/complex dùng full bounded Memory. Chỉ dùng `skip` cho việc hoàn toàn cơ học, `full` khi cần context đầy đủ, và `include_recent_tasks=true` cho task tiếp nối rõ ràng. Không gọi `workspace_memory` như bước startup bắt buộc khi brief đã đủ. Optional local semantic ranking của full mode có hard deadline và tự fallback, nên connector không phải gọi thêm tool hay chờ một AI service khác. Khi đóng task, mặc định không lưu Memory; chỉ gửi 0–1 compact durable update cho quick/normal task hoặc tối đa 2 cho complex task, ưu tiên update/supersede và không lưu routine edit/task log. LCA atomically enqueue accepted updates với task close rồi trả `queued`; worker local persist/retry/rebuild nền và `task_open` không chờ queue. Khi phạm vi thực sự thay đổi, ChatGPT xác nhận bằng `task_reclassify` kèm lý do.
 
 Khi ChatGPT dùng dynamic tool discovery, request đầu tiên phải dùng đúng một query nhóm chính xác như `discovery-group:task-mutation`, `discovery-group:task-investigation`, `discovery-group:task-planning`, `discovery-group:task-code-change`, `discovery-group:task-verification`, `discovery-group:task-process`, `discovery-group:workspace-management`, `discovery-group:change-management` hoặc `discovery-group:figma-workflow`. Không query tự do kiểu `write`/`edit` và không fallback sang toàn bộ catalog nếu group bị thiếu.
 
@@ -120,7 +120,7 @@ Hai chat có thể mở hai task trên hai workspace khác nhau cùng lúc. Mộ
 
 ## 6. Refresh Connector Khi Nâng Cấp
 
-Runtime publish catalog cố định 36 tool. Khi catalog thay đổi:
+Runtime publish catalog cố định 37 tool (`catalog_version=14`). Khi catalog thay đổi:
 
 1. Chạy `lca update`.
 2. Refresh custom MCP connector một lần.
@@ -140,4 +140,4 @@ lca stop
 - Nếu bật Auth/OAuth trong connector sẽ lỗi vì server này đang dùng hướng `No auth`.
 - Chỉ kết nối workspace tin tưởng.
 - Model không thể tự đăng ký một absolute path mới là tin tưởng; chạy `lca workspace use <path>` từ terminal local trước.
-- `/changes`, `/changes/events` và `/healthz/details` là API companion local có auth; chúng không phải URL để nhập vào ChatGPT connector và instance nonce không được copy vào connector.
+- `/changes`, `/changes/events`, `/memory` và `/healthz/details` là API companion local có auth; chúng không phải URL để nhập vào ChatGPT connector và instance nonce không được copy vào connector.

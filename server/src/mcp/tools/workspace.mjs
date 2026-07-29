@@ -214,12 +214,18 @@ export function registerWorkspaceTools(mcp, dependencies) {
     "task_open",
     {
       title: "Open task",
-      description: "Open or resume a task with conversation-scoped workspace isolation. For the first new task in a conversation, pass primary_workspace_id and omit conversation_workspace_token; the response creates a token pinned to that workspace. For later new tasks, reuse the token so global default changes cannot reroute the conversation.",
+      description: "Open or resume a task with conversation-scoped workspace isolation and adaptive workspace Memory. New tasks default to memory_mode=auto: quick_edit receives light path-aware context without semantic or recent-task work, while normal/complex receives full bounded retrieval. Use skip only for fully mechanical work, full to force complete retrieval, and include_recent_tasks only for explicit continuation tasks. For the first new task in a conversation, pass primary_workspace_id and omit conversation_workspace_token; later tasks reuse conversation_workspace_token.",
       inputSchema: {
         objective: z.string().max(4000).optional().describe("Optional durable, user-visible summary of the intended result and task-specific constraints. Do not include private reasoning, secrets, unrelated conversation text, or general agent policy."),
         title: z.string().max(180).optional().describe("Optional short UI label. When omitted, it may be derived from objective; providing title alone leaves objective unset."),
         complexity_hint: z.enum(["quick_edit", "normal", "complex"]).optional().describe("Model-selected effective complexity. Defaults to normal when omitted."),
         complexity_override: z.boolean().optional().describe("Compatibility field; LCA no longer changes the effective profile automatically."),
+        memory_mode: z.enum(["auto", "skip", "full"]).optional().describe("New tasks only. auto maps quick_edit to light path-aware Memory and normal/complex to full Memory; skip bypasses Memory; full forces full retrieval. Defaults to auto."),
+        include_recent_tasks: z.boolean().optional().describe("New tasks only. Request recent closed-task context for a continuation task. Defaults to false and is still limited by workspace Memory settings."),
+        relevant_paths: z.array(z.object({
+          workspace_id: z.string().optional().describe("Attached workspace for this relevance hint; defaults to the primary workspace."),
+          path: z.string().min(1).max(2000).describe("Workspace-relative file or directory used by light Memory matching.")
+        })).max(32).optional().describe("New tasks only. Known target paths used to select at most two relevant constraints in light mode."),
         primary_workspace_id: z.string().min(1).optional().describe("Required for the first new task unless conversation_workspace_token already resolves a pinned workspace. If both are provided, they must match."),
         conversation_workspace_token: z.string().min(1).max(200).optional().describe("Opaque token returned by the first task_open in this conversation. Reuse it for every later new task to retain the pinned workspace."),
         attached_workspace_ids: z.array(z.string()).max(8).optional(),
@@ -231,7 +237,7 @@ export function registerWorkspaceTools(mcp, dependencies) {
         }).optional()
       }
     },
-    async ({ objective, title, complexity_hint, complexity_override = false, primary_workspace_id, conversation_workspace_token, attached_workspace_ids = [], task_token, resume }) => {
+    async ({ objective, title, complexity_hint, complexity_override = false, memory_mode = "auto", include_recent_tasks = false, relevant_paths = [], primary_workspace_id, conversation_workspace_token, attached_workspace_ids = [], task_token, resume }) => {
       if (!taskRouter || !registry) {
         throw new Error(`Multi-workspace task storage unavailable: ${storageError?.message || "unknown error"}`);
       }
@@ -305,6 +311,9 @@ export function registerWorkspaceTools(mcp, dependencies) {
         objective,
         complexityHint: complexity_hint,
         complexityOverride: complexity_override,
+        memoryMode: memory_mode,
+        includeRecentTasks: include_recent_tasks,
+        relevantPaths: relevant_paths,
         primaryWorkspaceId: primaryId,
         attachedWorkspaceIds: workspaceIds.slice(1),
         ownerSessionId: sessionId,

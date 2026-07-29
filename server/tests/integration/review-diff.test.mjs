@@ -24,7 +24,9 @@ test("review_diff aggregates task workspaces, inventories every source and pagin
   const workspaceA = (await createGitFixture(context, {
     initialFiles: {
       "src/unstaged.js": "export const unstaged = 1;\n",
-      "src/staged.js": "export const staged = 1;\n"
+      "src/staged.js": "export const staged = 1;\n",
+      "src/chunk-a.txt": "a\n".repeat(1_200),
+      "src/chunk-b.txt": "a\n".repeat(1_200)
     }
   })).root;
   const workspaceB = (await createGitFixture(context, {
@@ -36,6 +38,8 @@ test("review_diff aggregates task workspaces, inventories every source and pagin
     await writeFile(path.join(workspaceA, "src/staged.js"), "export const staged = 2;\n", "utf8");
     runGit(workspaceA, ["add", "src/staged.js"]);
     await writeFile(path.join(workspaceA, "src/unstaged.js"), "export const unstaged = 2;\n", "utf8");
+    await writeFile(path.join(workspaceA, "src/chunk-a.txt"), "b\n".repeat(1_200), "utf8");
+    await writeFile(path.join(workspaceA, "src/chunk-b.txt"), "b\n".repeat(1_200), "utf8");
     await writeFile(path.join(workspaceA, "untracked-a.js"), "console.log('review me');\n", "utf8");
     await writeFile(path.join(workspaceB, "untracked-b.js"), "export const untracked = true;\n", "utf8");
 
@@ -47,7 +51,8 @@ test("review_diff aggregates task workspaces, inventories every source and pagin
       policy: "full",
       env: {
         LCA_TEST_RUNTIME_DIAGNOSTICS: "0",
-        AGENT_EXTRA_ROOTS_JSON: JSON.stringify([workspaceB])
+        AGENT_EXTRA_ROOTS_JSON: JSON.stringify([workspaceB]),
+        AGENT_MAX_COMMAND_OUTPUT: "10000"
       }
     });
     sessionId = await initialize(runtime.port);
@@ -77,6 +82,11 @@ test("review_diff aggregates task workspaces, inventories every source and pagin
     assert.equal(first.data.inventory.returned, 1);
     assert.equal(first.data.inventory.page_has_more, true);
     assert.ok(first.data.pagination.next_cursor);
+    const primaryReview = first.data.workspaces.find((workspace) => workspace.workspace_id === workspaceAId);
+    assert.equal(primaryReview.evidence.unstaged.complete, true);
+    assert.equal(primaryReview.evidence.unstaged.truncated, false);
+    assert.equal(primaryReview.evidence.unstaged.strategy, "path_chunks");
+    assert.ok(primaryReview.evidence.unstaged.chunks >= 2);
     for (const workspace of first.data.workspaces) {
       assert.deepEqual(
         Object.keys(workspace.inventory.source_counts).sort(),
@@ -104,6 +114,24 @@ test("review_diff aggregates task workspaces, inventories every source and pagin
     assert.deepEqual(stagedCompatibility.data.analyzed_sources, ["staged", "unstaged", "untracked"]);
     assert.ok(stagedCompatibility.data.inventory.source_counts.unstaged >= 1);
     assert.ok(stagedCompatibility.data.inventory.source_counts.untracked >= 1);
+
+    await writeFile(path.join(workspaceA, "src/chunk-a.txt"), "c\n".repeat(3_000), "utf8");
+    const oversizedTracked = await callTool(runtime.port, sessionId, 71, "review_diff", {
+      workspace_id: workspaceAId
+    });
+    assert.equal(oversizedTracked.data.verdict, "INCOMPLETE");
+    assert.equal(oversizedTracked.data.complete, false);
+    assert.equal(
+      oversizedTracked.data.workspaces.find((workspace) => workspace.workspace_id === workspaceAId)
+        .evidence.unstaged.truncated,
+      true
+    );
+    assert.ok(
+      oversizedTracked.data.inventory.failed_paths.some((item) =>
+        item.path === "src/chunk-a.txt" && item.reason === "diff_output_truncated"
+      )
+    );
+    await writeFile(path.join(workspaceA, "src/chunk-a.txt"), "b\n".repeat(1_200), "utf8");
 
     const largePath = path.join(workspaceA, "large-untracked.txt");
     await writeFile(largePath, "x".repeat(210_000), "utf8");

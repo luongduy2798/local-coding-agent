@@ -127,22 +127,38 @@ Runtime API key nằm ở `.env.local` và chỉ dùng cho local tunnel-client. 
 
 ## ChatGPT Tools
 
-runtime có catalog cố định 36 tool. Sau khi connector hoạt động, hai entry point thường dùng là:
+runtime có catalog cố định 37 tool. Sau khi connector hoạt động, hai entry point thường dùng là:
 
 ```text
 lca_status # mặc định cho `lca` / `call lca`; kiểm tra runtime, catalog, workspace/task và output limits
 lca_input  # chỉ mở Apps SDK widget khi yêu cầu rõ widget/composer/PiP
 ```
 
-`lca_status` trả `catalog_version=8` và `catalog_hash`. Khi catalog thay đổi, hãy refresh connector một lần và mở chat mới; tên tool cũ không còn callable và client stale sẽ nhận lỗi kèm hướng dẫn refresh.
+`lca_status` trả `catalog_version=14` và `catalog_hash`. Khi catalog thay đổi, hãy refresh connector một lần và mở chat mới; tên tool cũ không còn callable và client stale sẽ nhận lỗi kèm hướng dẫn refresh.
 
-Mỗi tool có exact `discovery-group:*` tags để dynamic discovery nạp một nhóm workflow trong một lần. ChatGPT không nên tự nghĩ query như `write`/`edit`, gọi catalog không có query, hoặc fallback sang toàn bộ 36 tool khi group bị thiếu.
+Mỗi tool có exact `discovery-group:*` tags để dynamic discovery nạp một nhóm workflow trong một lần. ChatGPT không nên tự nghĩ query như `write`/`edit`, gọi catalog không có query, hoặc fallback sang toàn bộ 37 tool khi group bị thiếu.
 
-Trước khi dùng tool đọc/sửa/chạy code, mở context bằng `workspace_select` rồi `task_open`. `title` là nhãn UI ngắn. `objective` là metadata tùy chọn, bền vững và hiển thị cho user về kết quả cần đạt cùng constraint riêng của task; không dùng nó làm private reasoning, nơi chứa secret hoặc policy chung. Chỉ truyền title thì objective giữ `null`; thiếu title có thể sinh title từ objective. ChatGPT chọn `complexity_hint` là `quick_edit`, `normal` hoặc `complex`; nếu bỏ qua, runtime dùng `normal`. Session stateful tự bind vào `task_id`; chỉ dùng lại `task_token` khi reconnect/resume. Nếu thiếu hoặc mơ hồ task context, coding tool fail closed thay vì tự chọn repo.
+Trước khi dùng tool đọc/sửa/chạy code trong chat mới, gọi `workspace_list`, truyền `selected_workspace_id` vào `task_open.primary_workspace_id`, rồi giữ `conversation_workspace_token` trả về cho mọi task tiếp theo trong cùng chat. `workspace_select` chỉ đổi workspace mặc định cho conversation tương lai; nó không phải bước bắt buộc trước task hiện tại. `title` là nhãn UI ngắn. `objective` là metadata tùy chọn, bền vững và hiển thị cho user về kết quả cần đạt cùng constraint riêng của task; không dùng nó làm private reasoning, nơi chứa secret hoặc policy chung. Chỉ truyền title thì objective giữ `null`; thiếu title có thể sinh title từ objective. ChatGPT chọn `complexity_hint` là `quick_edit`, `normal` hoặc `complex`; nếu bỏ qua, runtime dùng `normal`. `memory_mode` mặc định là `auto`: quick edit dùng light Memory theo `relevant_paths`, normal/complex dùng full Memory; `skip` chỉ dành cho thay đổi hoàn toàn cơ học và `full` ép lấy context đầy đủ. `include_recent_tasks=true` chỉ dùng cho task tiếp nối rõ ràng. Session stateful tự bind vào `task_id`; chỉ dùng lại `task_token` khi reconnect/resume. Nếu thiếu hoặc mơ hồ task context, coding tool fail closed thay vì tự chọn repo.
 
 ChatGPT là bên quyết định effective profile. LCA chỉ theo dõi các tín hiệu khách quan như số workspace, số discovery call, số path quan sát được và thao tác lặp. Nếu scope có vẻ rộng hơn, response có thể chứa `suggested_profile` và `scope_signal`, nhưng profile không tự đổi. Chỉ khi ChatGPT xác nhận phạm vi thực sự đã thay đổi thì mới gọi `task_reclassify` kèm lý do.
 
 Danh sách catalog và semantics task/multi-workspace: [docs/RUNTIME.md](docs/RUNTIME.md).
+
+## Persistent Workspace Memory
+
+`task_open` trả adaptive `workspace_memory` theo policy đã lưu cùng task. `memory_mode=skip` bỏ qua Memory hoàn toàn. `auto + quick_edit` dùng light mode: chỉ tối đa 2 Memory khớp `relevant_paths` hoặc pinned workspace-wide constraint, tối đa 1 KiB, không gọi semantic model và không đọc recent task. `auto + normal|complex` hoặc `full` dùng full mode: tối đa 8 item và 4 KiB. Recent task mặc định không được nạp; chỉ lấy tối đa 3 bản ghi đã nén khi task truyền `include_recent_tasks=true` và workspace setting cho phép. Đây là context dự án xuyên conversation, không phải raw chat hay private reasoning. Fast path không phát sinh thêm MCP/model round-trip.
+
+Semantic Memory Phase 1 là lớp tùy chọn chỉ dùng trong full mode: worker riêng dùng `Xenova/multilingual-e5-small` q8 để tạo embedding cho explicit memory ở background, lưu vector trong SQLite theo content hash/model và kết hợp semantic similarity với keyword/tag/path, pinned, kind, freshness và confidence. Full mode chỉ chờ tối đa deadline ngắn mặc định 10 ms; model chưa sẵn sàng, lỗi hoặc quá hạn thì dùng ranking deterministic ngay. Lần dùng đầu có thể tải model vào cache runtime; đặt `AGENT_MEMORY_ALLOW_REMOTE_MODELS=0` để chỉ dùng model đã có local.
+
+Memory explicit dùng cho project goal, architecture decision, constraint, known issue, open question, user preference theo workspace và verification result. Mỗi item có lifecycle, freshness, provenance, related paths, revision và optimistic concurrency. Khi `apply_patch` chạm path liên quan, item được đánh dấu `needs_review` hoặc `stale` theo best effort; source mutation vẫn giữ journal/Undo/Reapply riêng.
+
+Khi đóng task, 0 Memory mới là mặc định. Quick edit/normal chỉ được tạo tối đa 1 item mới, complex tối đa 2; tổng cộng tối đa 6 operation, summary tối đa 800 ký tự cùng 8 path/8 tag. Routine edit, task log và tiến độ tạm không được lưu. Accepted updates được ghi vào durable outbox trong cùng transaction đóng task rồi `task_close` trả ngay với `memory_persistence.status=queued`. Worker nền giữ thứ tự, lease/retry/idempotency, rebuild cache một lần cho batch và schedule embedding sau persistence. Restart không làm mất pending job; `task_open` không chờ queue.
+
+Người dùng quản lý memory trong cùng Control Center React trên VS Code, standalone web và JetBrains/JCEF: xem full-mode preview, tìm kiếm/lọc, tạo/sửa, pin, mark current/stale, resolve, archive/restore, retry failed background jobs và delete. Thao tác trực tiếp của người dùng vẫn synchronous; chỉ `task_close.memory_updates` dùng outbox. Archived workspace chỉ cho đọc. Settings Memory enabled/Adaptive auto-load/Allow recent-task context when requested/Local semantic search được quản lý qua UI/HTTP.
+
+Privacy rule: không lưu raw conversation, private chain of thought, command/output, environment, credential, secret hoặc nội dung file chỉ vì agent đã đọc nó. Secret-like content bị từ chối. Raw task/change history vẫn là nguồn audit; memory chỉ là lớp context ngắn, có provenance và quản lý được.
+
+Benchmark dedicated trước adaptive loading đo warm p95 `0,106 ms`, cold p95 `2,929 ms`, payload `3.882 byte`, 4 explicit item + 3 recent task; đây chỉ là baseline lịch sử. Benchmark source hiện có thêm gate light warm p95 `<1 ms`, light payload `≤1 KiB`, tối đa 2 item và không recent/semantic; số đo adaptive mới chưa được công bố trước khi chạy verification.
 
 ## LCA Input: `@` Context và `/` Workflow
 
@@ -228,11 +244,11 @@ Mỗi task khóa một primary workspace và tối đa 8 attached workspaces. At
 
 Kết quả mutation có `change_id`, `task_id`, `workspace_id` và path tương đối. Nhiều lần `apply_patch` trong cùng task được gom thành một change set. `read_file` và từng file đọc thành công qua `read_many` trả SHA-256 `version`; mutation có `expected_version` sai sẽ bị chặn thay vì ghi đè thay đổi bên ngoài.
 
-LCA runtime dùng catalog cố định 36 tool, không đổi theo mode/policy. Các thao tác file, preview và validate được hợp nhất trong `apply_patch`; repo map/symbol trong `workspace_snapshot` và `code_query`; thay đổi profile được xác nhận qua `task_reclassify`; test/lint/build trong `verify_changes`; Figma và notes dùng action trong tool tổng hợp tương ứng.
+LCA runtime dùng catalog cố định 37 tool, không đổi theo mode/policy. Các thao tác file, preview và validate được hợp nhất trong `apply_patch`; repo map/symbol trong `workspace_snapshot` và `code_query`; thay đổi profile được xác nhận qua `task_reclassify`; test/lint/build trong `verify_changes`; Figma và notes dùng action trong tool tổng hợp tương ứng.
 
 `workspace_snapshot` gom repo context; `code_query` truy vấn text, symbol, definition, reference, import và call graph theo fast-first. Runtime có parser structural chạy trong worker, hard-timeout được, cho JavaScript/TypeScript/TSX, Python, Go, Rust, Java/Kotlin, C# và Dart; artifact parser được materialize trong data dir từ manifest đã pin SHA-256. JSON/YAML/Shell dùng structural/lexical fallback. Nếu workspace có `<workspace>/node_modules/typescript`, Language Service project-local sẽ cung cấp semantic sâu hơn cho JavaScript/TypeScript; LCA không tự cài hoặc dùng compiler global/ancestor. Mọi fallback đều trả `engine`, `completeness`, `confidence` và `fallback_reason` rõ ràng. `verify_changes` chỉ trả `PASS` khi tất cả gate bắt buộc đã chạy; gate thiếu/không hỗ trợ hoặc source bị sửa ngoài `apply_patch` trả `INCOMPLETE`.
 
-Trạng thái release được ghi theo số đo, không hiểu “10/10” là không bao giờ sai. Số đo catalog 24.652 byte raw/4.139 byte nén thuộc release 5.0.0 với 35 tool, trước khi thêm `task_reclassify`; catalog 36 tool/version 7 phải được đo lại trước khi dùng làm số liệu phát hành mới. Benchmark cold-builder gần nhất trên 100k file đạt index 9,89 giây, snapshot warm 0,04 ms, query warm p95 0,04 ms, freshness 238,80 ms, RSS sau GC 120,17 MB, cache hai workspace hot 23,46 MB và event-loop p99 11,96 ms; toàn bộ SLA 100k trong benchmark đều pass. Performance fixture đo dispatch p95 0,006 ms và `lca_status` server-total p95 1,3 ms. Xem bằng chứng, phạm vi và các giới hạn semantic còn lại tại [docs/RUNTIME.md](docs/RUNTIME.md#measured-release-status-and-known-limits).
+Trạng thái release được ghi theo số đo, không hiểu “10/10” là không bao giờ sai. Catalog source hiện tại có 37 tool, `catalog_version=14` và hash tên tool `1bb9360cb91fa941`. Số đo trước khi mở rộng schema ở version 9 là 34.942 byte raw/5.487 byte nén tương đương; các version 10–14 chủ động mở rộng Memory schema và task-close outbox contract và model-visible guidance nên catalog sau version 9 phải được đo lại trước khi công bố kích thước chính xác. Release gate hiện dùng trần an toàn rộng 96.000 byte raw/24.000 byte nén, không dùng 35 KB làm mục tiêu ép ngắn mô tả hoặc làm mỏng schema. Benchmark cold-builder gần nhất trên 100k file đạt index 9,89 giây, snapshot warm 0,04 ms, query warm p95 0,04 ms, freshness 238,80 ms, RSS sau GC 120,17 MB, cache hai workspace hot 23,46 MB và event-loop p99 11,96 ms; toàn bộ SLA 100k trong benchmark đều pass. Performance fixture đo dispatch p95 0,006 ms và `lca_status` server-total p95 1,3 ms. Xem bằng chứng, phạm vi và các giới hạn semantic còn lại tại [docs/RUNTIME.md](docs/RUNTIME.md#measured-release-status-and-known-limits).
 
 `run_command`, `run_commands`, `process` và Git có thể làm thay đổi filesystem nhưng không được tuyên bố atomic/undoable. LCA so sánh before/after manifest; nếu shell sửa tracked source, workspace bị đánh dấu `unmanaged_changes` cho đến khi thay đổi được review/adopt.
 
@@ -251,6 +267,15 @@ POST   /changes/:id/undo?workspace_id=<id>&task_id=<id>
 POST   /changes/:id/reapply?workspace_id=<id>&task_id=<id>
 POST   /changes/undo-all?workspace_id=<id>&task_id=<id>
 DELETE /changes?workspace_id=<id>&task_id=<id>
+
+GET    /memory?workspace_id=<id>
+GET    /memory/brief?workspace_id=<id>
+POST   /memory?workspace_id=<id>
+PATCH  /memory/:id?workspace_id=<id>
+POST   /memory/:id/pin|unpin|current|stale|resolve|archive|restore?workspace_id=<id>
+DELETE /memory/:id?workspace_id=<id>
+PATCH  /memory/settings?workspace_id=<id>
+POST   /memory/outbox/retry-failed?workspace_id=<id>
 ```
 
 `/changes`, kể cả SSE `/changes/events`, không phải API public: production request phải đi từ loopback và có `X-LCA-Instance-Nonce` của supervisor. Bearer của MCP tunnel không cấp quyền đọc hoặc mutation companion. Extension dùng flow local tường minh `lca status --json --include-instance-nonce`; output `lca status` thông thường đã redact nonce. Không hard-code, log hoặc chia sẻ nonce.
@@ -281,6 +306,7 @@ lca integrations uninstall vscode
 - **Workspaces** hiển thị toàn bộ registry, đặt default cho task mới, Archive, Restore hoặc Remove permanently.
 - **Tasks** hiển thị `objective` công khai của agent như metadata đầu tiên trong timeline, sau đó là sự kiện vận hành thật: tool đang chạy/duration, kết quả, verification, process và số change/file quan sát được. Task mới nhất mở danh sách call theo mặc định nhưng vẫn có thể thu gọn; trạng thái đang chạy dùng `RotatingDots`. Task còn `open` nhưng đã mất toàn bộ MCP session binding được hiển thị là **Detached**, dừng tăng thời gian và có nút đóng riêng; thao tác này giữ nguyên Review Changes, snapshot và Undo. View không hiển thị `task_plan`, prompt hay private thinking của model.
 - **Changes** giữ review/diff/Undo/Reapply hiện tại; workspace của repo đang mở trong cửa sổ VS Code được chọn và xếp đầu mặc định, các repo registry khác nằm bên dưới. Mỗi lựa chọn dùng SSE riêng và tự quay lại Live sau polling fallback.
+- **Memory** quản lý Persistent Workspace Memory, preview full-mode brief, settings Memory enabled/Adaptive auto-load/Allow recent-task context when requested/Local semantic search, lifecycle/freshness/provenance, related paths và pending/failed task-close jobs. Polling state chỉ mang revision/counts/outbox metrics; nội dung và payload queue không được đưa vào projection. Failed job có thể retry từ UI.
 
 Server đọc audit log xoay vòng tại `<config-root>/data/runtime/audit.log` (hoặc `<AGENT_DATA_DIR>/runtime/audit.log`) và phát một projection chung cho mọi host; client không tự parse log và không tạo activity database riêng. Projection chỉ chứa metadata whitelist, không đưa args, command, output, prompt, token hoặc error content vào webview. Standalone web dùng one-time launch ticket đổi sang cookie `HttpOnly` cùng origin; instance nonce của supervisor không đi vào JavaScript. **Connect current folder** trong IDE đăng ký repo, đặt nó làm global default cho task mới và start LCA khi cần; nó không đổi primary của task đang chạy.
 

@@ -46,7 +46,9 @@ export function createTaskCloseService({
       try {
         const runtime = await getWorkspaceRuntime(workspaceId);
         const baseline = taskWorkspaceBaseline(task, workspaceId);
+        const evidence = await readTaskVerificationEvidence(task.id, workspaceId);
         const currentPlan = await runtime.verification.plan({
+          include: evidence.ok ? evidence.artifact.requested_gates : undefined,
           unmanaged_changes: unmanaged.detected === true && unmanaged.adopted !== true,
           unmanaged_state_unknown: unmanaged.unknown === true,
           transaction_in_doubt: transactionBlocked,
@@ -55,7 +57,6 @@ export function createTaskCloseService({
           require_baseline: true
         });
         const currentState = await captureVerificationWorkspaceState(runtime.workspace, currentPlan.changes);
-        const evidence = await readTaskVerificationEvidence(task.id, workspaceId);
         if (!evidence.ok) {
           reasons.push(evidence.reason);
         } else {

@@ -31,7 +31,9 @@ try {
           build: "node -e \"process.exit(0)\""
         }
       })}\n`,
-      "src/value.js": "export const value = 1;\n"
+      "src/value.js": "export const value = 1;\n",
+      "src/chunk-a.txt": "a\n".repeat(1_200),
+      "src/chunk-b.txt": "a\n".repeat(1_200)
     }
   });
   const secondaryFixture = await createGitFixture(context, {
@@ -62,7 +64,8 @@ try {
       LCA_TEST_TASK_CLOSE_DELAY_TITLE: "Close race",
       LCA_TEST_TASK_CLOSE_DELAY_MS: "400",
       LCA_TEST_TASK_CLOSE_DELAY_READY_PATH: closeDelayReadyPath,
-      LCA_TEST_TASK_CLOSE_CORRUPT_WORKSPACE_TASK: "1"
+      LCA_TEST_TASK_CLOSE_CORRUPT_WORKSPACE_TASK: "1",
+      AGENT_MAX_COMMAND_OUTPUT: "10000"
     }
   });
   const initialized = await rpc(runtime.port, {
@@ -96,6 +99,38 @@ try {
   assert.ok(missingEvidenceClose.data.completion_guard.incomplete_reasons.includes("VERIFICATION_EVIDENCE_MISSING"));
   assert.equal(missingEvidenceClose.data.task.status, "closed");
 
+  const queuedMemoryTask = await openTask(runtime.port, sessionId, 1200, "Queued Memory close");
+  const queuedMemoryClose = await callTool(runtime.port, sessionId, 1201, "task_close", {
+    task_token: queuedMemoryTask.task_token,
+    status: "incomplete",
+    memory_updates: [
+      {
+        kind: "constraint",
+        title: "Queued task-close Memory fixture",
+        summary: "Accepted task-close Memory is durably queued before the close response returns."
+      },
+      {
+        kind: "known_issue",
+        title: "Normal-task extra Memory fixture",
+        summary: "A normal task cannot create a second new Memory item during one close."
+      }
+    ]
+  });
+  assert.equal(queuedMemoryClose.data.ok, true, JSON.stringify(queuedMemoryClose.data));
+  assert.equal(queuedMemoryClose.data.memory_persistence.status, "queued");
+  assert.equal(queuedMemoryClose.data.memory_persistence.accepted_updates, 1);
+  assert.equal(queuedMemoryClose.data.memory_persistence.dropped_updates, 1);
+  assert.deepEqual(
+    queuedMemoryClose.data.memory_persistence.drop_reasons,
+    ["new_memory_limit"]
+  );
+  await waitForMemory(
+    runtime.port,
+    primaryWorkspaceId,
+    context.runId,
+    "Queued task-close Memory fixture"
+  );
+
   const verifiedTask = await openTask(runtime.port, sessionId, 4, "Verified close");
   const cleanVerification = await callTool(runtime.port, sessionId, 5, "verify_changes", {
     task_token: verifiedTask.task_token
@@ -109,6 +144,73 @@ try {
   assert.equal(cleanClose.data.status, "complete");
   assert.equal(cleanClose.data.auto_downgraded, false);
   assert.equal(cleanClose.data.task.status, "closed");
+
+  const chunkedReviewTask = await openTask(runtime.port, sessionId, 1300, "Chunked review close");
+  const chunkedPatch = await callTool(runtime.port, sessionId, 1301, "apply_patch", {
+    task_token: chunkedReviewTask.task_token,
+    operations: [
+      {
+        op: "update",
+        path: "src/chunk-a.txt",
+        edits: [{ old_text: "a\n".repeat(1_200), new_text: "b\n".repeat(1_200) }]
+      },
+      {
+        op: "update",
+        path: "src/chunk-b.txt",
+        edits: [{ old_text: "a\n".repeat(1_200), new_text: "b\n".repeat(1_200) }]
+      }
+    ]
+  });
+  assert.equal(chunkedPatch.data.ok, true, JSON.stringify(chunkedPatch.data));
+  const chunkedVerification = await callTool(runtime.port, sessionId, 1302, "verify_changes", {
+    task_token: chunkedReviewTask.task_token
+  });
+  assert.equal(chunkedVerification.data.status, "PASS", JSON.stringify(chunkedVerification.data));
+  assert.equal(chunkedVerification.data.review.evidence.unstaged.strategy, "path_chunks");
+  assert.equal(chunkedVerification.data.review.evidence.unstaged.complete, true);
+  const chunkedClose = await callTool(runtime.port, sessionId, 1303, "task_close", {
+    task_token: chunkedReviewTask.task_token
+  });
+  assert.equal(chunkedClose.data.ok, true, JSON.stringify(chunkedClose.data));
+  assert.equal(chunkedClose.data.status, "complete");
+
+  const scopedVerificationTask = await openTask(
+    runtime.port,
+    sessionId,
+    1100,
+    "Scoped changed-test close"
+  );
+  await callTool(runtime.port, sessionId, 1101, "apply_patch", {
+    task_token: scopedVerificationTask.task_token,
+    operations: [{
+      op: "create",
+      path: "src/scoped-verification.js",
+      content: "export const scopedVerification = 1;\n"
+    }]
+  });
+  const scopedVerification = await callTool(runtime.port, sessionId, 1102, "run_changed_tests", {
+    task_token: scopedVerificationTask.task_token
+  });
+  assert.equal(scopedVerification.data.status, "PASS", JSON.stringify(scopedVerification.data));
+  assert.deepEqual(scopedVerification.data.verification.requested_gates, ["test"]);
+  await writeFile(
+    path.join(fixture.root, "src/scoped-verification.js"),
+    "export const scopedVerification = 2;\n",
+    "utf8"
+  );
+  const scopedStaleClose = await callTool(runtime.port, sessionId, 1103, "task_close", {
+    task_token: scopedVerificationTask.task_token
+  });
+  assert.equal(scopedStaleClose.data.ok, false);
+  assert.ok(scopedStaleClose.data.incomplete_reasons.includes("VERIFICATION_EVIDENCE_STALE"));
+  assert.equal((await callTool(runtime.port, sessionId, 1104, "run_changed_tests", {
+    task_token: scopedVerificationTask.task_token
+  })).data.status, "PASS");
+  const scopedClose = await callTool(runtime.port, sessionId, 1105, "task_close", {
+    task_token: scopedVerificationTask.task_token
+  });
+  assert.equal(scopedClose.data.ok, true, JSON.stringify(scopedClose.data));
+  assert.equal(scopedClose.data.status, "complete");
 
   const closeRaceTask = await openTask(runtime.port, sessionId, 69, "Close race");
   assert.equal((await callTool(runtime.port, sessionId, 70, "verify_changes", {
@@ -458,6 +560,22 @@ async function callToolExpectError(port, currentSessionId, id, name, args) {
   const text = result?.content?.find((item) => item?.type === "text")?.text || "";
   assert.equal(result?.isError, true, `${name} unexpectedly succeeded: ${text}`);
   return JSON.parse(text);
+}
+
+async function waitForMemory(port, workspaceId, nonce, title, timeoutMs = 5_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const response = await fetch(
+      `http://127.0.0.1:${port}/memory?workspace_id=${encodeURIComponent(workspaceId)}`,
+      { headers: { "x-lca-instance-nonce": nonce } }
+    );
+    if (response.ok) {
+      const body = await response.json();
+      if (body.items?.some((item) => item.title === title)) return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error(`Timed out waiting for queued Memory: ${title}`);
 }
 
 async function waitForFile(filePath, timeoutMs = 3_000) {

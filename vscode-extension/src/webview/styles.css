@@ -1899,6 +1899,168 @@ button {
   height: 28px;
 }
 
+.memory-route {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.memory-route-toolbar,
+.memory-heading,
+.memory-panel-heading,
+.memory-editor-actions,
+.memory-card-head,
+.memory-card-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.memory-heading h2,
+.memory-panel h3,
+.memory-editor h3,
+.memory-card h3 {
+  margin: 0;
+}
+
+.memory-heading p,
+.memory-panel-heading p {
+  margin: 4px 0 0;
+  color: var(--vscode-descriptionForeground);
+}
+
+.memory-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.memory-metric,
+.memory-panel,
+.memory-editor,
+.memory-card,
+.memory-empty,
+.memory-loading {
+  border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--vscode-editor-background) 70%, transparent);
+}
+
+.memory-metric {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  padding: 9px;
+}
+
+.memory-metric strong { font-size: 17px; }
+.memory-metric span { color: var(--vscode-descriptionForeground); font-size: 9px; }
+.memory-panel, .memory-editor, .memory-card { padding: 11px; }
+.memory-loading, .memory-empty { padding: 18px; color: var(--vscode-descriptionForeground); text-align: center; }
+
+.memory-settings {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  margin-top: 10px;
+}
+
+.memory-toggle,
+.memory-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--vscode-foreground);
+  font-size: 10px;
+}
+
+.memory-brief {
+  max-height: 210px;
+  margin: 10px 0 0;
+  padding: 10px;
+  overflow: auto;
+  border: 1px solid var(--vscode-input-border, var(--vscode-widget-border));
+  border-radius: 6px;
+  color: var(--vscode-foreground);
+  background: var(--vscode-input-background);
+  white-space: pre-wrap;
+  font: 10px/1.55 var(--vscode-editor-font-family);
+}
+
+.memory-editor-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px;
+  margin-top: 10px;
+}
+
+.memory-editor-grid label {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--vscode-descriptionForeground);
+  font-size: 9px;
+}
+
+.memory-editor-grid .wide { grid-column: 1 / -1; }
+.memory-editor-grid .memory-checkbox { flex-direction: row; align-self: end; }
+.memory-editor input,
+.memory-editor textarea,
+.memory-editor select,
+.memory-filters input,
+.memory-filters select {
+  width: 100%;
+  min-width: 0;
+  padding: 7px;
+  border: 1px solid var(--vscode-input-border, var(--vscode-widget-border));
+  border-radius: 5px;
+  color: var(--vscode-input-foreground);
+  background: var(--vscode-input-background);
+  font: inherit;
+}
+
+.memory-editor-actions { justify-content: flex-end; margin-top: 10px; }
+.memory-filters { display: grid; grid-template-columns: minmax(130px, 1fr) repeat(3, minmax(100px, .45fr)); gap: 7px; }
+.memory-list { display: flex; flex-direction: column; gap: 8px; }
+.memory-card { border-left: 3px solid var(--vscode-focusBorder); }
+.memory-card.freshness-needs_review { border-left-color: var(--vscode-editorWarning-foreground); }
+.memory-card.freshness-stale { border-left-color: var(--vscode-errorForeground); }
+.memory-card h3 { margin-top: 6px; font-size: 12px; }
+.memory-card > p { margin: 8px 0; line-height: 1.5; white-space: pre-wrap; }
+.memory-card-badges, .memory-tags, .memory-paths { display: flex; flex-wrap: wrap; gap: 5px; }
+.memory-card-badges span, .memory-tags span {
+  padding: 2px 5px;
+  border-radius: 999px;
+  color: var(--vscode-descriptionForeground);
+  background: var(--vscode-badge-background);
+  font-size: 8px;
+  text-transform: uppercase;
+}
+.memory-paths button, .memory-card-actions button {
+  padding: 4px 6px;
+  border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
+  border-radius: 5px;
+  color: var(--vscode-foreground);
+  background: transparent;
+  cursor: pointer;
+  font-size: 9px;
+}
+.memory-paths button { color: var(--vscode-textLink-foreground); font-family: var(--vscode-editor-font-family); }
+.memory-card-actions { justify-content: flex-start; flex-wrap: wrap; margin-top: 9px; }
+.memory-card-actions button:hover, .memory-paths button:hover { background: var(--vscode-toolbar-hoverBackground); }
+.memory-card-actions button.danger { color: var(--vscode-errorForeground); margin-left: auto; }
+.memory-card-actions button:disabled { opacity: .5; cursor: default; }
+.memory-provenance { margin-top: 8px; color: var(--vscode-descriptionForeground); font-size: 8px; }
+.memory-revision { color: var(--vscode-descriptionForeground); font: 9px var(--vscode-editor-font-family); }
+
+@media (max-width: 700px) {
+  .memory-filters { grid-template-columns: 1fr 1fr; }
+  .memory-editor-grid { grid-template-columns: 1fr; }
+  .memory-editor-grid .wide { grid-column: auto; }
+}
+
 @media (max-width: 520px) {
   .workspace-row {
     grid-template-columns: minmax(0, 1fr);

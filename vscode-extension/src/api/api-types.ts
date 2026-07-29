@@ -38,6 +38,7 @@ export interface WorkspaceDescriptor {
 }
 
 export type TaskComplexityProfile = "quick_edit" | "normal" | "complex";
+export type TaskMemoryMode = "auto" | "skip" | "full";
 
 export interface TaskBlockerDescriptor {
   code?: "missing_input" | "missing_file" | "workspace_mismatch" | "permission_denied" | "tool_unavailable" | "repeated_no_progress" | "command_timeout" | "unknown";
@@ -93,6 +94,9 @@ export interface TaskDescriptor {
   id?: string;
   title?: string;
   objective?: string | null;
+  memory_mode?: TaskMemoryMode;
+  include_recent_tasks?: boolean;
+  relevant_paths?: Array<{ workspace_id: string; path: string }>;
   requested_profile?: TaskComplexityProfile | null;
   effective_profile?: TaskComplexityProfile;
   profile_confidence?: number;
@@ -195,6 +199,109 @@ export interface HealthResponse {
   };
   revision?: ApiRevision;
   change_events_endpoint?: string;
+}
+
+export type WorkspaceMemoryKind =
+  | "project_goal"
+  | "architecture_decision"
+  | "constraint"
+  | "known_issue"
+  | "open_question"
+  | "user_preference"
+  | "verification_result";
+
+export type WorkspaceMemoryLifecycle = "active" | "resolved" | "superseded" | "archived";
+export type WorkspaceMemoryFreshness = "current" | "needs_review" | "stale";
+
+export interface WorkspaceMemoryItem {
+  id: string;
+  workspace_id: string;
+  kind: WorkspaceMemoryKind;
+  title: string;
+  summary: string;
+  lifecycle: WorkspaceMemoryLifecycle;
+  freshness: WorkspaceMemoryFreshness;
+  pinned: boolean;
+  origin: "user" | "model" | "system";
+  confidence: number;
+  source_task_id: string | null;
+  source_head: string | null;
+  supersedes_id: string | null;
+  revision: number;
+  content_hash: string;
+  created_at: string;
+  updated_at: string;
+  archived_at: string | null;
+  paths: string[];
+  tags: string[];
+}
+
+export interface WorkspaceMemorySettings {
+  enabled: boolean;
+  auto_load: boolean;
+  include_recent_tasks: boolean;
+  semantic_search: boolean;
+}
+
+export interface WorkspaceMemorySemanticStatus {
+  enabled: boolean;
+  state: string;
+  ready: boolean;
+  model_id?: string;
+  dtype?: string;
+  deadline_ms?: number;
+  allow_remote_models?: boolean;
+  in_flight?: number;
+  last_error_code?: string | null;
+  indexed_items: number;
+  current_items: number;
+  metrics?: Record<string, number>;
+}
+
+export interface WorkspaceMemoryCounts {
+  total: number;
+  active: number;
+  pinned: number;
+  needs_review: number;
+}
+
+export interface WorkspaceMemoryOutboxStatus {
+  pending: number;
+  processing: number;
+  retrying: number;
+  failed: number;
+  last_completed_at: string | null;
+}
+
+export interface WorkspaceMemorySnapshot {
+  workspace_id: string;
+  revision: number;
+  settings: WorkspaceMemorySettings;
+  semantic?: WorkspaceMemorySemanticStatus;
+  outbox?: WorkspaceMemoryOutboxStatus;
+  counts: WorkspaceMemoryCounts;
+  brief: string;
+  auto_load_payload?: unknown;
+  items: WorkspaceMemoryItem[];
+  read_only?: boolean;
+}
+
+export interface WorkspaceMemoryInput {
+  [key: string]: unknown;
+  kind?: WorkspaceMemoryKind;
+  title?: string;
+  summary?: string;
+  lifecycle?: WorkspaceMemoryLifecycle;
+  freshness?: WorkspaceMemoryFreshness;
+  pinned?: boolean;
+  confidence?: number;
+  paths?: string[];
+  tags?: string[];
+  expected_revision?: number;
+  enabled?: boolean;
+  auto_load?: boolean;
+  include_recent_tasks?: boolean;
+  semantic_search?: boolean;
 }
 
 export interface LineChangeStats {

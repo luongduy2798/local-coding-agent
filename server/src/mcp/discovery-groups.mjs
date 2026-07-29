@@ -31,6 +31,7 @@ export const DISCOVERY_GROUPS = Object.freeze({
     "git",
     "todo_scan",
     "notes",
+    "workspace_memory",
     "task_checkpoint",
     "task_close"
   ]),
@@ -53,6 +54,7 @@ export const DISCOVERY_GROUPS = Object.freeze({
     "task_plan",
     "task_state",
     "notes",
+    "workspace_memory",
     "task_checkpoint",
     "task_close"
   ]),
@@ -78,6 +80,7 @@ export const DISCOVERY_GROUPS = Object.freeze({
     "task_state",
     "skills",
     "notes",
+    "workspace_memory",
     "task_checkpoint",
     "task_close"
   ]),
@@ -116,7 +119,8 @@ export const DISCOVERY_GROUPS = Object.freeze({
     "workspace_detach",
     "task_open",
     "task_close",
-    "index_control"
+    "index_control",
+    "workspace_memory"
   ]),
   "change-management": Object.freeze([
     "workspace_list",
@@ -169,9 +173,17 @@ export function withDiscoveryGroups(name, definition) {
   };
 }
 
+export const CONNECTOR_APP_DESCRIPTION = "This app connects ChatGPT to the Local Coding Agent running on the computer associated with this app. It supports task-scoped repository inspection, code changes, journaled review, undo, redo, verification, persistent workspace memory, and local process execution.";
+
+export const CONNECTOR_ENTRYPOINT_INSTRUCTIONS = "ENTRYPOINT: a bare `lca` or `call lca` request means `lca_status`. Use `lca_input` only when the user explicitly requests the widget, composer, PiP, `@` context, or `/` workflow.";
+
+export const CONNECTOR_MEMORY_INSTRUCTIONS = "PERSISTENT MEMORY: new `task_open` calls default to `memory_mode=auto`. `quick_edit` receives light path-aware Memory with no semantic query or recent-task lookup; normal/complex tasks receive full bounded retrieval. Use `memory_mode=skip` only for fully mechanical work and `memory_mode=full` when complete durable context is required. Pass `relevant_paths` for known quick-edit targets. Request `include_recent_tasks=true` only for explicit continuation work; the workspace setting must also permit it. Do not call `workspace_memory` as a mandatory startup step when the returned brief is sufficient. Never store raw chat, private reasoning, prompts, credentials, secrets, environment values, command output, or copied file contents.";
+
 export function discoveryRoutingInstructions() {
   return [
-    "This app connects ChatGPT to the Local Coding Agent running on the computer associated with this app. It supports task-scoped repository work with journaled changes, review, undo, and redo.",
+    CONNECTOR_APP_DESCRIPTION,
+    CONNECTOR_ENTRYPOINT_INSTRUCTIONS,
+    CONNECTOR_MEMORY_INSTRUCTIONS,
     "DISCOVERY ROUTING: when tools for the currently selected Local Coding Agent app are loaded dynamically through api_tool.list_resources, use that app's resource path and choose exactly one initial exact query from the routing table below.",
     "File create/update/delete/rename with a known target: discovery-group:task-mutation.",
     "Repository inspection without modification: discovery-group:task-investigation.",

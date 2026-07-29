@@ -1,4 +1,8 @@
-import type { ApiRevision, ChangeRecord } from "../api/api-types.js";
+import type {
+  ApiRevision,
+  ChangeRecord,
+  WorkspaceMemorySnapshot,
+} from "../api/api-types.js";
 import type { ControlStateView } from "./control-center.js";
 
 export type ControlCenterHostKind = "vscode" | "jetbrains" | "browser";
@@ -8,6 +12,7 @@ export interface ControlCenterHostCapabilities {
   workspaceManagement: boolean;
   taskManagement: boolean;
   changeMutation: boolean;
+  memoryManagement: boolean;
   nativeOpenFile: boolean;
   nativeDiff: boolean;
   secretStorage: boolean;
@@ -54,6 +59,18 @@ export interface ControlCenterViewState {
   taskOptions: TaskOptionState[];
   connection?: SerializableConnectionState;
   changes: ChangeRecord[];
+  memorySummary?: {
+    workspace_id: string;
+    revision: number;
+    enabled: boolean;
+    auto_load: boolean;
+    include_recent_tasks: boolean;
+    semantic_search: boolean;
+    counts: { total: number; active: number; pinned: number; needs_review: number };
+    outbox?: { pending: number; processing: number; retrying: number; failed: number; last_completed_at: string | null };
+    read_only?: boolean;
+  } | null;
+  memory?: WorkspaceMemoryViewState;
   control: ControlStateView;
   host: {
     kind: ControlCenterHostKind;
@@ -61,12 +78,19 @@ export interface ControlCenterViewState {
   };
 }
 
+export interface WorkspaceMemoryViewState extends WorkspaceMemorySnapshot {
+  loading: boolean;
+  error?: string;
+}
+
 export interface ControlCenterRequest {
   type: string;
   changeId?: string;
+  memoryId?: string;
   path?: string;
   workspaceId?: string;
   value?: string;
+  payload?: Record<string, unknown>;
   requestId?: string;
   revision?: number;
 }
@@ -82,6 +106,7 @@ export const DEFAULT_HOST_CAPABILITIES: Record<ControlCenterHostKind, ControlCen
     workspaceManagement: true,
     taskManagement: true,
     changeMutation: true,
+    memoryManagement: true,
     nativeOpenFile: true,
     nativeDiff: true,
     secretStorage: true,
@@ -91,6 +116,7 @@ export const DEFAULT_HOST_CAPABILITIES: Record<ControlCenterHostKind, ControlCen
     workspaceManagement: false,
     taskManagement: true,
     changeMutation: true,
+    memoryManagement: true,
     nativeOpenFile: false,
     nativeDiff: false,
     secretStorage: false,
@@ -100,6 +126,7 @@ export const DEFAULT_HOST_CAPABILITIES: Record<ControlCenterHostKind, ControlCen
     workspaceManagement: false,
     taskManagement: true,
     changeMutation: true,
+    memoryManagement: true,
     nativeOpenFile: false,
     nativeDiff: false,
     secretStorage: false,

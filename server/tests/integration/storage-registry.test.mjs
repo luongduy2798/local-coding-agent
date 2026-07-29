@@ -18,10 +18,12 @@ import {
 } from "../helpers/test-guard.mjs";
 import {
   isNodeVersionSupported,
+  openRegistryDatabase,
   openWorkspaceDatabase,
   probeSqliteCapability,
   REGISTRY_SCHEMA_VERSION,
-  SqliteWorkerDatabase
+  SqliteWorkerDatabase,
+  WORKSPACE_SCHEMA_VERSION
 } from "../../src/storage/database.mjs";
 import {
   WorkspaceRegistry,
@@ -141,7 +143,7 @@ try {
   );
   await schemaV1.close();
   const migratedWorkspace = await openWorkspaceDatabase({ databasePath: migrationPath });
-  assert.equal((await migratedWorkspace.health()).schemaVersion, 2);
+  assert.equal((await migratedWorkspace.health()).schemaVersion, WORKSPACE_SCHEMA_VERSION);
   assert.equal(
     (await migratedWorkspace.get("SELECT value FROM legacy_marker WHERE id = ?", ["before-v2"]))?.value,
     "preserved"
@@ -151,6 +153,23 @@ try {
       "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'notes'"
     ))?.name,
     "notes"
+  );
+  assert.equal(
+    (await migratedWorkspace.get(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'workspace_memory_items'"
+    ))?.name,
+    "workspace_memory_items"
+  );
+  assert.equal(
+    (await migratedWorkspace.get(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'workspace_memory_embeddings'"
+    ))?.name,
+    "workspace_memory_embeddings"
+  );
+  assert.ok(
+    (await migratedWorkspace.all("PRAGMA table_info(workspace_memory_meta)"))
+      .some((column) => column.name === "semantic_search"),
+    "workspace schema migration must add the semantic_search setting"
   );
   await migratedWorkspace.close();
 
@@ -164,6 +183,16 @@ try {
   assert.equal(registryHealth.journalMode.toLowerCase(), "wal");
   assert.equal(registryHealth.foreignKeys, 1);
   assert.equal(registryHealth.busyTimeout, 5_000);
+  const registrySchemaProbe = await openRegistryDatabase({
+    databasePath: registry.databasePath
+  });
+  const taskRouterColumns = new Set((await registrySchemaProbe.all(
+    "PRAGMA table_info(task_router_tasks)"
+  )).map((column) => column.name));
+  assert.equal(taskRouterColumns.has("memory_mode"), true);
+  assert.equal(taskRouterColumns.has("include_recent_tasks"), true);
+  assert.equal(taskRouterColumns.has("relevant_paths_json"), true);
+  await registrySchemaProbe.close();
 
   const transactionCreatedAt = new Date().toISOString();
   const preparingTransaction = await registry.upsertTransactionState({
@@ -265,7 +294,7 @@ try {
 
   const workspaceDbB = await registry.openWorkspace(registeredB.workspace.id);
   const workspaceHealth = await workspaceDbB.health();
-  assert.equal(workspaceHealth.schemaVersion, 2);
+  assert.equal(workspaceHealth.schemaVersion, WORKSPACE_SCHEMA_VERSION);
   assert.equal(workspaceHealth.journalMode.toLowerCase(), "wal");
   assert.equal(workspaceHealth.foreignKeys, 1);
   assert.equal(workspaceHealth.busyTimeout, 5_000);

@@ -16,6 +16,7 @@ export function createApplicationHttpServer({
   catalogHash,
   catalogVersion,
   changeRoutes,
+  memoryRoutes,
   configId,
   controlCenterUiDir,
   getPrimaryWorkspaceId,
@@ -47,6 +48,7 @@ export function createApplicationHttpServer({
   const controlRoutes = createControlCenterRoutes({
     auditPath,
     changeRoutes,
+    memoryRoutes,
     controlOrigin,
     getHealthDetails: healthDetails,
     readJsonBody,
@@ -99,6 +101,10 @@ export function createApplicationHttpServer({
       ) {
         if (!checkCompanionAuth(req)) return sendJson(res, 401, { error: "unauthorized" });
         return await changeRoutes.handle(req, res, url);
+      }
+      if (url.pathname === "/memory" || url.pathname.startsWith("/memory/")) {
+        if (!checkCompanionAuth(req)) return sendJson(res, 401, { error: "unauthorized" });
+        return await memoryRoutes.handle(req, res, url);
       }
       if (url.pathname === "/mcp") {
         if (!checkAuth(req)) {

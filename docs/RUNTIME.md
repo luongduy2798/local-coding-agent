@@ -39,13 +39,13 @@ Progress should be observable at meaningful phase transitions or blockers, witho
 - Node.js `>=22.13.0` is required. SQLite runs through storage workers rather than doing synchronous database work on the MCP event loop.
 - Runtime state lives outside the repository by default, beside the CLI config: `~/Library/Application Support/LocalCodingAgent/data/runtime` on macOS, `%APPDATA%\LocalCodingAgent\data\runtime` on Windows, and `${XDG_CONFIG_HOME:-~/.config}/LocalCodingAgent/data/runtime` on Linux. An explicit `AGENT_DATA_DIR` uses `<AGENT_DATA_DIR>/runtime`.
 - `registry.sqlite` stores workspace registration/selection, task/session bindings, detached/closed lifecycle metadata, and the durable cross-workspace transaction coordinator view.
-- Each workspace has an isolated `state.sqlite` and change-journal storage keyed by its workspace ID; durable patch intents and locks live in the transaction namespace.
+- Each workspace has an isolated `state.sqlite` and change-journal storage keyed by its workspace ID; `state.sqlite` also stores explicit Persistent Workspace Memory, settings, provenance, freshness, revisions, and privacy-safe memory events. Durable patch intents and locks live in the transaction namespace.
 - SQLite is opened with WAL, foreign keys, a busy timeout, transactional migrations, and integrity checks.
 - If only a legacy `data/v5` directory exists, startup copies it transactionally into `data/runtime`, verifies it, activates the copy, and retains the source as a backup. If both directories exist without a valid activation marker, startup fails closed instead of merging them.
 
 Do not edit SQLite files while LCA is running. Index data can be rebuilt with `index_control`; task, journal, and transaction data should be treated as durable state.
 
-## Fixed 36-tool catalog
+## Fixed 37-tool catalog
 
 The runtime always publishes the same model-visible catalog:
 
@@ -64,10 +64,12 @@ apply_patch, change_history, git, run_command, run_commands, process,
 run_changed_tests, verify_changes, review_diff, security_scan, todo_scan
 
 Utilities/integration
-skills, notes, figma, lca_input
+skills, notes, workspace_memory, figma, lca_input
 ```
 
-The catalog does not change when mode or policy changes. Legacy tool names are not registered or callable; stale clients receive an unknown-tool/catalog-refresh error. `lca_status` reports `catalog_version=8` and `catalog_hash`.
+The catalog does not change when mode or policy changes. Legacy tool names are not registered or callable; stale clients receive an unknown-tool/catalog-refresh error. `lca_status` reports `catalog_version=14` and `catalog_hash` after the updated runtime is restarted.
+
+Catalog size is guarded by broad transport safety ceilings—96,000 raw bytes and 24,000 compressed-equivalent bytes—not by a schema-minification target. Tool descriptions, typed enums, field constraints, and argument guidance must not be shortened merely to stay near the former 35 KB measurement. Runtime catalog tests also assert that `workspace_memory` and `task_close.memory_updates` continue to publish their supported actions and typed memory fields.
 
 After a catalog upgrade:
 
@@ -106,7 +108,7 @@ workspace_select(workspace_id)
 task_open(primary_workspace_id, attached_workspace_ids[])
 ```
 
-`task_open` accepts an optional short `title` for UI display, an optional durable and user-visible `objective` describing the intended result and task-specific constraints, and a model-selected `complexity_hint` (`quick_edit`, `normal`, or `complex`). Objective is task metadata, not private reasoning or an instruction channel for LCA; it must not contain secrets, unrelated conversation text, or general agent policy. Providing only title leaves objective `null`; when title is omitted, it may be derived from objective. If the model omits the complexity hint, the effective profile defaults to `normal`.
+`task_open` accepts an optional short `title`, durable user-visible `objective`, model-selected `complexity_hint` (`quick_edit`, `normal`, or `complex`), task Memory policy `memory_mode` (`auto`, `skip`, or `full`), optional `relevant_paths`, and `include_recent_tasks`. Objective is task metadata, not private reasoning or an instruction channel for LCA. `memory_mode` defaults to `auto`: quick edits resolve to light retrieval, while normal/complex tasks resolve to full retrieval. `skip` is for fully mechanical work; `full` forces complete bounded retrieval. Recent tasks default off and should be requested only for explicit continuation work. Policy is persisted with the task and retained across resume/reclassification.
 
 Session bindings are runtime-scoped. Startup clears bindings left by an earlier process and marks still-open tasks detached at their last durable update. Removing one of several bindings keeps the task active; only removal of the final binding sets `detached_at`. Resuming by task token clears detached state. The Control Center may close a detached task through a guarded HTTP action only when no process or incomplete patch transaction remains; this closes the routing task but deliberately preserves Review Changes journals and snapshots.
 
@@ -116,9 +118,32 @@ Session bindings are runtime-scoped. Startup clears bindings left by an earlier 
 - a secret `task_token` for reconnect/resume;
 - the primary workspace and attached workspace IDs;
 - the selected effective profile and advisory orchestration state;
+- persisted Memory mode, recent-task request, and relevance paths;
 - base Git/dirty state and workspace-set version.
 
 An MCP session binds to its task automatically. Pass `task_token` again only after reconnecting or when using the stateless compatibility path. Missing or ambiguous task context fails closed.
+
+## Persistent Workspace Memory
+
+Persistent Workspace Memory is durable, user-managed project context across conversations. It is not a transcript, hidden reasoning store, replacement for raw task/change history, or permission to skip task lifecycle. Raw task/change journals remain the audit source; memory is a bounded semantic layer derived only from explicit user/model updates plus deterministic recent closed-task metadata.
+
+The primary fast path is integrated into `task_open` and is adaptive. `memory_mode=skip` bypasses the Memory service. `auto + quick_edit` resolves to light mode: cached path-aware retrieval only, at most two items and 1 KiB, no semantic query, no embedding scheduling from the task-open path, and no recent-task query. `auto + normal|complex` and explicit `full` use full retrieval with at most eight items and 4 KiB. Recent tasks are opt-in per task and additionally gated by the workspace setting; when allowed, at most three compact records share a separate 800-byte budget and durable Memory is fitted first. Loading adds zero MCP/model round-trips and performs no Git command, filesystem scan, code-graph query, or full history read. Memory failure is isolated: task opening still succeeds with an unavailable code.
+
+Semantic Memory Phase 1 optionally runs `Xenova/multilingual-e5-small` q8 in an isolated worker thread for full retrieval only. Explicit memory passages are embedded after persistence in a serialized background queue and stored in `state.sqlite` as model-specific rows guarded by the current content hash. At `task_open`, one title/objective query embedding is accepted only within `AGENT_MEMORY_SEMANTIC_DEADLINE_MS` (10 ms by default); unavailable, loading, failed, busy, or late inference returns immediately to deterministic lexical/path ranking. Semantic similarity is only one bounded ranking signal and cannot bypass pinned/kind/freshness/confidence/path rules. The model never sees vectors, and no raw chat, tool output, source content, or private reasoning is embedded.
+
+Runtime controls are `AGENT_MEMORY_SEMANTIC=0|1`, `AGENT_MEMORY_EMBEDDING_MODEL`, `AGENT_MEMORY_EMBEDDING_DTYPE`, `AGENT_MEMORY_ALLOW_REMOTE_MODELS=0|1`, `AGENT_MEMORY_SEMANTIC_DEADLINE_MS`, `AGENT_MEMORY_EMBEDDING_PRELOAD_DELAY_MS`, `AGENT_MEMORY_EMBEDDING_MAX_PENDING`, and `AGENT_MEMORY_EMBEDDING_WORKER_MB`. Test runtimes leave the real model disabled unless explicitly enabled. A first production run may populate the local Transformers cache; remote model loading can be disabled after provisioning.
+
+Explicit kinds are `project_goal`, `architecture_decision`, `constraint`, `known_issue`, `open_question`, `user_preference`, and `verification_result`. Items carry lifecycle (`active`, `resolved`, `superseded`, `archived`), freshness (`current`, `needs_review`, `stale`), pinned state, confidence, related paths/tags, source task/head, content hash, and optimistic item revision. Managed source changes update related freshness best-effort without blocking or replacing the source journal.
+
+Only public structured context may be stored. The service rejects credential-like values and never ingests raw chat, private chain of thought, tool arguments, command text/output, environment variables, arbitrary error bodies, or file contents merely because they were read. Memory events keep operation/hash metadata rather than hidden copies of deleted content.
+
+Task-close Memory persistence uses a durable registry outbox rather than awaiting every workspace write. The model defaults to zero updates and sends only long-lived project goals, decisions, constraints, unresolved issues/questions, workspace-specific preferences, or meaningful verification results. Quick/normal tasks may create at most one new item and complex tasks at most two; one close accepts at most six operations, with 800-character summaries and at most eight paths/tags per item. Routine edits, task logs and temporary progress belong to journals/checkpoints/recent-task metadata instead.
+
+Accepted updates are compacted and assigned stable IDs before `TaskRouter.closeTask`. Outbox rows are inserted in the same `registry.sqlite` transaction that changes task status and removes session bindings, so a successful close cannot lose its accepted Memory intent. The response reports `memory_persistence.status=queued` after durable enqueue; it does not wait for workspace writes, cache rebuilds or embeddings. A serialized background worker claims jobs with leases, reclaims expired leases after restart, retries transient storage failures with bounded backoff, replays idempotently, preserves per-queue order, rebuilds the bounded Memory cache once per workspace batch, and then schedules embeddings. Completed payloads are cleared; failed compact payloads remain local for explicit retry. `task_open` never flushes or waits for pending jobs.
+
+Control Center uses one shared React/data model across VS Code, standalone browser, and JetBrains/JCEF. Users can preview the full-mode durable brief (light/skip output depends on each task), search/filter, create/edit, pin/unpin, mark current/stale, resolve, archive/restore, retry failed outbox jobs, delete, inspect provenance, and navigate related paths where the host supports it. Direct user mutations remain synchronous. Archived workspace memory is read-only. Polling state exposes only memory revision/counts/settings and outbox counts; full Memory content is lazy-loaded and queue payloads are not exposed.
+
+The pre-adaptive dedicated benchmark on 2026-07-27 measured warm p50/p95/p99 `0.092/0.106/0.146 ms`, cold p50/p95 `0.456/2.929 ms`, and a `3,882`-byte full payload containing four explicit items plus three recent tasks. It remains a historical lexical baseline. The benchmark source now adds light-mode gates (warm p95 below 1 ms, payload at most 1 KiB, at most two items, no recent tasks or semantic use). Replacement adaptive measurements must not be published until verification is run.
 
 A task has exactly one primary workspace and at most eight attached workspaces. `workspace_attach` and `workspace_detach` are allowed only before the first mutation. The first mutation freezes the workspace set; close the task and open another one if its workspace scope must change.
 
@@ -179,7 +204,7 @@ Both commands avoid destructive Git cleanup by default. Recovery never passes Gi
 
 ## Measured release status and known limits
 
-The local release gates on 2026-07-18 cover catalog/session, storage, task isolation, cross-workspace transaction, task-close recovery, shell-mutation detection, journal, coding intelligence, agent, performance, hardening, Figma, security, CLI/supervisor, and VS Code extension checks. The eval suite passes 25/25 golden assertions. CLI passes 20/20. The measured catalog figures—35 tools, 24,652 bytes raw, 4,139 bytes with equivalent compression, and hash `96a7ec1d5fdf41d7`—belong to the 5.0.0 release before `task_reclassify` raised the current catalog to 36 tools/version 7. The 36-tool catalog must be measured again before publishing replacement size/hash claims. The focused performance gate measured stateful dispatch p95 0.006 ms, `lca_status` handler/server-total p95 0.3/1.3 ms, warm `workspace_snapshot` p95 40.02 ms, warm `code_query` p95 2.31 ms, widget autocomplete backend/end-to-end p95 36.3/37.82 ms, and compose 1.5/2.50 ms.
+The local release gates cover catalog/session, storage, task isolation, Persistent Workspace Memory, cross-workspace transaction, task-close recovery, shell-mutation detection, journal, coding intelligence, agent, performance, hardening, Figma, security, CLI/supervisor, and VS Code extension checks. The source catalog has 37 tools, `catalog_version=14`, and tool-name hash `1bb9360cb91fa941`. The last pre-expansion version-9 measurement was 34,942 bytes raw / 5,487 bytes compressed-equivalent; versions 10–14 intentionally expand the Memory schemas, adaptive retrieval, task-close outbox and model-visible guidance, so the post-version-9 catalog must be re-measured before publishing a replacement exact size. Its release gates use the broad 96,000-byte raw and 24,000-byte compressed safety ceilings so schema clarity is not traded away for the former 35 KB target. The focused performance gate measured stateful dispatch p95 0.006 ms, `lca_status` handler/server-total p95 0.3/1.3 ms, warm `workspace_snapshot` p95 40.02 ms, warm `code_query` p95 2.31 ms, widget autocomplete backend/end-to-end p95 36.3/37.82 ms, and compose 1.5/2.50 ms.
 
 The release-scale cold-builder benchmark creates 10 registered workspaces, keeps two hot, runs 1,000 warm queries, mutates a watched file, and commits a two-workspace patch. The latest 10k run measured index 1.15 seconds, query p95 0.04 ms, freshness 43.5 ms, post-GC RSS 111.77 MB, cache 2.33 MB, forced-GC heap growth 1.26%, and event-loop p99 18.73 ms. The final 100k run measured index 9.89 seconds, warm snapshot 0.04 ms, query p95 0.04 ms, freshness 238.80 ms, post-GC RSS 120.17 MB, cache 23.46 MB, heap growth 3.00%, and event-loop p99 11.96 ms. Every measured 10k and 100k SLA is true. Runtime timing starts after isolated fixture generation so synthetic file creation is not misreported as LCA event-loop work.
 

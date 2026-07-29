@@ -1,4 +1,4 @@
-// Local Coding Agent fixed 36-tool MCP catalog.
+// Local Coding Agent fixed 37-tool MCP catalog.
 // Copyright (c) 2026 Lương Duy
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
@@ -26,6 +26,7 @@ import { GIT_READONLY, registerExecutionTools } from "./tools/execution.mjs";
 import { registerContextTools } from "./tools/context.mjs";
 import { registerUtilityTools } from "./tools/integration.mjs";
 import { registerMutationTools } from "./tools/mutation.mjs";
+import { registerMemoryTools } from "./tools/memory.mjs";
 import { registerPlanningTools } from "./tools/planning.mjs";
 import { registerRepositoryTools } from "./tools/repository.mjs";
 import { registerReviewTools } from "./tools/review.mjs";
@@ -157,6 +158,7 @@ export function createMcpCatalogFactory(config) {
       getWorkspaceRuntime: config.getWorkspaceRuntime,
       jsonResult,
       markUnmanagedChange,
+      memoryService: config.memoryService,
       patchCoordinator: config.patchCoordinator,
       primaryWorkspaceId: config.primaryWorkspaceId,
       reg: config.reg,
@@ -167,6 +169,13 @@ export function createMcpCatalogFactory(config) {
       taskRouter: config.taskRouter,
       toRel,
       toWorkspaceRel
+    });
+    registerMemoryTools(mcp, {
+      currentTask,
+      jsonResult,
+      memoryService: config.memoryService,
+      reg: config.reg,
+      selectWorkspace
     });
     registerExecutionTools(mcp, {
       CMD_OUTPUT_DEFAULT: config.commandOutputDefault,
@@ -353,6 +362,8 @@ export function createMcpCatalogFactory(config) {
       jsonResult,
       killProcessTree,
       markUnmanagedChange,
+      memoryOutbox: config.memoryOutbox,
+      memoryService: config.memoryService,
       mutationFingerprintChanged,
       pageScope,
       primaryWorkspaceId: config.primaryWorkspaceId,
@@ -375,17 +386,16 @@ export function createMcpCatalogFactory(config) {
 function serverInstructions(policy) {
   return [
     "Local Coding Agent is task-scoped and may operate across explicitly attached workspaces. File tools are root-confined; command execution is audited but is not an OS sandbox.",
-    "ENTRYPOINT: a bare `lca` or `call lca` request means lca_status. Use lca_input only when the user explicitly asks for the input widget, composer or PiP.",
     discoveryRoutingInstructions(),
     "START: for a new conversation, call workspace_list and pass its selected_workspace_id as primary_workspace_id to the first new task_open. task_open returns conversation_workspace_token; retain and reuse that token for every later new task in the same conversation, even if the global selected workspace changes. Separate conversations use separate tokens. Never replace a conversation token by rereading the default workspace; an unknown or mismatched token is a hard stop, not permission to create a new pin. workspace_select affects only future conversations and never reroutes pinned conversations or active tasks. A task has one primary workspace and at most eight attached workspaces.",
     "ISOLATION: every context, mutation, execution and review call belongs to the current task. Attach or detach workspaces before the first mutation; the workspace set freezes afterwards. Never infer another repository. If context is missing or ambiguous, stop on TASK_CONTEXT_REQUIRED.",
     "PATHS: results use {workspace_id,path}; paths are relative to that workspace. Always pass workspace_id when a task contains more than one workspace.",
     "OBJECTIVE: objective is optional durable, user-visible task metadata for the intended result and task-specific constraints. Keep it concise. Do not include private reasoning, secrets, unrelated conversation text, or general agent policy. title is a short UI label; providing title alone leaves objective unset, while an omitted title may be derived from objective.",
-    "CONTEXT: use the lightest targeted discovery needed for the objective. Use code_query for symbols and references; use search_text/find_files/read_many only for missing evidence. Prefer a few substantial calls, do not repeat unchanged evidence, and provide evidence_gap when a similar call is genuinely needed again.",
+    "CONTEXT: use the lightest targeted discovery needed for the objective. task_open memory_mode defaults to auto: quick_edit gets light path-aware Memory (max two items, no semantic/recent-task work), while normal/complex gets full bounded retrieval. Pass relevant_paths for known quick-edit targets; use skip only for fully mechanical work and full when complete durable context is required. Set include_recent_tasks only for explicit continuation work. Stale or needs_review items are advisory. Use workspace_memory only for deeper explicit management, not as a mandatory startup call. Use code_query for symbols and references; use search_text/find_files/read_many only for missing evidence. Prefer a few substantial calls, do not repeat unchanged evidence, and provide evidence_gap when a similar call is genuinely needed again.",
     "ORCHESTRATION: the model selects the effective quick_edit, normal or complex profile. LCA only reports advisory suggested_profile and scope_signal from observable tool evidence; it never changes the effective profile automatically. Use task_reclassify with a reason only after the model confirms a profile change. For quick edits, normally skip task_plan, task_state narration and skills. When a result contains halt=true or run_state=blocked/waiting_for_user, do not call another repository or execution tool; report the structured blocker and required_action to the user. Resume only through task_open with structured resume input after the relevant state changes.",
     "MUTATION: before apply_patch, open the first task with explicit primary_workspace_id or a later task with the conversation_workspace_token already pinned by the first task. Mutation never auto-creates a task or chooses a fallback workspace. Use apply_patch with expected_version for related file changes, including cross-workspace batches. A transaction reported in_doubt blocks further mutation until recovery. Shell changes are not atomic or undoable; tracked source changed by a command is marked unmanaged and must be adopted/reviewed.",
     "VERIFICATION: run tests, lint, typecheck, build, security audit and other quality gates only when the user explicitly requests them. Do not add gates solely to obtain PASS. When a gate is requested, PASS or CLEAN is forbidden while any required workspace, changed file, transaction, unmanaged change, or gate remains incomplete.",
-    "CLOSING: after the requested work and source/diff review are complete, close promptly. When verification was not requested or remains incomplete, prefer one task_close call with status=incomplete as an internal evidence state; successfully closed work is still presented as Completed by the companion UI. As a safety fallback, a complete close blocked only by missing verification evidence is automatically downgraded and closed as incomplete in the same call. Repeating task_close with the same closed task token is idempotent.",
+    "CLOSING: after the requested work and source/diff review are complete, close promptly. Memory defaults to zero updates: never save routine edits, task logs, commands, output, copied source, or temporary progress. Save only compact durable goals, decisions, constraints, unresolved issues/questions, workspace-specific preferences, or meaningful verification results; normally at most one new item, and at most two for a complex task. Prefer update/supersede/resolve over duplicate cards. Accepted memory_updates are atomically queued with task closure and persisted asynchronously. When verification was not requested or remains incomplete, prefer one task_close call with status=incomplete as an internal evidence state; successfully closed work is still presented as Completed by the companion UI. As a safety fallback, a complete close blocked only by missing verification evidence is automatically downgraded and closed as incomplete in the same call. Repeating task_close with the same closed task token is idempotent.",
     "EXECUTION: reserve run_command/run_commands/process for builds, tests, installs and programs that dedicated tools cannot perform. Set cwd instead of embedding cd, and bound output. Investigation run_command calls should pass intent with purpose, target and expected_evidence so equivalent checks can be stopped without limiting distinct forensic evidence gathering.",
     policy === "balanced"
       ? "POLICY: risky actions can return Approval required. Use the local approval UI or CLI to review and authorize the exact action."

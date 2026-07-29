@@ -54,7 +54,8 @@ export function createControlCenterHostBridge(): ControlCenterHostBridge {
       { ...DEFAULT_HOST_CAPABILITIES.jetbrains, ...api.capabilities },
     );
   }
-  return new BrowserControlCenterHost();
+  const requestedHost = new URLSearchParams(window.location.search).get("host");
+  return new BrowserControlCenterHost(requestedHost === "jetbrains" ? "jetbrains" : "browser");
 }
 
 function createMessageHost(
@@ -80,8 +81,8 @@ function createMessageHost(
 }
 
 class BrowserControlCenterHost implements ControlCenterHostBridge {
-  readonly kind = "browser" as const;
-  readonly capabilities = DEFAULT_HOST_CAPABILITIES.browser;
+  readonly kind: "browser" | "jetbrains";
+  readonly capabilities: ControlCenterHostCapabilities;
   private readonly listeners = new Set<(message: ControlCenterStateMessage) => void>();
   private selectedWorkspaceKey: string | undefined;
   private selectedTaskId: string | undefined;
@@ -90,7 +91,9 @@ class BrowserControlCenterHost implements ControlCenterHostBridge {
   private refreshTimer: number | undefined;
   private disposed = false;
 
-  constructor() {
+  constructor(kind: "browser" | "jetbrains") {
+    this.kind = kind;
+    this.capabilities = DEFAULT_HOST_CAPABILITIES[kind];
     document.documentElement.classList.add("lca-browser-host");
     const saved = this.getState() as { selectedWorkspaceKey?: string; selectedTaskId?: string } | undefined;
     this.selectedWorkspaceKey = saved?.selectedWorkspaceKey;
@@ -160,6 +163,43 @@ class BrowserControlCenterHost implements ControlCenterHostBridge {
         this.persistSelection();
         await this.refresh();
         return;
+      case "viewWorkspaceMemory":
+        this.selectedWorkspaceKey = message.workspaceId
+          ? `workspace:${message.workspaceId}`
+          : this.selectedWorkspaceKey;
+        this.selectedTaskId = undefined;
+        this.persistSelection();
+        await this.refresh();
+        return this.loadMemory(message.workspaceId);
+      case "refreshWorkspaceMemory":
+        return this.loadMemory(message.workspaceId);
+      case "retryFailedWorkspaceMemory":
+        await this.memoryMutation(message, "POST", "/memory/outbox/retry-failed");
+        return this.loadMemory(message.workspaceId);
+      case "saveWorkspaceMemory":
+        await this.memoryMutation(message, "POST", "/memory");
+        return this.loadMemory(message.workspaceId);
+      case "updateWorkspaceMemory":
+        await this.memoryMutation(message, "PATCH", `/memory/${encodeURIComponent(message.memoryId || "")}`);
+        return this.loadMemory(message.workspaceId);
+      case "transitionWorkspaceMemory":
+        await this.memoryMutation(
+          message,
+          "POST",
+          `/memory/${encodeURIComponent(message.memoryId || "")}/${encodeURIComponent(message.value || "")}`,
+        );
+        return this.loadMemory(message.workspaceId);
+      case "deleteWorkspaceMemory":
+        if (!window.confirm("Delete this workspace memory item permanently?")) return;
+        await this.memoryMutation(message, "DELETE", `/memory/${encodeURIComponent(message.memoryId || "")}`);
+        return this.loadMemory(message.workspaceId);
+      case "updateWorkspaceMemorySettings":
+        await this.memoryMutation(message, "PATCH", "/memory/settings");
+        return this.loadMemory(message.workspaceId);
+      case "openMemoryPath":
+        await navigator.clipboard?.writeText(message.path || "");
+        this.emitError("The local host copied the related path. Open it in your editor.");
+        return;
       case "closeDetachedTask":
         await this.mutate(`/tasks/${encodeURIComponent(message.value || "")}/close-detached?workspace_id=${encodeURIComponent(message.workspaceId || "")}`, "POST");
         return this.refresh();
@@ -209,7 +249,11 @@ class BrowserControlCenterHost implements ControlCenterHostBridge {
     const query = new URLSearchParams();
     if (this.selectedWorkspaceKey) query.set("workspace_key", this.selectedWorkspaceKey);
     if (this.selectedTaskId) query.set("task_id", this.selectedTaskId);
+    const previousMemory = this.current?.memory;
     const state = await this.fetchJson<ControlCenterViewState>(`/control/state?${query.toString()}`);
+    if (previousMemory && previousMemory.workspace_id === state.selectedWorkspaceKey?.replace(/^workspace:/, "")) {
+      state.memory = previousMemory;
+    }
     this.selectedWorkspaceKey = state.selectedWorkspaceKey;
     this.selectedTaskId = state.selectedTaskId;
     this.persistSelection();
@@ -232,6 +276,72 @@ class BrowserControlCenterHost implements ControlCenterHostBridge {
     if (this.refreshTimer === undefined) {
       this.refreshTimer = window.setInterval(() => void this.refresh(), 5_000);
     }
+  }
+
+  private async loadMemory(workspaceId?: string): Promise<void> {
+    const resolvedWorkspaceId = workspaceId || this.selectedWorkspaceKey?.replace(/^workspace:/, "");
+    if (!resolvedWorkspaceId || !this.current) return;
+    const previous = this.current.memory;
+    this.current = {
+      ...this.current,
+      memory: {
+        workspace_id: resolvedWorkspaceId,
+        revision: previous?.revision || 0,
+        settings: previous?.settings || {
+          enabled: true,
+          auto_load: true,
+          include_recent_tasks: true,
+          semantic_search: true,
+        },
+        counts: previous?.counts || { total: 0, active: 0, pinned: 0, needs_review: 0 },
+        semantic: previous?.semantic,
+        outbox: previous?.outbox,
+        brief: previous?.brief || "",
+        items: previous?.items || [],
+        read_only: previous?.read_only,
+        loading: true,
+      },
+    };
+    this.emit({ type: "state", state: this.current });
+    try {
+      const query = new URLSearchParams({ workspace_id: resolvedWorkspaceId });
+      const snapshot = await this.fetchJson<ControlCenterViewState["memory"]>(`/memory?${query.toString()}`);
+      if (!snapshot) return;
+      this.current = { ...this.current, memory: { ...snapshot, loading: false } };
+    } catch (error) {
+      this.current = {
+        ...this.current,
+        memory: {
+          ...(this.current.memory || {
+            workspace_id: resolvedWorkspaceId,
+            revision: 0,
+            settings: {
+              enabled: true,
+              auto_load: true,
+              include_recent_tasks: true,
+              semantic_search: true,
+            },
+            counts: { total: 0, active: 0, pinned: 0, needs_review: 0 },
+            brief: "",
+            items: [],
+          }),
+          loading: false,
+          error: error instanceof Error ? error.message : "Workspace memory could not be loaded.",
+        },
+      };
+    }
+    this.emit({ type: "state", state: this.current });
+  }
+
+  private async memoryMutation(
+    message: ControlCenterRequest,
+    method: string,
+    pathname: string,
+  ): Promise<void> {
+    const workspaceId = message.workspaceId || this.selectedWorkspaceKey?.replace(/^workspace:/, "");
+    if (!workspaceId) throw new Error("A workspace is required for memory management.");
+    const query = new URLSearchParams({ workspace_id: workspaceId });
+    await this.mutate(`${pathname}?${query.toString()}`, method, message.payload);
   }
 
   private async changeMutation(message: ControlCenterRequest): Promise<void> {

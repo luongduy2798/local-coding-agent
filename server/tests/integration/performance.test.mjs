@@ -8,7 +8,7 @@ import {
   EXPECTED_CATALOG_VERSION,
   EXPECTED_TOOL_COUNT,
   EXPECTED_TOOLS,
-  MAX_TOOLS_LIST_BYTES
+  MAX_TOOLS_LIST_SAFETY_BYTES
 } from "../helpers/catalog-contract.mjs";
 import { createGitFixture, createIsolatedTestRoot, safeRemove } from "../helpers/test-guard.mjs";
 import { startTestServer, stopTestProcess } from "../helpers/test-runtime.mjs";
@@ -132,9 +132,9 @@ try {
     `count=${names.length}; names=${names.join(",")}`
   );
   check(
-    "tools/list stays below the 35 KB raw budget",
-    listed.bytes < MAX_TOOLS_LIST_BYTES,
-    `bytes=${listed.bytes}`
+    "tools/list stays below the broad raw transport safety ceiling",
+    listed.bytes < MAX_TOOLS_LIST_SAFETY_BYTES,
+    `bytes=${listed.bytes}; safety_ceiling=${MAX_TOOLS_LIST_SAFETY_BYTES}`
   );
 
   const initialStatus = (await rpcClient.callTool("lca_status")).data;

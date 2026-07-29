@@ -118,13 +118,17 @@ test("TaskRouter locks an explicit multi-workspace set and resumes by token", {
       otherTask.id,
       "stateless compatibility may authorize an explicit task token"
     );
-    await assert.rejects(
-      () => router.getTask({
-        taskToken: otherTask.task_token,
-        sessionId: "session-unbound"
-      }),
-      (error) => error instanceof TaskRouterError && error.code === "TASK_CONTEXT_REQUIRED"
+    const lazilyBound = await router.getTask({
+      taskToken: otherTask.task_token,
+      sessionId: "session-unbound"
+    });
+    assert.equal(lazilyBound.id, otherTask.id);
+    assert.equal(
+      (await router.getTask({ sessionId: "session-unbound" })).id,
+      otherTask.id,
+      "an explicit token must lazily bind an otherwise-unbound connector session"
     );
+    assert.equal(await router.unbindSession("session-unbound"), true);
     const explicitlyRebound = await router.resumeTask({
       taskToken: otherTask.task_token,
       sessionId: "session-a"

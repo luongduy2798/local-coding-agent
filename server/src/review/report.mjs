@@ -38,6 +38,9 @@ export const REVIEW_SOURCES = ["staged", "unstaged", "untracked"];
 export const REVIEW_PAGE_SIZE_DEFAULT = 80;
 export const REVIEW_PAGE_SIZE_MAX = 200;
 const REVIEW_UNTRACKED_DIFF_MAX_BYTES = 200_000;
+const REVIEW_TRACKED_DIFF_MAX_BYTES_MIN = 4_000_000;
+const REVIEW_TRACKED_DIFF_MAX_BYTES_MAX = 8_000_000;
+const REVIEW_TRACKED_DIFF_CHUNK_PATHS = 128;
 
 function reviewOutputTruncated(result) {
   return result?.stdout_truncated === true ||
@@ -52,6 +55,28 @@ function safeReviewPath(value) {
     return "<invalid-relative-path>";
   }
   return normalized.slice(0, 1_000);
+}
+
+function trackedReviewMaxBytes() {
+  return Math.min(
+    REVIEW_TRACKED_DIFF_MAX_BYTES_MAX,
+    Math.max(REVIEW_TRACKED_DIFF_MAX_BYTES_MIN, Number(MAX_COMMAND_OUTPUT || 0) * 8)
+  );
+}
+
+function trackedDiffArgs(source, pathspecs) {
+  const args = ["diff"];
+  if (source === "staged") args.push("--staged");
+  args.push("--no-ext-diff", "--", ...pathspecs);
+  return args;
+}
+
+function splitReviewPaths(paths, size = REVIEW_TRACKED_DIFF_CHUNK_PATHS) {
+  const chunks = [];
+  for (let offset = 0; offset < paths.length; offset += size) {
+    chunks.push(paths.slice(offset, offset + size));
+  }
+  return chunks;
 }
 
 function emptyReviewSourceState() {
@@ -143,30 +168,161 @@ export async function collectReviewInventory(selected, rootDir) {
   };
 }
 
-export async function collectTrackedReviewDiff(selected, rootDir, source) {
+export async function collectTrackedReviewDiff(
+  selected,
+  rootDir,
+  source,
+  inventory = null,
+  maxBytes = trackedReviewMaxBytes()
+) {
   const scopePath = toWorkspaceRel(selected.workspace, rootDir);
   const pathspec = scopePath === "." ? "." : `:(top,literal)${scopePath}`;
-  const args = source === "staged"
-    ? ["diff", "--staged", "--no-ext-diff", "--", pathspec]
-    : ["diff", "--no-ext-diff", "--", pathspec];
-  const result = await spawnCapture("git", args, selected.workspace.canonicalRoot, DEFAULT_CMD_TIMEOUT);
-  const truncated = reviewOutputTruncated(result);
-  const failed = result.exit_code !== 0 || result.timed_out === true;
+  const result = await spawnCapture(
+    "git",
+    trackedDiffArgs(source, [pathspec]),
+    selected.workspace.canonicalRoot,
+    DEFAULT_CMD_TIMEOUT
+  );
+  const aggregateDiff = String(result.stdout || "");
+  const aggregateTruncated = reviewOutputTruncated(result);
+  const aggregateFailed = result.exit_code !== 0 || result.timed_out === true;
+  const knownFiles = inventory?.items?.filter((item) => item.sources.includes(source)) || null;
+  if (aggregateFailed || !aggregateTruncated) {
+    return {
+      source,
+      strategy: "aggregate",
+      diff: aggregateDiff,
+      files: knownFiles,
+      rendered_files: knownFiles,
+      chunk_count: aggregateDiff.trim() ? 1 : 0,
+      max_bytes: maxBytes,
+      complete: !aggregateFailed && !aggregateTruncated,
+      truncated: aggregateTruncated,
+      timed_out: result.timed_out === true,
+      failed_paths: [],
+      bytes: Buffer.byteLength(aggregateDiff),
+      error_code: result.timed_out
+        ? "GIT_DIFF_TIMED_OUT"
+        : result.exit_code !== 0
+          ? "GIT_DIFF_FAILED"
+          : aggregateTruncated
+            ? "GIT_DIFF_TRUNCATED"
+            : null
+    };
+  }
+
+  const fallbackInventory = inventory || await collectReviewInventory(selected, rootDir);
+  const enumeration = fallbackInventory.source_status[source] || emptyReviewSourceState();
+  const files = fallbackInventory.items.filter((item) => item.sources.includes(source));
+  if (enumeration.complete !== true || files.length === 0) {
+    return {
+      source,
+      strategy: "aggregate",
+      diff: aggregateDiff,
+      files,
+      rendered_files: [],
+      chunk_count: 0,
+      max_bytes: maxBytes,
+      complete: false,
+      truncated: true,
+      timed_out: enumeration.timed_out === true,
+      failed_paths: fallbackInventory.failed_paths.filter((item) => item.source === source),
+      bytes: Buffer.byteLength(aggregateDiff),
+      error_code: enumeration.error_code || "GIT_DIFF_FALLBACK_INVENTORY_INCOMPLETE"
+    };
+  }
+
+  const filesByPath = new Map(files.map((item) => [item.path, item]));
+  const queue = splitReviewPaths(files.map((item) => item.path));
+  const chunks = [];
+  const renderedPaths = new Set();
+  const failedPaths = [];
+  const failedPathKeys = new Set();
+  let used = 0;
+  let truncated = false;
+  let timedOut = false;
+
+  const failPath = (relativePath, reason) => {
+    const key = `${relativePath}\0${reason}`;
+    if (failedPathKeys.has(key)) return;
+    failedPathKeys.add(key);
+    failedPaths.push({
+      ...(filesByPath.get(relativePath) || {
+        workspace_id: selected.workspace.id,
+        path: relativePath,
+        sources: [source]
+      }),
+      source,
+      reason
+    });
+  };
+
+  while (queue.length) {
+    const paths = queue.shift();
+    const chunkResult = await spawnCapture(
+      "git",
+      trackedDiffArgs(source, paths.map((relativePath) => `:(top,literal)${relativePath}`)),
+      selected.workspace.canonicalRoot,
+      DEFAULT_CMD_TIMEOUT
+    );
+    const chunkFailed = chunkResult.exit_code !== 0 || chunkResult.timed_out === true;
+    if (chunkFailed) {
+      timedOut ||= chunkResult.timed_out === true;
+      for (const relativePath of paths) {
+        failPath(relativePath, chunkResult.timed_out ? "diff_timed_out" : "diff_failed");
+      }
+      continue;
+    }
+    if (reviewOutputTruncated(chunkResult)) {
+      if (paths.length > 1) {
+        const midpoint = Math.ceil(paths.length / 2);
+        queue.unshift(paths.slice(0, midpoint), paths.slice(midpoint));
+        continue;
+      }
+      truncated = true;
+      failPath(paths[0], "diff_output_truncated");
+      continue;
+    }
+
+    const chunk = String(chunkResult.stdout || "");
+    const chunkBytes = Buffer.byteLength(chunk);
+    if (used + chunkBytes > maxBytes) {
+      truncated = true;
+      const remainingPaths = new Set([...paths, ...queue.flat()]);
+      for (const relativePath of remainingPaths) failPath(relativePath, "diff_budget_exceeded");
+      queue.length = 0;
+      break;
+    }
+    if (chunk) chunks.push(chunk);
+    for (const relativePath of paths) renderedPaths.add(relativePath);
+    used += chunkBytes;
+  }
+
+  const renderedFiles = files.filter((item) => renderedPaths.has(item.path));
+  const complete = enumeration.complete === true &&
+    failedPaths.length === 0 &&
+    renderedFiles.length === files.length;
   return {
     source,
-    diff: String(result.stdout || ""),
-    complete: !failed && !truncated,
+    strategy: "path_chunks",
+    diff: chunks.join("\n"),
+    files,
+    rendered_files: renderedFiles,
+    chunk_count: chunks.length,
+    max_bytes: maxBytes,
+    complete,
     truncated,
-    timed_out: result.timed_out === true,
-    failed_paths: [],
-    bytes: Buffer.byteLength(String(result.stdout || "")),
-    error_code: result.timed_out
-      ? "GIT_DIFF_TIMED_OUT"
-      : result.exit_code !== 0
-        ? "GIT_DIFF_FAILED"
+    timed_out: timedOut,
+    failed_paths: failedPaths,
+    bytes: used,
+    aggregate_bytes: Buffer.byteLength(aggregateDiff),
+    error_code: complete
+      ? null
+      : timedOut
+        ? "GIT_DIFF_CHUNK_TIMED_OUT"
         : truncated
-          ? "GIT_DIFF_TRUNCATED"
-          : null
+          ? "GIT_DIFF_CHUNK_TRUNCATED"
+          : "GIT_DIFF_CHUNK_INCOMPLETE"
   };
 }
 
@@ -245,9 +401,12 @@ export async function collectUntrackedReviewDiff(
     renderedFiles.length === files.length;
   return {
     source: "untracked",
+    strategy: "files",
     diff: chunks.join("\n"),
     files,
     rendered_files: renderedFiles,
+    chunk_count: chunks.length,
+    max_bytes: maxBytes,
     complete,
     truncated,
     timed_out: enumeration.timed_out === true,
@@ -266,12 +425,15 @@ export function reviewEvidenceDescriptor(evidence) {
     complete: evidence.complete === true,
     truncated: evidence.truncated === true,
     timed_out: evidence.timed_out === true,
+    strategy: evidence.strategy || null,
     bytes: Number(evidence.bytes || 0),
+    chunks: Number(evidence.chunk_count || 0),
+    max_bytes: Number(evidence.max_bytes || 0),
     failed_paths_count: evidence.failed_paths?.length || 0,
     error_code: evidence.error_code || null,
-    ...(evidence.source === "untracked"
+    ...(Array.isArray(evidence.files)
       ? {
-          files: evidence.files?.length || 0,
+          files: evidence.files.length,
           rendered_files: evidence.rendered_files?.length || 0
         }
       : {})
@@ -347,8 +509,8 @@ export async function reviewWorkspaceDiff({ workspaceId, taskToken, taskId, cwd 
   }
   const inventory = await collectReviewInventory(selected, selected.path);
   const [stagedEvidence, unstagedEvidence, untrackedEvidence, unmanagedState] = await Promise.all([
-    collectTrackedReviewDiff(selected, selected.path, "staged"),
-    collectTrackedReviewDiff(selected, selected.path, "unstaged"),
+    collectTrackedReviewDiff(selected, selected.path, "staged", inventory),
+    collectTrackedReviewDiff(selected, selected.path, "unstaged", inventory),
     collectUntrackedReviewDiff(selected, inventory),
     unmanagedChangeState(selected.workspace.id, taskId)
   ]);
@@ -447,7 +609,11 @@ export async function reviewWorkspaceDiff({ workspaceId, taskToken, taskId, cwd 
     p2: findings.filter((finding) => finding.priority === "P2").length,
     p3: findings.filter((finding) => finding.priority === "P3").length,
     _inventory_items: inventory.items,
-    _failed_paths: [...inventory.failed_paths, ...untrackedEvidence.failed_paths],
+    _failed_paths: [
+      ...inventory.failed_paths,
+      ...[stagedEvidence, unstagedEvidence, untrackedEvidence]
+        .flatMap((evidence) => evidence.failed_paths || [])
+    ],
     _summary_files: summaryFiles,
     _findings: findings
   };

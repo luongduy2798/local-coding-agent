@@ -11,12 +11,18 @@ import {
   openRegistryDatabase
 } from "../storage/database.mjs";
 import {
+  hydrateTaskRelevantPaths,
+  normalizeTaskMemoryMode,
+  normalizeTaskMemoryPolicy
+} from "./task-memory-policy.mjs";
+import {
   classifyTaskComplexity,
   createTaskOrchestration,
   normalizeTaskObjective,
   normalizeTaskOrchestration,
   resumeTaskOrchestration
 } from "./task-orchestration.mjs";
+import { taskMemoryOutboxInsertSteps } from "./task-memory-outbox-store.mjs";
 
 const MAX_WORKSPACES_PER_TASK = 9;
 
@@ -54,6 +60,9 @@ export class TaskRouter {
     objective,
     complexityHint,
     complexityOverride = false,
+    memoryMode = "auto",
+    includeRecentTasks = false,
+    relevantPaths = [],
     primaryWorkspaceId,
     attachedWorkspaceIds = [],
     ownerSessionId = null,
@@ -67,6 +76,15 @@ export class TaskRouter {
     }
     const normalizedObjective = normalizeTaskObjective(objective);
     const normalizedTitle = normalizeTitle(title || normalizedObjective || "LCA task");
+    const memoryPolicy = normalizeTaskMemoryPolicy({
+      memoryMode,
+      includeRecentTasks,
+      relevantPaths
+    }, {
+      primaryWorkspaceId: primary,
+      workspaceIds,
+      errorFactory: (code, message, details) => new TaskRouterError(code, message, details)
+    });
     const classification = classifyTaskComplexity({
       complexityHint,
       complexityOverride,
@@ -87,10 +105,11 @@ export class TaskRouter {
       sql: `
         INSERT INTO task_router_tasks(
           id, token_hash, owner_session_id, title, objective,
+          memory_mode, include_recent_tasks, relevant_paths_json,
           requested_profile, effective_profile, complexity_override,
           profile_confidence, orchestration_json, status, version,
           workspace_set_frozen, detached_at, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', 1, 0, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', 1, 0, ?, ?, ?)
       `,
       params: [
         taskId,
@@ -98,6 +117,9 @@ export class TaskRouter {
         ownerSession,
         normalizedTitle,
         normalizedObjective || null,
+        memoryPolicy.memory_mode,
+        memoryPolicy.include_recent_tasks ? 1 : 0,
+        JSON.stringify(memoryPolicy.relevant_paths),
         classification.requested_profile,
         classification.effective_profile,
         classification.complexity_override ? 1 : 0,
@@ -167,21 +189,28 @@ export class TaskRouter {
     if (taskToken) {
       task = await this.getTaskByToken(taskToken);
       if (sessionId) {
-        const boundTask = await this.getTaskBySession(sessionId);
+        let boundTask = await this.getTaskBySession(sessionId);
         if (!boundTask) {
-          throw new TaskRouterError(
-            "TASK_CONTEXT_REQUIRED",
-            "Resume the task with task_open before using its token in this stateful MCP session.",
-            { task_id: task.id }
-          );
+          // Apps/connector transports may use a distinct stateful MCP session for
+          // each tool action. A valid explicit task token is the capability that
+          // authorizes an otherwise-unbound session; bind it lazily so callers do
+          // not have to task_open once per action-specific transport session.
+          const session = String(sessionId);
+          const timestamp = isoNow();
+          await this.database.batch([
+            sessionBindingStep(session, task.id, timestamp),
+            refreshTaskSessionStateStep(task.id, timestamp)
+          ]);
+          boundTask = await this.getTaskBySession(session);
+          task = await this.getTaskById(task.id);
         }
-        if (boundTask.id !== task.id) {
+        if (boundTask?.id !== task.id) {
           throw new TaskRouterError(
             "TASK_CONTEXT_MISMATCH",
             `Task token ${task.id} does not match the task bound to this MCP session.`,
             {
               task_id: task.id,
-              bound_task_id: boundTask.id
+              bound_task_id: boundTask?.id || null
             }
           );
         }
@@ -394,11 +423,12 @@ export class TaskRouter {
     return this.getTaskById(task.id);
   }
 
-  async closeTask({ taskToken, sessionId, status = "closed" } = {}) {
+  async closeTask({ taskToken, sessionId, status = "closed", memoryJobs = [] } = {}) {
     const task = await this.getTask({ taskToken, sessionId });
     const nextStatus = status === "failed" ? "failed" : "closed";
     const timestamp = isoNow();
     await this.database.batch([
+      ...taskMemoryOutboxInsertSteps(memoryJobs, task.id, timestamp),
       {
         mode: "run",
         sql: `
@@ -491,6 +521,31 @@ export class TaskRouter {
     return Promise.all(rows.map((row) => this.hydrate(row)));
   }
 
+  async listRecentTasksForWorkspace({ workspaceId, excludeTaskId, limit = 3 } = {}) {
+    const workspace = validateWorkspaceId(workspaceId);
+    const bounded = Math.max(1, Math.min(10, Number(limit) || 3));
+    const rows = await this.database.all(
+      `
+        SELECT t.id, t.title, t.objective, t.status, t.closed_at, t.updated_at
+        FROM task_router_tasks t
+        JOIN task_router_workspaces w ON w.task_id = t.id
+        WHERE w.workspace_id = ?
+          AND t.status IN ('closed', 'failed')
+          AND (? IS NULL OR t.id <> ?)
+        ORDER BY COALESCE(t.closed_at, t.updated_at) DESC, t.id
+        LIMIT ?
+      `,
+      [workspace, excludeTaskId || null, excludeTaskId || null, bounded]
+    );
+    return rows.map((row) => ({
+      task_id: row.id,
+      title: row.title,
+      objective: row.objective || null,
+      status: row.status,
+      closed_at: row.closed_at || row.updated_at
+    }));
+  }
+
   async deleteTask({ taskId } = {}) {
     const id = validateTaskId(taskId);
     const task = await this.getTaskById(id);
@@ -558,10 +613,20 @@ export class TaskRouter {
       orchestrationSource = JSON.parse(row.orchestration_json || "{}");
     } catch {}
     const orchestration = normalizeTaskOrchestration(orchestrationSource, row.effective_profile || "normal");
+    const primaryWorkspaceId = hydratedWorkspaces.find(
+      (item) => item.role === "primary"
+    )?.workspace_id || null;
     return {
       id: row.id,
       title: row.title,
       objective: row.objective || null,
+      memory_mode: normalizeTaskMemoryMode(row.memory_mode),
+      include_recent_tasks: Boolean(row.include_recent_tasks),
+      relevant_paths: hydrateTaskRelevantPaths(
+        row.relevant_paths_json,
+        primaryWorkspaceId,
+        hydratedWorkspaces.map((item) => item.workspace_id)
+      ),
       requested_profile: row.requested_profile || null,
       effective_profile: orchestration.effective_profile,
       complexity_override: Boolean(row.complexity_override),
@@ -580,7 +645,7 @@ export class TaskRouter {
       created_at: row.created_at,
       updated_at: row.updated_at,
       closed_at: row.closed_at || null,
-      primary_workspace_id: hydratedWorkspaces.find((item) => item.role === "primary")?.workspace_id || null,
+      primary_workspace_id: primaryWorkspaceId,
       workspace_ids: hydratedWorkspaces.map((item) => item.workspace_id),
       workspaces: hydratedWorkspaces,
       workspace_baselines: hydratedWorkspaces.map((item) => ({

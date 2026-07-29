@@ -35,6 +35,7 @@
     "test:runtime:audit": "node tests/unit/audit-activity.test.mjs && node tests/unit/audit-rotation.test.mjs",
     "test:runtime:policy": "node tests/integration/policy-contract.test.mjs",
     "test:runtime:storage": "node tests/integration/storage-registry.test.mjs && node --test tests/unit/runtime-data-migration.test.mjs",
+    "test:runtime:memory": "node tests/integration/workspace-memory.test.mjs && node tests/integration/workspace-memory-outbox.test.mjs",
     "test:runtime:lifecycle": "node tests/integration/workspace-lifecycle.test.mjs && node tests/integration/archived-change-routes.test.mjs && node ../scripts/workspace-lifecycle-cli.test.mjs",
     "test:runtime:multiworkspace": "node --test tests/integration/multi-workspace.test.mjs",
     "test:runtime:patch": "node tests/integration/patch-transaction.test.mjs",
@@ -44,16 +45,25 @@
     "test:runtime:non-git": "node --test tests/integration/non-git-mutation.test.mjs",
     "test:runtime:reconnect": "node --test tests/integration/reconnect-restart.test.mjs",
     "test:runtime:intelligence": "node --test tests/unit/coding-intelligence.test.mjs tests/unit/typescript-semantic-adapter.test.mjs tests/unit/workspace-graph-builder.test.mjs",
-    "test:runtime": "npm run test:runtime:session && npm run test:runtime:catalog && npm run test:runtime:audit && npm run test:runtime:policy && npm run test:runtime:storage && npm run test:runtime:lifecycle && npm run test:runtime:task && npm run test:runtime:multiworkspace && npm run test:runtime:patch && npm run test:runtime:task-close && npm run test:runtime:review && npm run test:runtime:non-git && npm run test:runtime:reconnect && npm run test:runtime:intelligence",
+    "test:runtime": "npm run test:runtime:session && npm run test:runtime:catalog && npm run test:runtime:audit && npm run test:runtime:policy && npm run test:runtime:storage && npm run test:runtime:memory && npm run test:runtime:lifecycle && npm run test:runtime:task && npm run test:runtime:multiworkspace && npm run test:runtime:patch && npm run test:runtime:task-close && npm run test:runtime:review && npm run test:runtime:non-git && npm run test:runtime:reconnect && npm run test:runtime:intelligence",
     "eval": "node ../evals/run.mjs && node ../evals/tool-selection.mjs",
     "bench:runtime": "node --expose-gc benchmarks/scale.mjs --scale=10k",
     "bench:runtime:cold": "node --expose-gc benchmarks/scale.mjs --scale=10k --cold-builder",
     "bench:runtime:scale": "node --expose-gc benchmarks/scale.mjs --scale=10k --cold-builder && node --expose-gc benchmarks/scale.mjs --scale=100k --allow-large --cold-builder && node --expose-gc benchmarks/scale.mjs --scale=250k --allow-large --cold-builder",
     "bench:runtime:reconnect": "node benchmarks/reconnect-stress.mjs --cycles=1000",
+    "bench:memory": "node benchmarks/workspace-memory.mjs && node benchmarks/workspace-memory-outbox.mjs",
+    "bench:memory:outbox": "node benchmarks/workspace-memory-outbox.mjs",
     "test:figma": "node tests/integration/figma-desktop.test.mjs"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.20.0",
+    "@huggingface/transformers": "^4.2.0",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "zod": "^3.25.76"
+  },
+  "overrides": {
+    "sharp": "0.35.3",
+    "adm-zip": "0.6.0",
+    "@hono/node-server": "2.0.12",
+    "fast-uri": "3.1.4"
   }
 }

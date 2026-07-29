@@ -21,6 +21,7 @@ let getChangeJournal;
 let getWorkspaceRuntime;
 let jsonResult;
 let markUnmanagedChange;
+let memoryService;
 let patchCoordinator;
 let primaryWorkspaceId;
 let reg;
@@ -45,6 +46,7 @@ export function registerMutationTools(mcp, dependencies) {
     getWorkspaceRuntime,
     jsonResult,
     markUnmanagedChange,
+    memoryService,
     patchCoordinator,
     primaryWorkspaceId,
     reg,
@@ -67,7 +69,7 @@ function registerFsWriteTools(mcp) {
     "apply_patch",
     {
       title: "Apply patch",
-      description: "Preview, validate, or atomically apply a multi-file create/update/delete/rename/mkdir patch within an already opened task. Requires explicit task context and never auto-selects a fallback workspace.",
+      description: "Preview, validate, or atomically apply a multi-file create/update/delete/rename/mkdir patch within an explicitly opened task. Never selects a fallback workspace, enforces stale-version checks through expected_version, and coordinates all-before/all-after transaction recovery.",
       inputSchema: {
         action: z.enum(["apply", "preview", "validate"]).optional(),
         task_title: z.string().min(1).max(180).optional(),
@@ -80,7 +82,7 @@ function registerFsWriteTools(mcp) {
               workspace_id: z.string().optional(),
               op: z.enum(["create", "update", "delete", "rename", "mkdir"]),
               path: z.string().min(1),
-              expected_version: z.string().optional(),
+              expected_version: z.string().optional().describe("Previously observed file version used to reject stale update/delete/rename operations instead of overwriting newer source."),
               content: z.string().optional(),
               rename_to: z.string().optional(),
               recursive: z.boolean().optional(),
@@ -140,6 +142,9 @@ function registerFsWriteTools(mcp) {
         taskToken: context.taskToken,
         taskTitle: task_title
       });
+      const memoryFreshness = memoryService
+        ? await memoryService.markPathsChanged(context.operations, { taskId: context.task?.id })
+        : [];
       return jsonResult({
         ...applied.transaction,
         routing_task_id: applied.transaction.task_id,
@@ -155,7 +160,8 @@ function registerFsWriteTools(mcp) {
         journal_errors: applied.journalErrors,
         journal_complete: applied.journalErrors.length === 0,
         change_id: applied.changes.length === 1 ? applied.changes[0].change_id : null,
-        change_ids: Object.fromEntries(applied.changes.map((entry) => [entry.workspace_id, entry.change_id]))
+        change_ids: Object.fromEntries(applied.changes.map((entry) => [entry.workspace_id, entry.change_id])),
+        memory_freshness: memoryFreshness
       });
     }
   );

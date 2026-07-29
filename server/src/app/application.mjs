@@ -200,6 +200,7 @@ import { createRuntimeManager } from "./runtime-manager.mjs";
 import { loadApplicationConfig } from "./config.mjs";
 import { createTaskCloseService } from "../review/task-close.mjs";
 import { createChangeRoutes } from "../http/change-routes.mjs";
+import { createMemoryRoutes } from "../http/memory-routes.mjs";
 import { createApplicationHttpServer } from "../http/server.mjs";
 import { createMcpHttpTransport } from "../mcp/http-transport.mjs";
 import { createMcpCatalogFactory } from "../mcp/catalog.mjs";
@@ -252,6 +253,7 @@ const {
   MAX_READ_CHARS,
   MAX_SEARCH_PROCESSES,
   MAX_SERIALIZED_RESPONSE_CHARS,
+  MEMORY_SEMANTIC_CONFIG,
   MCP_MAX_SESSIONS,
   MCP_SESSION_IDLE_TTL_MS,
   MODE,
@@ -371,6 +373,7 @@ const RUNTIME_MANAGER = createRuntimeManager({
   runtimeDataDir: RUNTIME_DATA_DIR,
   hotWorkspaceLimit: HOT_WORKSPACE_LIMIT,
   idleUnloadMs: WORKSPACE_IDLE_UNLOAD_MS,
+  memorySemanticConfig: MEMORY_SEMANTIC_CONFIG,
   testRuntimeDiagnostics: TEST_RUNTIME_DIAGNOSTICS,
   toWorkspaceRel
 });
@@ -421,6 +424,8 @@ const TASK_ROUTER = RUNTIME_MANAGER.taskRouter;
 const PATCH_COORDINATOR = RUNTIME_MANAGER.patchCoordinator;
 const PRIMARY_WORKSPACE_ID = RUNTIME_MANAGER.primaryWorkspaceId;
 const STORAGE_ERROR = RUNTIME_MANAGER.storageError;
+const MEMORY_SERVICE = RUNTIME_MANAGER.memoryService;
+const MEMORY_OUTBOX = RUNTIME_MANAGER.memoryOutbox;
 await AUDIT_LOG.init();
 audit({
   ts: isoNow(),
@@ -627,6 +632,8 @@ const createMcpServer = createMcpCatalogFactory({
   storageError: STORAGE_ERROR,
   taskCloseService: TASK_CLOSE_SERVICE,
   taskOpenPayload,
+  memoryOutbox: MEMORY_OUTBOX,
+  memoryService: MEMORY_SERVICE,
   taskPlanPath: TASK_PLAN_PATH,
   taskRouter: TASK_ROUTER,
   taskWorkspaceBaseline,
@@ -669,6 +676,8 @@ const STATUS_SERVICE = createStatusService({
     registry: WORKSPACE_REGISTRY,
     taskRouter: TASK_ROUTER,
     patchCoordinator: PATCH_COORDINATOR,
+    memoryService: MEMORY_SERVICE,
+    memoryOutbox: MEMORY_OUTBOX,
     primaryWorkspaceId: PRIMARY_WORKSPACE_ID,
     storageError: STORAGE_ERROR,
     runtimes: WORKSPACE_RUNTIMES,
@@ -733,11 +742,20 @@ const CHANGE_ROUTES = createChangeRoutes({
   getRegistry: () => WORKSPACE_REGISTRY,
   getTaskRouter: () => TASK_ROUTER,
   getProcesses: () => processes,
+  onTaskClosed: (task) => MEMORY_SERVICE?.invalidateRecentTasks(task.workspace_ids),
   maxBodyBytes: MAX_BODY_BYTES,
   primaryRoot: PRIMARY_ROOT,
   readJsonBody,
   sendJson,
   testRuntimeDiagnostics: TEST_RUNTIME_DIAGNOSTICS
+});
+const MEMORY_ROUTES = createMemoryRoutes({
+  memoryService: MEMORY_SERVICE,
+  memoryOutbox: MEMORY_OUTBOX,
+  registry: WORKSPACE_REGISTRY,
+  readJsonBody,
+  sendJson,
+  maxBodyBytes: MAX_BODY_BYTES
 });
 const MCP_HTTP_TRANSPORT = createMcpHttpTransport({
   audit,
@@ -759,6 +777,7 @@ const HTTP_APPLICATION = createApplicationHttpServer({
   catalogHash: CATALOG_HASH,
   catalogVersion: CATALOG_VERSION,
   changeRoutes: CHANGE_ROUTES,
+  memoryRoutes: MEMORY_ROUTES,
   configId: CONFIG_ID,
   controlCenterUiDir: CONTROL_CENTER_UI_DIR,
   getPrimaryWorkspaceId: () => PRIMARY_WORKSPACE_ID,

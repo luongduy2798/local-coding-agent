@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Lương Duy
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-export const EXPECTED_CATALOG_VERSION = 8;
+export const EXPECTED_CATALOG_VERSION = 14;
 export const EXPECTED_TOOLS = Object.freeze([
   "lca_status",
   "workspace_list",
@@ -38,8 +38,65 @@ export const EXPECTED_TOOLS = Object.freeze([
   "todo_scan",
   "skills",
   "notes",
+  "workspace_memory",
   "figma",
   "lca_input"
 ]);
 export const EXPECTED_TOOL_COUNT = EXPECTED_TOOLS.length;
-export const MAX_TOOLS_LIST_BYTES = 35_000;
+
+// These are broad transport safety ceilings, not schema-minification targets.
+// Catalog clarity and tool-selection correctness take precedence over staying
+// close to the previous 35 KB measurement.
+export const MAX_TOOLS_LIST_SAFETY_BYTES = 96_000;
+export const MAX_COMPRESSED_TOOLS_LIST_SAFETY_BYTES = 24_000;
+
+export const EXPECTED_MEMORY_ACTIONS = Object.freeze([
+  "brief",
+  "list",
+  "search",
+  "get",
+  "save",
+  "update",
+  "supersede",
+  "pin",
+  "unpin",
+  "resolve",
+  "archive",
+  "restore",
+  "current",
+  "stale",
+  "delete",
+  "settings"
+]);
+export const EXPECTED_TASK_CLOSE_MEMORY_ACTIONS = Object.freeze([
+  "save",
+  "update",
+  "supersede",
+  "pin",
+  "unpin",
+  "resolve",
+  "archive",
+  "restore",
+  "current",
+  "stale"
+]);
+export const EXPECTED_MEMORY_KINDS = Object.freeze([
+  "project_goal",
+  "architecture_decision",
+  "constraint",
+  "known_issue",
+  "open_question",
+  "user_preference",
+  "verification_result"
+]);
+export const EXPECTED_MEMORY_LIFECYCLES = Object.freeze([
+  "active",
+  "resolved",
+  "superseded",
+  "archived"
+]);
+export const EXPECTED_MEMORY_FRESHNESS = Object.freeze([
+  "current",
+  "needs_review",
+  "stale"
+]);

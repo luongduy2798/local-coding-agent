@@ -3,7 +3,8 @@ import type { ControlCenterHostCapabilities } from "./protocol.js";
 
 export type WorkspaceRoute =
   | { kind: "tasks" }
-  | { kind: "history" };
+  | { kind: "history" }
+  | { kind: "memory" };
 
 export interface ControlWorkspaceView {
   id: string;
@@ -179,6 +180,7 @@ export interface WorkspaceShellProps {
   onWorkspaceAction: (type: string, workspaceId?: string) => void;
   onSelectWorkspace: (key: string) => void;
   onViewHistory: (workspaceId: string) => void;
+  onViewMemory: (workspaceId: string) => void;
 }
 
 export function WorkspaceHeader({
@@ -194,6 +196,7 @@ export function WorkspaceHeader({
   onWorkspaceAction,
   onSelectWorkspace,
   onViewHistory,
+  onViewMemory,
 }: WorkspaceShellProps): React.JSX.Element {
   const [workspacesOpen, setWorkspacesOpen] = useState(false);
   const workspaceRef = useRef<HTMLDivElement>(null);
@@ -257,6 +260,10 @@ export function WorkspaceHeader({
                   setWorkspacesOpen(false);
                   onViewHistory(workspaceId);
                 }}
+                onViewMemory={(workspaceId) => {
+                  setWorkspacesOpen(false);
+                  onViewMemory(workspaceId);
+                }}
               />
             )}
           </div>
@@ -307,6 +314,7 @@ function WorkspacePopover({
   onSelect,
   onAction,
   onViewHistory,
+  onViewMemory,
 }: {
   control: ControlStateView;
   capabilities: ControlCenterHostCapabilities;
@@ -316,6 +324,7 @@ function WorkspacePopover({
   onSelect: (key: string) => void;
   onAction: (type: string, workspaceId?: string) => void;
   onViewHistory: (workspaceId: string) => void;
+  onViewMemory: (workspaceId: string) => void;
 }): React.JSX.Element {
   const currentId = currentWorkspace?.workspaceId;
   const active = control.workspaces.filter((workspace) => workspace.registrationState === "active");
@@ -341,6 +350,7 @@ function WorkspacePopover({
         onSelect={onSelect}
         onAction={onAction}
         onViewHistory={onViewHistory}
+        onViewMemory={onViewMemory}
       />
       <WorkspaceGroup
         title="Other active"
@@ -352,6 +362,7 @@ function WorkspacePopover({
         onSelect={onSelect}
         onAction={onAction}
         onViewHistory={onViewHistory}
+        onViewMemory={onViewMemory}
       />
       <WorkspaceGroup
         title="Archived"
@@ -363,6 +374,7 @@ function WorkspacePopover({
         onSelect={onSelect}
         onAction={onAction}
         onViewHistory={onViewHistory}
+        onViewMemory={onViewMemory}
       />
     </section>
   );
@@ -378,6 +390,7 @@ function WorkspaceGroup({
   onSelect,
   onAction,
   onViewHistory,
+  onViewMemory,
 }: {
   title: string;
   rows: ControlWorkspaceView[];
@@ -388,6 +401,7 @@ function WorkspaceGroup({
   onSelect: (key: string) => void;
   onAction: (type: string, workspaceId?: string) => void;
   onViewHistory: (workspaceId: string) => void;
+  onViewMemory: (workspaceId: string) => void;
 }): React.JSX.Element | null {
   if (rows.length === 0) return null;
   return (
@@ -430,6 +444,7 @@ function WorkspaceGroup({
                   onClick={() => onAction("makeDefaultWorkspace", workspace.id)}
                 />
               )}
+              <IconButton title="Manage workspace memory" icon="task" onClick={() => onViewMemory(workspace.id)} />
               <IconButton title="View history" icon="history" onClick={() => onViewHistory(workspace.id)} />
               {canManage && !archived && (
                 <IconButton

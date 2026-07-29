@@ -15,8 +15,10 @@ async function run(): Promise<void> {
   const reader = new AuditReader();
   try {
     await mkdir(path.dirname(auditPath), { recursive: true });
+    const startedAt = new Date(Date.now() - 10_000).toISOString();
+    const finishedAt = new Date(Date.parse(startedAt) + 1_000).toISOString();
     const started = {
-      ts: "2026-07-22T02:00:00.000Z",
+      ts: startedAt,
       kind: "tool",
       phase: "started",
       invocation_id: "invocation-partial",
@@ -39,7 +41,7 @@ async function run(): Promise<void> {
     await rename(auditPath, `${auditPath}.1`);
     await writeFile(auditPath, `${startedLine}\n${JSON.stringify({
       ...started,
-      ts: "2026-07-22T02:00:01.000Z",
+      ts: finishedAt,
       phase: "finished",
       duration_ms: 1000,
       ok: true,

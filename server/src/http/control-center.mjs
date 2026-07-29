@@ -16,6 +16,7 @@ const HOSTS = new Set(["browser", "jetbrains"]);
 export function createControlCenterRoutes({
   auditPath,
   changeRoutes,
+  memoryRoutes,
   controlOrigin,
   getHealthDetails,
   readJsonBody,
@@ -114,9 +115,14 @@ export function createControlCenterRoutes({
       : allTasks;
     const requestedTaskId = String(url.searchParams.get("task_id") || "");
     const selectedTaskId = workspaceTasks.some((task) => task.id === requestedTaskId) ? requestedTaskId : undefined;
-    const changesSnapshot = selectedWorkspaceId
-      ? await changeRoutes.listSnapshot({ workspaceId: selectedWorkspaceId, taskId: selectedTaskId || null, limit: 200 })
-      : { changes: [], revision: "empty" };
+    const [changesSnapshot, memorySummary] = await Promise.all([
+      selectedWorkspaceId
+        ? changeRoutes.listSnapshot({ workspaceId: selectedWorkspaceId, taskId: selectedTaskId || null, limit: 200 })
+        : Promise.resolve({ changes: [], revision: "empty" }),
+      selectedWorkspaceId
+        ? memoryRoutes?.summarySnapshot(selectedWorkspaceId).catch(() => null)
+        : Promise.resolve(null)
+    ]);
     const changes = (changesSnapshot.changes || []).map((change) => ({
       ...change,
       workspace_id: change.workspace_id || change.workspace || selectedWorkspaceId,
@@ -143,6 +149,15 @@ export function createControlCenterRoutes({
         audit.activities.at(-1)?.finishedAt
       ],
       changes: changesSnapshot.revision,
+      memory: memorySummary ? [
+        memorySummary.workspace_id,
+        memorySummary.revision,
+        memorySummary.outbox?.pending || 0,
+        memorySummary.outbox?.processing || 0,
+        memorySummary.outbox?.retrying || 0,
+        memorySummary.outbox?.failed || 0,
+        memorySummary.outbox?.last_completed_at || null
+      ] : null,
       tasks: allTasks.map((task) => [task.id, task.updatedAt, task.status]),
       workspaces: descriptors.map((workspace) => [workspace.id, workspace.availability, workspace.registrationState])
     });
@@ -180,6 +195,7 @@ export function createControlCenterRoutes({
         workspaceCount: descriptors.length
       },
       changes,
+      memorySummary,
       control: {
         loading: false,
         revision,
@@ -317,6 +333,7 @@ function hostCapabilities(host) {
         workspaceManagement: false,
         taskManagement: true,
         changeMutation: true,
+        memoryManagement: true,
         nativeOpenFile: false,
         nativeDiff: false,
         secretStorage: false
@@ -326,6 +343,7 @@ function hostCapabilities(host) {
         workspaceManagement: false,
         taskManagement: true,
         changeMutation: true,
+        memoryManagement: true,
         nativeOpenFile: false,
         nativeDiff: false,
         secretStorage: false

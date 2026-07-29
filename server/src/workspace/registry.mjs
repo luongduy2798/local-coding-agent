@@ -553,10 +553,15 @@ export class WorkspaceRegistry {
     }
   }
 
-  async openWorkspace(workspaceId, { allowUnavailable = false } = {}) {
+  async openWorkspace(workspaceId, {
+    allowUnavailable = false,
+    allowArchived = false,
+    refreshAvailability = true
+  } = {}) {
     this.#assertOpen();
     const workspace = await this.getWorkspace(workspaceId, {
-      refreshAvailability: true
+      refreshAvailability,
+      allowArchived
     });
     if (!allowUnavailable && workspace.availability !== "available") {
       throw new WorkspaceRegistryError(

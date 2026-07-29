@@ -18,6 +18,15 @@ import { prewarmWorkspaceGraphInChild } from "../workspace/graph/prewarm.mjs";
 import { recoverWorkspacePurges } from "../workspace/purge.mjs";
 import { WorkspaceRegistry, WorkspaceRegistryError } from "../workspace/registry.mjs";
 import { TaskRouter, TaskRouterError } from "../workspace/task-router.mjs";
+import { MemoryEmbeddingService } from "../workspace/memory-embedding-service.mjs";
+import { TaskMemoryOutboxStore } from "../workspace/task-memory-outbox-store.mjs";
+import { WorkspaceMemoryOutbox } from "../workspace/workspace-memory-outbox.mjs";
+import {
+  resolveTaskMemoryPolicy,
+  skippedTaskMemoryBrief,
+  unavailableTaskMemoryBrief,
+  WorkspaceMemoryService
+} from "../workspace/workspace-memory.mjs";
 import { publicTaskOrchestration } from "../workspace/task-orchestration.mjs";
 
 export function createRuntimeManager({
@@ -28,6 +37,7 @@ export function createRuntimeManager({
   runtimeDataDir,
   hotWorkspaceLimit,
   idleUnloadMs,
+  memorySemanticConfig,
   testRuntimeDiagnostics,
   toWorkspaceRel
 }) {
@@ -39,6 +49,8 @@ export function createRuntimeManager({
   let registry = null;
   let taskRouter = null;
   let patchCoordinator = null;
+  let memoryService = null;
+  let memoryOutbox = null;
   let primaryWorkspaceId = initialPrimaryWorkspaceId;
   let storageError = null;
 
@@ -63,6 +75,19 @@ export function createRuntimeManager({
       }
       taskRouter = await TaskRouter.open({ dataDir: runtimeDataDir, busyTimeoutMs: 5_000 });
       await taskRouter.resetSessionBindings();
+      const embeddingService = new MemoryEmbeddingService(memorySemanticConfig);
+      memoryService = new WorkspaceMemoryService({
+        registry,
+        taskRouter,
+        embeddingService,
+        semanticDeadlineMs: memorySemanticConfig?.deadlineMs
+      });
+      memoryOutbox = new WorkspaceMemoryOutbox({
+        store: new TaskMemoryOutboxStore({ database: taskRouter.database }),
+        memoryService,
+        onChange: (event) => emitChange(event)
+      });
+      await memoryOutbox.start();
       patchCoordinator = new PatchTransactionCoordinator({
         dataDir: path.join(runtimeDataDir, "patch-coordinator"),
         stateStore: {
@@ -90,11 +115,15 @@ export function createRuntimeManager({
         code: error?.code || "RUNTIME_STORAGE_UNAVAILABLE",
         message: error?.message || String(error)
       };
+      await memoryOutbox?.close().catch(() => {});
+      await memoryService?.close().catch(() => {});
       await taskRouter?.close().catch(() => {});
       await registry?.close().catch(() => {});
       taskRouter = null;
       registry = null;
       patchCoordinator = null;
+      memoryService = null;
+      memoryOutbox = null;
       console.error(`Runtime storage unavailable; task-scoped mutation is disabled: ${storageError.message}`);
     }
   }
@@ -413,11 +442,16 @@ export function createRuntimeManager({
         captured_at: baseline.captured_at || null
       };
     });
+    const memoryPolicy = resolveTaskMemoryPolicy(task);
+    const workspaceMemory = memoryPolicy.effective_mode === "skip"
+      ? skippedTaskMemoryBrief(task)
+      : await memoryService?.briefForTask(task) || unavailableTaskMemoryBrief(task);
     return {
       ...task,
       orchestration: publicTaskOrchestration(task.orchestration, task.effective_profile),
       workspace_set_version: task.version,
-      workspace_state: workspaceState
+      workspace_state: workspaceState,
+      workspace_memory: workspaceMemory
     };
   }
 
@@ -425,6 +459,8 @@ export function createRuntimeManager({
     await closeWorkspaceRuntimes();
     await Promise.allSettled([...journals.values()].map((journal) => journal.close?.()));
     changeListeners.clear();
+    await memoryOutbox?.close().catch(() => {});
+    await memoryService?.close().catch(() => {});
     await taskRouter?.close().catch(() => {});
     await registry?.close().catch(() => {});
   }
@@ -450,6 +486,8 @@ export function createRuntimeManager({
       registry,
       taskRouter,
       patchCoordinator,
+      memoryService,
+      memoryOutbox,
       primaryWorkspaceId,
       storageError,
       runtimes,
@@ -479,6 +517,8 @@ export function createRuntimeManager({
     get registry() { return registry; },
     get taskRouter() { return taskRouter; },
     get patchCoordinator() { return patchCoordinator; },
+    get memoryService() { return memoryService; },
+    get memoryOutbox() { return memoryOutbox; },
     get primaryWorkspaceId() { return primaryWorkspaceId; },
     get storageError() { return storageError; },
     runtimes,

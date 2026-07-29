@@ -10,8 +10,15 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { brotliCompressSync } from "node:zlib";
 import {
+  EXPECTED_MEMORY_ACTIONS,
+  EXPECTED_MEMORY_FRESHNESS,
+  EXPECTED_MEMORY_KINDS,
+  EXPECTED_MEMORY_LIFECYCLES,
+  EXPECTED_TASK_CLOSE_MEMORY_ACTIONS,
+  EXPECTED_CATALOG_VERSION,
   EXPECTED_TOOLS,
-  MAX_TOOLS_LIST_BYTES
+  MAX_COMPRESSED_TOOLS_LIST_SAFETY_BYTES,
+  MAX_TOOLS_LIST_SAFETY_BYTES
 } from "../helpers/catalog-contract.mjs";
 import { createGitFixture, createIsolatedTestRoot, safeRemove } from "../helpers/test-guard.mjs";
 import { startTestServer, stopTestProcess } from "../helpers/test-runtime.mjs";
@@ -78,6 +85,8 @@ try {
   assert.match(instructions, /discovery-group:task-planning/);
   assert.match(instructions, /Do not invent free-form discovery queries/);
   assert.match(instructions, /do not fall back to the full catalog/i);
+  assert.match(instructions, /Use `lca_input` only when the user explicitly requests/i);
+  assert.match(instructions, /Do not call `workspace_memory` as a mandatory startup step/i);
   assert.doesNotMatch(instructions, /\bworkspace_doctor\b|\brepo_symbols\b|\bsession_report\b|\brequest_approval\b/);
 
   await rpc(runtime.port, {
@@ -96,7 +105,7 @@ try {
   const tools = listed.message?.result?.tools;
   assert.ok(Array.isArray(tools), "tools/list must return a tools array");
   const names = tools.map((tool) => tool.name);
-  assert.equal(names.length, 36, `expected 36 production tools, received ${names.length}`);
+  assert.equal(names.length, 37, `expected 37 production tools, received ${names.length}`);
   assert.deepEqual([...names].sort(), [...EXPECTED_TOOLS].sort());
   for (const tool of tools) {
     assert.match(tool.description || "", /discovery-group:/, `${tool.name} must publish a discovery group tag`);
@@ -116,19 +125,97 @@ try {
     "workspace_list",
     "workspace_select"
   ].sort());
+  const applyPatchTool = tools.find((tool) => tool.name === "apply_patch");
   assert.equal(
-    tools.find((tool) => tool.name === "apply_patch")?.description?.includes("discovery-group:task-planning"),
+    applyPatchTool?.description?.includes("discovery-group:task-planning"),
     false,
     "planning-only discovery must not load mutation tools"
   );
+  assert.match(applyPatchTool?.description || "", /fallback workspace/i);
+  assert.match(applyPatchTool?.description || "", /stale-version checks through expected_version/i);
+  assert.match(applyPatchTool?.description || "", /all-before\/all-after transaction recovery/i);
+  const patchOperationProperties = applyPatchTool?.inputSchema?.properties?.operations?.items?.properties || {};
+  assert.match(patchOperationProperties.expected_version?.description || "", /reject stale/i);
+
+  const taskOpenTool = tools.find((tool) => tool.name === "task_open");
+  const taskOpenProperties = taskOpenTool?.inputSchema?.properties || {};
+  assert.deepEqual(taskOpenProperties.memory_mode?.enum, ["auto", "skip", "full"]);
+  assert.ok(taskOpenProperties.include_recent_tasks);
+  assert.ok(taskOpenProperties.relevant_paths);
+  assert.match(taskOpenTool?.description || "", /quick_edit receives light path-aware context/i);
+
+  const memoryTool = tools.find((tool) => tool.name === "workspace_memory");
+  const memoryProperties = memoryTool?.inputSchema?.properties || {};
+  assert.match(memoryTool?.description || "", /adaptive skip\/light\/full Memory/i);
+  assert.deepEqual(
+    [...(memoryProperties.action?.enum || [])].sort(),
+    [...EXPECTED_MEMORY_ACTIONS].sort(),
+    "workspace_memory must publish every supported action explicitly"
+  );
+  assert.deepEqual(
+    [...(memoryProperties.kind?.enum || [])].sort(),
+    [...EXPECTED_MEMORY_KINDS].sort(),
+    "workspace_memory kind must remain a typed enum"
+  );
+  assert.deepEqual(
+    [...(memoryProperties.lifecycle?.enum || [])].sort(),
+    [...EXPECTED_MEMORY_LIFECYCLES].sort(),
+    "workspace_memory lifecycle must remain a typed enum"
+  );
+  assert.deepEqual(
+    [...(memoryProperties.freshness?.enum || [])].sort(),
+    [...EXPECTED_MEMORY_FRESHNESS].sort(),
+    "workspace_memory freshness must remain a typed enum"
+  );
+  for (const property of [
+    "replacement",
+    "confidence",
+    "enabled",
+    "auto_load",
+    "include_recent_tasks",
+    "semantic_search",
+    "limit",
+    "offset"
+  ]) {
+    assert.ok(memoryProperties[property], `workspace_memory must describe ${property}`);
+  }
+
+  const taskCloseTool = tools.find((tool) => tool.name === "task_close");
+  const memoryUpdateItems = taskCloseTool?.inputSchema?.properties?.memory_updates?.items;
+  assert.equal(memoryUpdateItems?.type, "object", "task_close.memory_updates items must be typed objects");
+  assert.deepEqual(
+    [...(memoryUpdateItems?.properties?.action?.enum || [])].sort(),
+    [...EXPECTED_TASK_CLOSE_MEMORY_ACTIONS].sort(),
+    "task_close.memory_updates must publish supported actions explicitly"
+  );
+  for (const property of [
+    "id",
+    "workspace_id",
+    "kind",
+    "title",
+    "summary",
+    "lifecycle",
+    "freshness",
+    "confidence",
+    "paths",
+    "tags",
+    "expected_revision",
+    "replacement"
+  ]) {
+    assert.ok(
+      memoryUpdateItems?.properties?.[property],
+      `task_close.memory_updates must describe ${property}`
+    );
+  }
+
   assert.ok(
-    listed.bytes < MAX_TOOLS_LIST_BYTES,
-    `tools/list raw payload is ${listed.bytes} bytes; budget is < ${MAX_TOOLS_LIST_BYTES} bytes`
+    listed.bytes < MAX_TOOLS_LIST_SAFETY_BYTES,
+    `tools/list raw payload is ${listed.bytes} bytes; safety ceiling is < ${MAX_TOOLS_LIST_SAFETY_BYTES} bytes`
   );
   const compressedCatalogBytes = brotliCompressSync(Buffer.from(JSON.stringify(listed.message))).byteLength;
   assert.ok(
-    compressedCatalogBytes < 7_000,
-    `tools/list compressed payload is ${compressedCatalogBytes} bytes; budget is < 7000 bytes`
+    compressedCatalogBytes < MAX_COMPRESSED_TOOLS_LIST_SAFETY_BYTES,
+    `tools/list compressed payload is ${compressedCatalogBytes} bytes; safety ceiling is < ${MAX_COMPRESSED_TOOLS_LIST_SAFETY_BYTES} bytes`
   );
 
   const statusResponse = await rpc(runtime.port, {
@@ -142,7 +229,7 @@ try {
   assert.equal(toolResult?.isError, undefined, toolResult?.content?.[0]?.text || "lca_status failed");
   const status = JSON.parse(toolResult?.content?.[0]?.text || "{}");
   assert.equal(status.tool_catalog, "fixed");
-  assert.equal(status.catalog_version, 8);
+  assert.equal(status.catalog_version, EXPECTED_CATALOG_VERSION);
   assert.equal(status.catalog_hash, EXPECTED_CATALOG_HASH);
   assert.equal(status.multi_workspace.evicting_runtime_count, 0);
   const initialWorkspaceList = await callTool(runtime.port, sessionId, 31, "workspace_list", {});
@@ -218,9 +305,47 @@ try {
 
   const opened = await callTool(runtime.port, sessionId, 7, "task_open", {
     title: "Catalog isolation task",
+    complexity_hint: "quick_edit",
+    memory_mode: "auto",
+    include_recent_tasks: true,
+    relevant_paths: [{ path: "src/math.js" }],
     primary_workspace_id: workspaceBId
   });
   assert.equal(opened.data.task.primary_workspace_id, workspaceBId);
+  assert.equal(opened.data.task.memory_mode, "auto");
+  assert.equal(opened.data.task.include_recent_tasks, true);
+  assert.deepEqual(opened.data.task.relevant_paths, [{
+    workspace_id: workspaceBId,
+    path: "src/math.js"
+  }]);
+  assert.equal(opened.data.task.workspace_memory.available, true);
+  assert.equal(opened.data.task.workspace_memory.requested_mode, "auto");
+  assert.equal(opened.data.task.workspace_memory.effective_mode, "light");
+  assert.equal(opened.data.task.workspace_memory.semantic_used, false);
+  assert.equal(opened.data.task.workspace_memory.recent_tasks_included, false);
+  assert.deepEqual(opened.data.task.workspace_memory.recent_tasks, []);
+  assert.ok(
+    Buffer.byteLength(JSON.stringify(opened.data.task.workspace_memory), "utf8") <= 1_024,
+    "quick_edit workspace memory payload must stay within 1 KiB"
+  );
+  const savedMemory = await callTool(runtime.port, sessionId, 67, "workspace_memory", {
+    action: "save",
+    workspace_id: workspaceBId,
+    kind: "architecture_decision",
+    title: "Catalog memory contract",
+    summary: "Workspace memory is explicit durable project context, not raw chat.",
+    pinned: true,
+    paths: ["src/math.js"],
+    tags: ["catalog"]
+  });
+  assert.equal(savedMemory.data.ok, true);
+  assert.equal(savedMemory.data.item.workspace_id, workspaceBId);
+  const listedMemory = await callTool(runtime.port, sessionId, 68, "workspace_memory", {
+    action: "list",
+    workspace_id: workspaceBId
+  });
+  assert.equal(listedMemory.data.count, 1);
+  assert.equal(listedMemory.data.items[0].title, "Catalog memory contract");
   await callTool(runtime.port, sessionId, 65, "workspace_select", {
     workspace_id: status.configured_primary_workspace_id
   });
@@ -402,6 +527,10 @@ try {
     title: "Scoped note",
     body: "workspace B only"
   });
+  assert.ok(
+    savedNote.data?.note,
+    `notes save must return a note: ${savedNote.text || JSON.stringify(savedNote.data)}`
+  );
   assert.equal(savedNote.data.note.workspace_id, workspaceBId);
   const listedNotes = await callTool(runtime.port, sessionId, 10, "notes", {
     action: "list",
@@ -489,6 +618,10 @@ try {
     task_token: opened.data.task.task_token
   });
   assert.equal(resumedAfterChanges.data.resumed, true);
+  assert.equal(resumedAfterChanges.data.task.memory_mode, "auto");
+  assert.equal(resumedAfterChanges.data.task.include_recent_tasks, true);
+  assert.equal(resumedAfterChanges.data.task.workspace_memory.effective_mode, "light");
+  assert.deepEqual(resumedAfterChanges.data.task.relevant_paths, opened.data.task.relevant_paths);
   assert.deepEqual(
     resumedAfterChanges.data.task.workspace_state[0],
     openedBaseline,

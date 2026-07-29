@@ -14,8 +14,8 @@ import { performance } from "node:perf_hooks";
 import { Worker } from "node:worker_threads";
 
 export const MINIMUM_SQLITE_NODE_VERSION = Object.freeze({ major: 22, minor: 13, patch: 0 });
-export const REGISTRY_SCHEMA_VERSION = 7;
-export const WORKSPACE_SCHEMA_VERSION = 2;
+export const REGISTRY_SCHEMA_VERSION = 9;
+export const WORKSPACE_SCHEMA_VERSION = 4;
 
 const STORAGE_WORKER_URL = new URL("./worker.mjs", import.meta.url);
 let capabilityPromise = null;
@@ -152,6 +152,59 @@ const REGISTRY_TASK_DETACHED_SCHEMA_SQL = `
   WHERE status = 'open' AND owner_session_id IS NULL;
 `;
 
+const REGISTRY_TASK_MEMORY_POLICY_SCHEMA_SQL = `
+  ALTER TABLE task_router_tasks ADD COLUMN memory_mode TEXT NOT NULL DEFAULT 'auto'
+    CHECK(memory_mode IN ('auto', 'skip', 'full'));
+  ALTER TABLE task_router_tasks ADD COLUMN include_recent_tasks INTEGER NOT NULL DEFAULT 0
+    CHECK(include_recent_tasks IN (0, 1));
+  ALTER TABLE task_router_tasks ADD COLUMN relevant_paths_json TEXT NOT NULL DEFAULT '[]';
+`;
+
+const REGISTRY_TASK_MEMORY_OUTBOX_SCHEMA_SQL = `
+  CREATE TABLE IF NOT EXISTS task_memory_outbox (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL REFERENCES task_router_tasks(id) ON DELETE CASCADE,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE RESTRICT,
+    payload_hash TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending'
+      CHECK(status IN ('pending', 'processing', 'retry', 'complete', 'partial', 'failed')),
+    attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts >= 0),
+    available_at TEXT NOT NULL,
+    lease_owner TEXT,
+    lease_expires_at TEXT,
+    result_json TEXT,
+    last_error_code TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    completed_at TEXT,
+    UNIQUE(task_id, workspace_id, payload_hash)
+  );
+  CREATE INDEX IF NOT EXISTS task_memory_outbox_ready_idx
+    ON task_memory_outbox(status, available_at, created_at, id);
+  CREATE INDEX IF NOT EXISTS task_memory_outbox_workspace_idx
+    ON task_memory_outbox(workspace_id, status, updated_at, id);
+
+  CREATE TRIGGER IF NOT EXISTS task_memory_outbox_enqueue_guard
+  BEFORE INSERT ON task_memory_outbox
+  WHEN NOT EXISTS (
+    SELECT 1 FROM task_memory_outbox
+    WHERE task_id = NEW.task_id
+      AND workspace_id = NEW.workspace_id
+      AND payload_hash = NEW.payload_hash
+  )
+  BEGIN
+    SELECT CASE WHEN NOT EXISTS (
+      SELECT 1 FROM task_router_tasks
+      WHERE id = NEW.task_id AND status = 'open'
+    ) THEN RAISE(ABORT, 'TASK_MEMORY_OUTBOX_TASK_NOT_OPEN') END;
+    SELECT CASE WHEN NOT EXISTS (
+      SELECT 1 FROM task_router_workspaces
+      WHERE task_id = NEW.task_id AND workspace_id = NEW.workspace_id
+    ) THEN RAISE(ABORT, 'TASK_MEMORY_OUTBOX_WORKSPACE_NOT_ATTACHED') END;
+  END;
+`;
+
 const WORKSPACE_SCHEMA_SQL = `
   CREATE TABLE IF NOT EXISTS schema_meta (
     key TEXT PRIMARY KEY,
@@ -204,6 +257,98 @@ const WORKSPACE_NOTES_SCHEMA_SQL = `
   );
   CREATE INDEX IF NOT EXISTS notes_task_created_idx
     ON notes(task_id, created_at DESC, id);
+`;
+
+const WORKSPACE_MEMORY_SCHEMA_SQL = `
+  CREATE TABLE IF NOT EXISTS workspace_memory_meta (
+    workspace_id TEXT PRIMARY KEY,
+    revision INTEGER NOT NULL DEFAULT 0 CHECK(revision >= 0),
+    enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),
+    auto_load INTEGER NOT NULL DEFAULT 1 CHECK(auto_load IN (0, 1)),
+    include_recent_tasks INTEGER NOT NULL DEFAULT 1 CHECK(include_recent_tasks IN (0, 1)),
+    cached_brief_json TEXT NOT NULL DEFAULT '[]',
+    cached_brief_revision INTEGER NOT NULL DEFAULT 0 CHECK(cached_brief_revision >= 0),
+    updated_at TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS workspace_memory_items (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK(kind IN (
+      'project_goal', 'architecture_decision', 'constraint', 'known_issue',
+      'open_question', 'user_preference', 'verification_result'
+    )),
+    title TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    lifecycle TEXT NOT NULL DEFAULT 'active'
+      CHECK(lifecycle IN ('active', 'resolved', 'superseded', 'archived')),
+    freshness TEXT NOT NULL DEFAULT 'current'
+      CHECK(freshness IN ('current', 'needs_review', 'stale')),
+    pinned INTEGER NOT NULL DEFAULT 0 CHECK(pinned IN (0, 1)),
+    origin TEXT NOT NULL DEFAULT 'model' CHECK(origin IN ('user', 'model', 'system')),
+    confidence REAL NOT NULL DEFAULT 1 CHECK(confidence >= 0 AND confidence <= 1),
+    source_task_id TEXT,
+    source_head TEXT,
+    supersedes_id TEXT,
+    revision INTEGER NOT NULL DEFAULT 1 CHECK(revision >= 1),
+    content_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    archived_at TEXT
+  );
+  CREATE INDEX IF NOT EXISTS workspace_memory_items_scope_idx
+    ON workspace_memory_items(workspace_id, lifecycle, freshness, pinned DESC, updated_at DESC);
+  CREATE INDEX IF NOT EXISTS workspace_memory_items_source_task_idx
+    ON workspace_memory_items(source_task_id, updated_at DESC);
+
+  CREATE TABLE IF NOT EXISTS workspace_memory_paths (
+    memory_id TEXT NOT NULL REFERENCES workspace_memory_items(id) ON DELETE CASCADE,
+    path TEXT NOT NULL,
+    PRIMARY KEY(memory_id, path)
+  );
+  CREATE INDEX IF NOT EXISTS workspace_memory_paths_path_idx
+    ON workspace_memory_paths(path, memory_id);
+
+  CREATE TABLE IF NOT EXISTS workspace_memory_tags (
+    memory_id TEXT NOT NULL REFERENCES workspace_memory_items(id) ON DELETE CASCADE,
+    tag TEXT NOT NULL,
+    PRIMARY KEY(memory_id, tag)
+  );
+  CREATE INDEX IF NOT EXISTS workspace_memory_tags_tag_idx
+    ON workspace_memory_tags(tag, memory_id);
+
+  CREATE TABLE IF NOT EXISTS workspace_memory_events (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    memory_id TEXT,
+    operation TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    task_id TEXT,
+    before_hash TEXT,
+    after_hash TEXT,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS workspace_memory_events_scope_idx
+    ON workspace_memory_events(workspace_id, created_at DESC, id);
+`;
+
+const WORKSPACE_MEMORY_EMBEDDING_SCHEMA_SQL = `
+  ALTER TABLE workspace_memory_meta ADD COLUMN semantic_search INTEGER NOT NULL DEFAULT 1
+    CHECK(semantic_search IN (0, 1));
+
+  CREATE TABLE IF NOT EXISTS workspace_memory_embeddings (
+    memory_id TEXT NOT NULL REFERENCES workspace_memory_items(id) ON DELETE CASCADE,
+    workspace_id TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    model_id TEXT NOT NULL,
+    dimensions INTEGER NOT NULL CHECK(dimensions > 0 AND dimensions <= 65_536),
+    vector BLOB NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(memory_id, model_id)
+  );
+  CREATE INDEX IF NOT EXISTS workspace_memory_embeddings_scope_idx
+    ON workspace_memory_embeddings(workspace_id, model_id, updated_at DESC);
 `;
 
 export class StorageError extends Error {
@@ -700,7 +845,9 @@ export async function openRegistryDatabase({
           { version: 4, sql: REGISTRY_TRANSACTION_COORDINATOR_SCHEMA_SQL },
           { version: 5, sql: REGISTRY_WORKSPACE_LIFECYCLE_SCHEMA_SQL },
           { version: 6, sql: REGISTRY_TASK_ORCHESTRATION_SCHEMA_SQL },
-          { version: 7, sql: REGISTRY_TASK_DETACHED_SCHEMA_SQL }
+          { version: 7, sql: REGISTRY_TASK_DETACHED_SCHEMA_SQL },
+          { version: 8, sql: REGISTRY_TASK_MEMORY_POLICY_SCHEMA_SQL },
+          { version: 9, sql: REGISTRY_TASK_MEMORY_OUTBOX_SCHEMA_SQL }
         ]
       }
     });
@@ -729,7 +876,9 @@ export async function openWorkspaceDatabase({
       version: WORKSPACE_SCHEMA_VERSION,
       migrations: [
         { version: 1, sql: WORKSPACE_SCHEMA_SQL },
-        { version: 2, sql: WORKSPACE_NOTES_SCHEMA_SQL }
+        { version: 2, sql: WORKSPACE_NOTES_SCHEMA_SQL },
+        { version: 3, sql: WORKSPACE_MEMORY_SCHEMA_SQL },
+        { version: 4, sql: WORKSPACE_MEMORY_EMBEDDING_SCHEMA_SQL }
       ]
     }
   });

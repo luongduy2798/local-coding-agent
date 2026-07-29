@@ -114,6 +114,31 @@ export async function loadApplicationConfig() {
     10_000,
     24 * 60 * 60_000
   );
+  const memorySemanticEnabled = process.env.AGENT_MEMORY_SEMANTIC === "1" ||
+    (!process.env.LCA_TEST_RUN_ID && process.env.AGENT_MEMORY_SEMANTIC !== "0");
+  const memorySemanticConfig = {
+    enabled: memorySemanticEnabled,
+    modelId: String(
+      process.env.AGENT_MEMORY_EMBEDDING_MODEL || "Xenova/multilingual-e5-small"
+    ).trim().slice(0, 240),
+    dtype: String(process.env.AGENT_MEMORY_EMBEDDING_DTYPE || "q8").trim().slice(0, 32),
+    cacheDir: path.join(runtimeDataDir, "models", "transformers"),
+    allowRemoteModels: process.env.AGENT_MEMORY_ALLOW_REMOTE_MODELS !== "0",
+    deadlineMs: boundedNumber(process.env.AGENT_MEMORY_SEMANTIC_DEADLINE_MS, 10, 1, 100),
+    preloadDelayMs: boundedNumber(
+      process.env.AGENT_MEMORY_EMBEDDING_PRELOAD_DELAY_MS,
+      2_000,
+      0,
+      120_000
+    ),
+    maxPending: boundedNumber(process.env.AGENT_MEMORY_EMBEDDING_MAX_PENDING, 16, 1, 128),
+    workerMaxOldGenerationMb: boundedNumber(
+      process.env.AGENT_MEMORY_EMBEDDING_WORKER_MB,
+      512,
+      128,
+      2_048
+    )
+  };
   const nonGitMutationMaxFiles = boundedNumber(process.env.AGENT_NON_GIT_MUTATION_MAX_FILES, 10_000, 100, 100_000);
   const nonGitMutationMaxFileBytes = boundedNumber(
     process.env.AGENT_NON_GIT_MUTATION_MAX_FILE_BYTES,
@@ -179,6 +204,7 @@ export async function loadApplicationConfig() {
     MAX_READ_CHARS: maxReadChars,
     MAX_SEARCH_PROCESSES: maxSearchProcesses,
     MAX_SERIALIZED_RESPONSE_CHARS: maxSerializedResponseChars,
+    MEMORY_SEMANTIC_CONFIG: memorySemanticConfig,
     MCP_MAX_SESSIONS: maxSessions,
     MCP_SESSION_IDLE_TTL_MS: sessionIdleTtlMs,
     MODE: mode,

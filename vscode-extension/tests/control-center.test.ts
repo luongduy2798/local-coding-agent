@@ -7,6 +7,8 @@ import type { HealthResponse } from "../src/api/api-types.js";
 import { ConnectionManager } from "../src/connection/connection-manager.js";
 import { ReviewChangesStore } from "../src/review-changes/review-changes-store.js";
 import { filterAuditForRegisteredWorkspaces } from "../src/control-center/control-center-store.js";
+import { WorkspaceMemoryRoute } from "../src/webview/memory-view.js";
+import { DEFAULT_HOST_CAPABILITIES } from "../src/webview/protocol.js";
 import {
   buildWorkspaceTasks,
   ChronologicalTaskFeed,
@@ -180,6 +182,73 @@ async function main(): Promise<void> {
   assert.equal(taskActivitiesExpanded("auto", false), false, "older tasks collapse calls by default");
   assert.equal(taskActivitiesExpanded("collapsed", true), false, "users can collapse the latest task");
   assert.equal(taskActivitiesExpanded("expanded", false), true, "users can keep an older task expanded");
+  assert.equal(DEFAULT_HOST_CAPABILITIES.vscode.memoryManagement, true);
+  assert.equal(DEFAULT_HOST_CAPABILITIES.browser.memoryManagement, true);
+  assert.equal(DEFAULT_HOST_CAPABILITIES.jetbrains.memoryManagement, true);
+  const renderedMemory = renderToStaticMarkup(React.createElement(WorkspaceMemoryRoute, {
+    memory: {
+      workspace_id: "ws_cccccccccccccccc",
+      revision: 7,
+      settings: {
+        enabled: true,
+        auto_load: true,
+        include_recent_tasks: true,
+        semantic_search: true,
+      },
+      semantic: {
+        enabled: true,
+        state: "ready",
+        ready: true,
+        model_id: "test/multilingual-e5-small",
+        deadline_ms: 10,
+        indexed_items: 1,
+        current_items: 1,
+      },
+      counts: { total: 1, active: 1, pinned: 1, needs_review: 0 },
+      brief: "architecture_decision: Managed execution boundary — ChatGPT reasons and LCA executes with journaled control.",
+      items: [{
+        id: "memory_renderfixture1",
+        workspace_id: "ws_cccccccccccccccc",
+        kind: "architecture_decision",
+        title: "Managed execution boundary",
+        summary: "ChatGPT reasons and LCA executes with journaled control.",
+        lifecycle: "active",
+        freshness: "current",
+        pinned: true,
+        origin: "user",
+        confidence: 1,
+        source_task_id: "task_renderfeed0001",
+        source_head: null,
+        supersedes_id: null,
+        revision: 1,
+        content_hash: "hash",
+        created_at: "2026-07-22T03:00:00.000Z",
+        updated_at: "2026-07-22T03:00:00.000Z",
+        archived_at: null,
+        paths: ["server/src/app/runtime-manager.mjs"],
+        tags: ["architecture"]
+      }],
+      loading: false
+    },
+    workspaceLabel: "local-coding-agent",
+    trusted: true,
+    onBack: () => undefined,
+    onRefresh: () => undefined,
+    onSave: () => undefined,
+    onUpdate: () => undefined,
+    onTransition: () => undefined,
+    onDelete: () => undefined,
+    onSettings: () => undefined,
+    onOpenPath: () => undefined
+  }));
+  assert.match(renderedMemory, /PERSISTENT WORKSPACE MEMORY/);
+  assert.match(renderedMemory, /Adaptive auto-load on task_open/);
+  assert.match(renderedMemory, /Allow recent-task context when requested/);
+  assert.match(renderedMemory, /Local semantic search/);
+  assert.match(renderedMemory, /test\/multilingual-e5-small/);
+  assert.match(renderedMemory, /Managed execution boundary/);
+  assert.match(renderedMemory, /server\/src\/app\/runtime-manager\.mjs/);
+  assert.match(renderedMemory, /Pin|Unpin/);
 
   const taskActivities = [
     {

@@ -7,6 +7,10 @@ import type {
   ChangeMutationResponse,
   HealthResponse,
   ReviewScope,
+  WorkspaceMemoryInput,
+  WorkspaceMemoryItem,
+  WorkspaceMemorySnapshot,
+  WorkspaceMemorySettings,
 } from "./api-types.js";
 
 export class LcaApiError extends Error {
@@ -145,6 +149,75 @@ export class LcaClient {
   ): Promise<{ ok: boolean; workspace_id: string; deleted: number; history_deleted: number }> {
     const query = new URLSearchParams({ workspace_id: workspaceId });
     return this.request(`/tasks?${query.toString()}`, { method: "DELETE" });
+  }
+
+  getWorkspaceMemory(workspaceId: string): Promise<WorkspaceMemorySnapshot> {
+    const query = new URLSearchParams({ workspace_id: workspaceId });
+    return this.request(`/memory?${query.toString()}`);
+  }
+
+  createWorkspaceMemory(
+    workspaceId: string,
+    input: WorkspaceMemoryInput,
+  ): Promise<{ ok: boolean; workspace_id: string; item: WorkspaceMemoryItem }> {
+    const query = new URLSearchParams({ workspace_id: workspaceId });
+    return this.request(`/memory?${query.toString()}`, {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  }
+
+  updateWorkspaceMemory(
+    workspaceId: string,
+    memoryId: string,
+    input: WorkspaceMemoryInput,
+  ): Promise<{ ok: boolean; workspace_id: string; item: WorkspaceMemoryItem }> {
+    const query = new URLSearchParams({ workspace_id: workspaceId });
+    return this.request(`/memory/${encodeURIComponent(memoryId)}?${query.toString()}`, {
+      method: "PATCH",
+      body: JSON.stringify(input),
+    });
+  }
+
+  transitionWorkspaceMemory(
+    workspaceId: string,
+    memoryId: string,
+    action: string,
+    input: WorkspaceMemoryInput = {},
+  ): Promise<{ ok: boolean; workspace_id: string; item: WorkspaceMemoryItem }> {
+    const query = new URLSearchParams({ workspace_id: workspaceId });
+    return this.request(
+      `/memory/${encodeURIComponent(memoryId)}/${encodeURIComponent(action)}?${query.toString()}`,
+      { method: "POST", body: JSON.stringify(input) },
+    );
+  }
+
+  deleteWorkspaceMemory(
+    workspaceId: string,
+    memoryId: string,
+  ): Promise<{ ok: boolean; workspace_id: string; deleted: boolean; memory_id: string }> {
+    const query = new URLSearchParams({ workspace_id: workspaceId });
+    return this.request(`/memory/${encodeURIComponent(memoryId)}?${query.toString()}`, {
+      method: "DELETE",
+    });
+  }
+
+  retryFailedWorkspaceMemory(
+    workspaceId: string,
+  ): Promise<{ ok: boolean; workspace_id: string; retried: number }> {
+    const query = new URLSearchParams({ workspace_id: workspaceId });
+    return this.request(`/memory/outbox/retry-failed?${query.toString()}`, { method: "POST" });
+  }
+
+  updateWorkspaceMemorySettings(
+    workspaceId: string,
+    input: WorkspaceMemoryInput,
+  ): Promise<{ ok: boolean; workspace_id: string; settings: WorkspaceMemorySettings }> {
+    const query = new URLSearchParams({ workspace_id: workspaceId });
+    return this.request(`/memory/settings?${query.toString()}`, {
+      method: "PATCH",
+      body: JSON.stringify(input),
+    });
   }
 
   async watchChangeEvents(

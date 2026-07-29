@@ -6,6 +6,11 @@ import { mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import { TaskRouterError } from "../../workspace/task-router.mjs";
+import {
+  MAX_TASK_CLOSE_MEMORY_OPERATIONS,
+  prepareTaskMemoryOutbox
+} from "../../workspace/task-memory-outbox-policy.mjs";
+import { TASK_CLOSE_MEMORY_UPDATE_SCHEMA } from "./memory.mjs";
 
 export function registerSystemTools(mcp, dependencies) {
   const {
@@ -28,6 +33,8 @@ export function registerSystemTools(mcp, dependencies) {
     jsonResult,
     killProcessTree,
     markUnmanagedChange,
+    memoryOutbox,
+    memoryService,
     mutationFingerprintChanged,
     pageScope,
     preflightTaskClose,
@@ -114,10 +121,13 @@ export function registerSystemTools(mcp, dependencies) {
       inputSchema: {
         title: z.string().max(180).optional(),
         status: z.enum(["complete", "incomplete", "failed"]).optional(),
-        task_token: z.string().optional()
+        task_token: z.string().optional(),
+        memory_updates: z.array(TASK_CLOSE_MEMORY_UPDATE_SCHEMA).max(MAX_TASK_CLOSE_MEMORY_OPERATIONS).optional().describe(
+          "Optional compact durable workspace Memory operations. Default to zero updates; routine edits and task logs do not belong in Memory. Normal tasks should usually save at most one item and complex tasks at most two. Accepted updates are durably queued with task closure and persisted asynchronously."
+        )
       }
     },
-    async ({ title, status = "complete", task_token }) => {
+    async ({ title, status = "complete", task_token, memory_updates = [] }) => {
       if (!taskRouter) {
         const reviewTasks = [{
           workspace_id: primaryWorkspaceId,
@@ -168,6 +178,26 @@ export function registerSystemTools(mcp, dependencies) {
           },
           incomplete_reasons: ["TASK_PROCESS_RUNNING"]
         });
+      }
+
+      let preparedMemory = {
+        jobs: [],
+        response: {
+          status: "skipped",
+          job_ids: [],
+          accepted_updates: 0,
+          dropped_updates: 0,
+          drop_reasons: [],
+          workspace_count: 0
+        }
+      };
+      if (memory_updates.length) {
+        if (!memoryService || !memoryOutbox) {
+          const error = new Error("Durable task-close Memory persistence is unavailable.");
+          error.code = "WORKSPACE_MEMORY_OUTBOX_UNAVAILABLE";
+          throw error;
+        }
+        preparedMemory = prepareTaskMemoryOutbox(openTask, memory_updates);
       }
 
       // Validate every journal before publishing a durable close intent. This
@@ -267,7 +297,8 @@ export function registerSystemTools(mcp, dependencies) {
         routedTask = await taskRouter.closeTask({
           taskToken: task_token,
           sessionId: currentMcpSessionId(),
-          status: effectiveStatus === "failed" ? "failed" : "closed"
+          status: effectiveStatus === "failed" ? "failed" : "closed",
+          memoryJobs: preparedMemory.jobs
         });
       } catch {
         const rolledBack = await rollbackCompletedTaskJournals(
@@ -291,10 +322,12 @@ export function registerSystemTools(mcp, dependencies) {
           ]
         });
       }
+      memoryService?.invalidateRecentTasks(openTask.workspace_ids);
       intent.status = "complete";
       intent.updated_at = isoNow();
       intent.router_status = routedTask.status;
       const intentDurable = await atomicWriteJson(intentPath, intent).then(() => true, () => false);
+      if (preparedMemory.jobs.length) memoryOutbox.wake();
       return jsonResult({
         ok: true,
         status: effectiveStatus,
@@ -306,7 +339,8 @@ export function registerSystemTools(mcp, dependencies) {
           status: intentDurable ? "complete" : "recovery_pending",
           workspace_count: intent.workspace_ids.length
         },
-        review_changes_tasks: finalized.filter((entry) => entry.task)
+        review_changes_tasks: finalized.filter((entry) => entry.task),
+        memory_persistence: preparedMemory.response
       });
     }
   );

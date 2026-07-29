@@ -14,6 +14,7 @@ export function createChangeRoutes({
   getRegistry,
   getTaskRouter,
   getProcesses,
+  onTaskClosed,
   maxBodyBytes,
   primaryRoot,
   readJsonBody,
@@ -129,6 +130,7 @@ export function createChangeRoutes({
           );
         }
         const closed = await taskRouter.closeDetachedTask({ taskId: task.id });
+        await onTaskClosed?.(closed);
         return sendJson(res, 200, {
           ok: true,
           workspace_id: workspaceId,

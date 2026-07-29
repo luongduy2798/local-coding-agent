@@ -148,6 +148,17 @@ export function createStatusService({
         search_processes: searchProcessPool.status(),
         storage: controlPlane.storageHealth,
         indexes: indexMetrics,
+        workspace_memory: {
+          ...(state.memoryService?.status?.() || { available: false }),
+          outbox: state.memoryOutbox?.status?.() || {
+            available: false,
+            pending: 0,
+            processing: 0,
+            retrying: 0,
+            failed: 0,
+            last_completed_at: null
+          }
+        },
         audit: auditStatus(),
         memory: {
           rss: memory.rss,

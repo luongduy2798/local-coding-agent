@@ -18,6 +18,15 @@ import {
   validateToken,
   workspaceIdentityAvailable
 } from "./registry-helpers.mjs";
+import {
+  embeddingVectorFromBlob,
+  escapeLike,
+  hydrateMemoryRows,
+  memoryEventStep,
+  memoryMetaBumpStep,
+  memoryMetaFromRow,
+  validateMemoryId
+} from "./workspace-memory-database-helpers.mjs";
 
 export class WorkspaceDatabase {
   #database = null;
@@ -159,6 +168,513 @@ export class WorkspaceDatabase {
       ]
     ));
     return noteFromRow(row);
+  }
+
+  async getMemoryMeta() {
+    const timestamp = nowIso();
+    const results = await this.#withDatabase((database) => database.batch([
+      {
+        mode: "run",
+        sql: `
+          INSERT INTO workspace_memory_meta(workspace_id, updated_at)
+          VALUES (?, ?)
+          ON CONFLICT(workspace_id) DO NOTHING
+        `,
+        params: [this.workspaceId, timestamp]
+      },
+      {
+        mode: "get",
+        sql: "SELECT * FROM workspace_memory_meta WHERE workspace_id = ?",
+        params: [this.workspaceId]
+      }
+    ]));
+    return memoryMetaFromRow(results[1], this.workspaceId);
+  }
+
+  async updateMemorySettings({ enabled, autoLoad, includeRecentTasks, semanticSearch } = {}) {
+    await this.getMemoryMeta();
+    const row = await this.#withDatabase((database) => database.get(
+      `
+        UPDATE workspace_memory_meta
+        SET enabled = COALESCE(?, enabled),
+            auto_load = COALESCE(?, auto_load),
+            include_recent_tasks = COALESCE(?, include_recent_tasks),
+            semantic_search = COALESCE(?, semantic_search),
+            revision = revision + 1,
+            cached_brief_revision = 0,
+            updated_at = ?
+        WHERE workspace_id = ?
+        RETURNING *
+      `,
+      [
+        enabled === undefined ? null : enabled ? 1 : 0,
+        autoLoad === undefined ? null : autoLoad ? 1 : 0,
+        includeRecentTasks === undefined ? null : includeRecentTasks ? 1 : 0,
+        semanticSearch === undefined ? null : semanticSearch ? 1 : 0,
+        nowIso(),
+        this.workspaceId
+      ]
+    ));
+    return memoryMetaFromRow(row, this.workspaceId);
+  }
+
+  async listMemoryItems({ query, kind, lifecycle, freshness, limit = 100, offset = 0 } = {}) {
+    const clauses = ["workspace_id = ?"];
+    const params = [this.workspaceId];
+    if (query) {
+      clauses.push("(title LIKE ? ESCAPE '\\' OR summary LIKE ? ESCAPE '\\')");
+      const like = `%${escapeLike(query)}%`;
+      params.push(like, like);
+    }
+    if (kind) {
+      clauses.push("kind = ?");
+      params.push(String(kind));
+    }
+    if (lifecycle) {
+      clauses.push("lifecycle = ?");
+      params.push(String(lifecycle));
+    }
+    if (freshness) {
+      clauses.push("freshness = ?");
+      params.push(String(freshness));
+    }
+    const boundedLimit = Math.max(1, Math.min(501, Number(limit) || 100));
+    const boundedOffset = Math.max(0, Math.min(100_000, Number(offset) || 0));
+    params.push(boundedLimit, boundedOffset);
+    return this.#withDatabase(async (database) => {
+      const rows = await database.all(
+        `
+          SELECT * FROM workspace_memory_items
+          WHERE ${clauses.join(" AND ")}
+          ORDER BY pinned DESC, updated_at DESC, id
+          LIMIT ? OFFSET ?
+        `,
+        params
+      );
+      return hydrateMemoryRows(database, rows);
+    });
+  }
+
+  async getMemoryItem(memoryId) {
+    const id = validateMemoryId(memoryId);
+    return this.#withDatabase(async (database) => {
+      const row = await database.get(
+        "SELECT * FROM workspace_memory_items WHERE id = ? AND workspace_id = ?",
+        [id, this.workspaceId]
+      );
+      if (!row) return null;
+      return (await hydrateMemoryRows(database, [row]))[0];
+    });
+  }
+
+  async createMemoryItem(record) {
+    await this.getMemoryMeta();
+    const timestamp = record.createdAt || nowIso();
+    await this.#withDatabase((database) => database.batch([
+      {
+        mode: "run",
+        sql: `
+          INSERT INTO workspace_memory_items(
+            id, workspace_id, kind, title, summary, lifecycle, freshness,
+            pinned, origin, confidence, source_task_id, source_head,
+            supersedes_id, revision, content_hash, created_at, updated_at, archived_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
+        `,
+        params: [
+          record.id,
+          this.workspaceId,
+          record.kind,
+          record.title,
+          record.summary,
+          record.lifecycle,
+          record.freshness,
+          record.pinned ? 1 : 0,
+          record.origin,
+          record.confidence,
+          record.sourceTaskId || null,
+          record.sourceHead || null,
+          record.supersedesId || null,
+          record.contentHash,
+          timestamp,
+          timestamp,
+          record.archivedAt || null
+        ]
+      },
+      ...(record.paths || []).map((item) => ({
+        mode: "run",
+        sql: "INSERT INTO workspace_memory_paths(memory_id, path) VALUES (?, ?)",
+        params: [record.id, item]
+      })),
+      ...(record.tags || []).map((item) => ({
+        mode: "run",
+        sql: "INSERT INTO workspace_memory_tags(memory_id, tag) VALUES (?, ?)",
+        params: [record.id, item]
+      })),
+      memoryMetaBumpStep(this.workspaceId, timestamp),
+      memoryEventStep({
+        workspaceId: this.workspaceId,
+        memoryId: record.id,
+        operation: "create",
+        actor: record.actor || record.origin,
+        taskId: record.sourceTaskId,
+        afterHash: record.contentHash,
+        timestamp
+      })
+    ]));
+    return this.getMemoryItem(record.id);
+  }
+
+  async updateMemoryItem(record, { expectedRevision } = {}) {
+    const id = validateMemoryId(record.id);
+    const timestamp = nowIso();
+    const nextRevision = Number(expectedRevision) + 1;
+    const guard = `
+      EXISTS (
+        SELECT 1 FROM workspace_memory_items
+        WHERE id = ? AND workspace_id = ? AND revision = ? AND content_hash = ?
+      )
+    `;
+    const results = await this.#withDatabase((database) => database.batch([
+      {
+        mode: "run",
+        sql: `
+          UPDATE workspace_memory_items
+          SET kind = ?, title = ?, summary = ?, lifecycle = ?, freshness = ?,
+              pinned = ?, origin = ?, confidence = ?, source_task_id = ?,
+              source_head = ?, supersedes_id = ?, revision = revision + 1,
+              content_hash = ?, updated_at = ?, archived_at = ?
+          WHERE id = ? AND workspace_id = ? AND revision = ?
+        `,
+        params: [
+          record.kind,
+          record.title,
+          record.summary,
+          record.lifecycle,
+          record.freshness,
+          record.pinned ? 1 : 0,
+          record.origin,
+          record.confidence,
+          record.sourceTaskId || null,
+          record.sourceHead || null,
+          record.supersedesId || null,
+          record.contentHash,
+          timestamp,
+          record.archivedAt || null,
+          id,
+          this.workspaceId,
+          Number(expectedRevision)
+        ]
+      },
+      {
+        mode: "run",
+        sql: `DELETE FROM workspace_memory_paths WHERE memory_id = ? AND ${guard}`,
+        params: [id, id, this.workspaceId, nextRevision, record.contentHash]
+      },
+      {
+        mode: "run",
+        sql: `DELETE FROM workspace_memory_tags WHERE memory_id = ? AND ${guard}`,
+        params: [id, id, this.workspaceId, nextRevision, record.contentHash]
+      },
+      ...(record.paths || []).map((item) => ({
+        mode: "run",
+        sql: `
+          INSERT INTO workspace_memory_paths(memory_id, path)
+          SELECT ?, ? WHERE ${guard}
+        `,
+        params: [id, item, id, this.workspaceId, nextRevision, record.contentHash]
+      })),
+      ...(record.tags || []).map((item) => ({
+        mode: "run",
+        sql: `
+          INSERT INTO workspace_memory_tags(memory_id, tag)
+          SELECT ?, ? WHERE ${guard}
+        `,
+        params: [id, item, id, this.workspaceId, nextRevision, record.contentHash]
+      })),
+      {
+        mode: "run",
+        sql: `
+          INSERT INTO workspace_memory_meta(workspace_id, revision, updated_at)
+          SELECT ?, 1, ? WHERE ${guard}
+          ON CONFLICT(workspace_id) DO UPDATE SET
+            revision = workspace_memory_meta.revision + 1,
+            cached_brief_revision = 0,
+            updated_at = excluded.updated_at
+        `,
+        params: [
+          this.workspaceId,
+          timestamp,
+          id,
+          this.workspaceId,
+          nextRevision,
+          record.contentHash
+        ]
+      },
+      {
+        mode: "run",
+        sql: `
+          INSERT INTO workspace_memory_events(
+            id, workspace_id, memory_id, operation, actor, task_id,
+            before_hash, after_hash, created_at
+          )
+          SELECT ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE ${guard}
+        `,
+        params: [
+          `memory_event_${randomUUID().replaceAll("-", "")}`,
+          this.workspaceId,
+          id,
+          record.eventOperation || "update",
+          record.actor || record.origin,
+          record.sourceTaskId || null,
+          record.beforeHash || null,
+          record.contentHash,
+          timestamp,
+          id,
+          this.workspaceId,
+          nextRevision,
+          record.contentHash
+        ]
+      }
+    ]));
+    if (Number(results[0]?.changes || 0) === 0) {
+      throw new WorkspaceRegistryError(
+        "WORKSPACE_MEMORY_REVISION_CONFLICT",
+        `Workspace memory item changed before update: ${id}`,
+        { memoryId: id, expectedRevision }
+      );
+    }
+    return this.getMemoryItem(id);
+  }
+
+  async deleteMemoryItem(memoryId, { actor = "user", taskId, beforeHash } = {}) {
+    const id = validateMemoryId(memoryId);
+    const timestamp = nowIso();
+    const guard = `
+      EXISTS (
+        SELECT 1 FROM workspace_memory_items
+        WHERE id = ? AND workspace_id = ? AND content_hash = ?
+      )
+    `;
+    const results = await this.#withDatabase((database) => database.batch([
+      {
+        mode: "run",
+        sql: `
+          INSERT INTO workspace_memory_events(
+            id, workspace_id, memory_id, operation, actor, task_id,
+            before_hash, after_hash, created_at
+          )
+          SELECT ?, ?, ?, 'delete', ?, ?, ?, NULL, ? WHERE ${guard}
+        `,
+        params: [
+          `memory_event_${randomUUID().replaceAll("-", "")}`,
+          this.workspaceId,
+          id,
+          actor,
+          taskId || null,
+          beforeHash || null,
+          timestamp,
+          id,
+          this.workspaceId,
+          beforeHash || null
+        ]
+      },
+      {
+        mode: "run",
+        sql: `
+          INSERT INTO workspace_memory_meta(workspace_id, revision, updated_at)
+          SELECT ?, 1, ? WHERE ${guard}
+          ON CONFLICT(workspace_id) DO UPDATE SET
+            revision = workspace_memory_meta.revision + 1,
+            cached_brief_revision = 0,
+            updated_at = excluded.updated_at
+        `,
+        params: [
+          this.workspaceId,
+          timestamp,
+          id,
+          this.workspaceId,
+          beforeHash || null
+        ]
+      },
+      {
+        mode: "run",
+        sql: `
+          DELETE FROM workspace_memory_items
+          WHERE id = ? AND workspace_id = ? AND content_hash = ?
+        `,
+        params: [id, this.workspaceId, beforeHash || null]
+      }
+    ]));
+    return Number(results[2]?.changes || 0) > 0;
+  }
+
+  async listMemoryEmbeddings({ modelId, memoryIds = [] } = {}) {
+    const model = String(modelId || "").trim();
+    if (!model) return [];
+    const ids = [...new Set((memoryIds || []).map(validateMemoryId))].slice(0, 500);
+    if (!ids.length) return [];
+    const placeholders = ids.map(() => "?").join(", ");
+    const rows = await this.#withDatabase((database) => database.all(
+      `
+        SELECT memory_id, workspace_id, content_hash, model_id, dimensions, vector, updated_at
+        FROM workspace_memory_embeddings
+        WHERE workspace_id = ? AND model_id = ? AND memory_id IN (${placeholders})
+      `,
+      [this.workspaceId, model, ...ids]
+    ));
+    return rows.map((row) => ({
+      memory_id: row.memory_id,
+      workspace_id: row.workspace_id,
+      content_hash: row.content_hash,
+      model_id: row.model_id,
+      dimensions: Number(row.dimensions),
+      vector: embeddingVectorFromBlob(row.vector, Number(row.dimensions)),
+      updated_at: row.updated_at
+    })).filter((row) => row.vector);
+  }
+
+  async upsertMemoryEmbedding({ memoryId, contentHash, modelId, dimensions, vector } = {}) {
+    const id = validateMemoryId(memoryId);
+    const hash = String(contentHash || "");
+    const model = String(modelId || "").trim().slice(0, 240);
+    const size = Number(dimensions);
+    if (!/^[a-f0-9]{64}$/i.test(hash) || !model || !Number.isInteger(size) || size < 1 || size > 65_536) {
+      throw new WorkspaceRegistryError(
+        "WORKSPACE_MEMORY_EMBEDDING_INVALID",
+        "Workspace memory embedding metadata is invalid."
+      );
+    }
+    const values = vector instanceof Float32Array ? vector : Float32Array.from(vector || [], Number);
+    if (values.length !== size || values.some((value) => !Number.isFinite(value))) {
+      throw new WorkspaceRegistryError(
+        "WORKSPACE_MEMORY_EMBEDDING_INVALID",
+        "Workspace memory embedding vector is invalid."
+      );
+    }
+    const timestamp = nowIso();
+    const blob = Buffer.from(values.buffer, values.byteOffset, values.byteLength);
+    const result = await this.#withDatabase((database) => database.run(
+      `
+        INSERT INTO workspace_memory_embeddings(
+          memory_id, workspace_id, content_hash, model_id, dimensions, vector,
+          created_at, updated_at
+        )
+        SELECT id, workspace_id, content_hash, ?, ?, ?, ?, ?
+        FROM workspace_memory_items
+        WHERE id = ? AND workspace_id = ? AND content_hash = ?
+        ON CONFLICT(memory_id, model_id) DO UPDATE SET
+          workspace_id = excluded.workspace_id,
+          content_hash = excluded.content_hash,
+          dimensions = excluded.dimensions,
+          vector = excluded.vector,
+          updated_at = excluded.updated_at
+      `,
+      [model, size, blob, timestamp, timestamp, id, this.workspaceId, hash]
+    ));
+    return Number(result?.changes || 0) > 0;
+  }
+
+  async memoryEmbeddingSummary(modelId) {
+    const model = String(modelId || "").trim();
+    const row = await this.#withDatabase((database) => database.get(
+      `
+        SELECT
+          COUNT(e.memory_id) AS indexed,
+          SUM(CASE WHEN e.content_hash = i.content_hash THEN 1 ELSE 0 END) AS current
+        FROM workspace_memory_items i
+        LEFT JOIN workspace_memory_embeddings e
+          ON e.memory_id = i.id AND e.model_id = ?
+        WHERE i.workspace_id = ? AND i.lifecycle = 'active'
+      `,
+      [model, this.workspaceId]
+    ));
+    return {
+      indexed: Number(row?.indexed || 0),
+      current: Number(row?.current || 0)
+    };
+  }
+
+  async setMemoryCache({ revision, items }) {
+    await this.getMemoryMeta();
+    await this.#withDatabase((database) => database.run(
+      `
+        UPDATE workspace_memory_meta
+        SET cached_brief_json = ?, cached_brief_revision = ?, updated_at = ?
+        WHERE workspace_id = ? AND revision = ?
+      `,
+      [JSON.stringify(items || []), Number(revision) || 0, nowIso(), this.workspaceId, Number(revision) || 0]
+    ));
+    return this.getMemoryMeta();
+  }
+
+  async memorySummary() {
+    const meta = await this.getMemoryMeta();
+    const counts = await this.#withDatabase((database) => database.get(
+      `
+        SELECT
+          COUNT(*) AS total,
+          SUM(CASE WHEN lifecycle = 'active' THEN 1 ELSE 0 END) AS active,
+          SUM(CASE WHEN pinned = 1 AND lifecycle = 'active' THEN 1 ELSE 0 END) AS pinned,
+          SUM(CASE WHEN freshness IN ('needs_review', 'stale') AND lifecycle = 'active' THEN 1 ELSE 0 END) AS needs_review
+        FROM workspace_memory_items
+        WHERE workspace_id = ?
+      `,
+      [this.workspaceId]
+    ));
+    return {
+      ...meta,
+      counts: {
+        total: Number(counts?.total || 0),
+        active: Number(counts?.active || 0),
+        pinned: Number(counts?.pinned || 0),
+        needs_review: Number(counts?.needs_review || 0)
+      }
+    };
+  }
+
+  async markMemoryPaths(changes, { taskId } = {}) {
+    const normalized = [...new Map((changes || []).map((item) => [item.path, item])).values()];
+    if (!normalized.length) return { updated: 0, ids: [] };
+    const placeholders = normalized.map(() => "?").join(", ");
+    const rows = await this.#withDatabase((database) => database.all(
+      `
+        SELECT DISTINCT p.memory_id, p.path
+        FROM workspace_memory_paths p
+        JOIN workspace_memory_items i ON i.id = p.memory_id
+        WHERE i.workspace_id = ? AND i.lifecycle = 'active' AND p.path IN (${placeholders})
+      `,
+      [this.workspaceId, ...normalized.map((item) => item.path)]
+    ));
+    if (!rows.length) return { updated: 0, ids: [] };
+    const byPath = new Map(normalized.map((item) => [item.path, item.freshness]));
+    const targets = new Map();
+    for (const row of rows) {
+      const next = byPath.get(row.path) === "stale" ? "stale" : "needs_review";
+      const current = targets.get(row.memory_id);
+      targets.set(row.memory_id, current === "stale" || next === "stale" ? "stale" : next);
+    }
+    const timestamp = nowIso();
+    await this.#withDatabase((database) => database.batch([
+      ...[...targets].map(([id, freshness]) => ({
+        mode: "run",
+        sql: `
+          UPDATE workspace_memory_items
+          SET freshness = ?, revision = revision + 1, updated_at = ?
+          WHERE id = ? AND workspace_id = ? AND freshness <> ?
+        `,
+        params: [freshness, timestamp, id, this.workspaceId, freshness]
+      })),
+      memoryMetaBumpStep(this.workspaceId, timestamp),
+      ...[...targets].map(([id]) => memoryEventStep({
+        workspaceId: this.workspaceId,
+        memoryId: id,
+        operation: "freshness",
+        actor: "system",
+        taskId,
+        timestamp
+      }))
+    ]));
+    return { updated: targets.size, ids: [...targets.keys()] };
   }
 
   async openTask({
@@ -412,3 +928,4 @@ export class WorkspaceDatabase {
     }
   }
 }
+

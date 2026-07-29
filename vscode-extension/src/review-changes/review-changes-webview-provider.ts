@@ -1,4 +1,6 @@
+import path from "node:path";
 import * as vscode from "vscode";
+import type { WorkspaceMemoryInput } from "../api/api-types.js";
 import type { ConnectionState } from "../connection/connection-manager.js";
 import { ConnectionManager } from "../connection/connection-manager.js";
 import { ControlCenterActions } from "../control-center/control-center-actions.js";
@@ -10,6 +12,7 @@ import {
   type ControlCenterRequest as WebviewMessage,
   type ControlCenterViewState as WebviewState,
   type SerializableConnectionState,
+  type WorkspaceMemoryViewState,
 } from "../webview/protocol.js";
 
 const REVISION_FENCED_MESSAGES = new Set([
@@ -33,12 +36,22 @@ const REVISION_FENCED_MESSAGES = new Set([
   "deleteTask",
   "deleteWorkspaceTasks",
   "viewWorkspaceHistory",
+  "viewWorkspaceMemory",
+  "refreshWorkspaceMemory",
+  "retryFailedWorkspaceMemory",
+  "saveWorkspaceMemory",
+  "updateWorkspaceMemory",
+  "transitionWorkspaceMemory",
+  "deleteWorkspaceMemory",
+  "updateWorkspaceMemorySettings",
+  "openMemoryPath",
 ]);
 
 export class ReviewChangesWebviewProvider implements vscode.WebviewViewProvider, vscode.Disposable {
   private view: vscode.WebviewView | undefined;
   private busyAction: string | undefined;
   private outboundRevision = 0;
+  private memory: WorkspaceMemoryViewState | undefined;
   private readonly subscriptions: vscode.Disposable[] = [];
   private readonly processedMessageIds = new Set<string>();
   private readonly processedMessageOrder: string[] = [];
@@ -118,6 +131,7 @@ export class ReviewChangesWebviewProvider implements vscode.WebviewViewProvider,
         });
         return;
       case "selectWorkspace":
+        this.memory = undefined;
         await this.run("selectWorkspace", () => this.store.selectWorkspace(message.value || undefined));
         return;
       case "selectTask":
@@ -174,6 +188,83 @@ export class ReviewChangesWebviewProvider implements vscode.WebviewViewProvider,
           });
         });
         return;
+      case "viewWorkspaceMemory":
+        await this.run(`memory:${workspaceId || ""}`, async () => {
+          if (workspaceId) await this.store.selectWorkspace(`workspace:${workspaceId}`);
+          await this.loadMemory(workspaceId);
+        });
+        return;
+      case "refreshWorkspaceMemory":
+        await this.run(`memory:refresh:${workspaceId || ""}`, () => this.loadMemory(workspaceId));
+        return;
+      case "retryFailedWorkspaceMemory":
+        await this.run(`memory:retry:${workspaceId || ""}`, async () => {
+          await this.connection.client.retryFailedWorkspaceMemory(
+            this.requireMemoryWorkspace(workspaceId),
+          );
+          await this.loadMemory(workspaceId);
+        });
+        return;
+      case "saveWorkspaceMemory":
+        await this.run(`memory:save:${workspaceId || ""}`, async () => {
+          await this.connection.client.createWorkspaceMemory(
+            this.requireMemoryWorkspace(workspaceId),
+            (message.payload || {}) as WorkspaceMemoryInput,
+          );
+          await this.loadMemory(workspaceId);
+        });
+        return;
+      case "updateWorkspaceMemory":
+        await this.run(`memory:update:${message.memoryId || ""}`, async () => {
+          await this.connection.client.updateWorkspaceMemory(
+            this.requireMemoryWorkspace(workspaceId),
+            this.requireMemoryId(message.memoryId),
+            (message.payload || {}) as WorkspaceMemoryInput,
+          );
+          await this.loadMemory(workspaceId);
+        });
+        return;
+      case "transitionWorkspaceMemory":
+        await this.run(`memory:${message.value || "transition"}:${message.memoryId || ""}`, async () => {
+          await this.connection.client.transitionWorkspaceMemory(
+            this.requireMemoryWorkspace(workspaceId),
+            this.requireMemoryId(message.memoryId),
+            message.value || "",
+            (message.payload || {}) as WorkspaceMemoryInput,
+          );
+          await this.loadMemory(workspaceId);
+        });
+        return;
+      case "deleteWorkspaceMemory":
+        await this.run(`memory:delete:${message.memoryId || ""}`, async () => {
+          const answer = await vscode.window.showWarningMessage(
+            "Delete this workspace memory item permanently?",
+            { modal: true },
+            "Delete Memory",
+          );
+          if (answer !== "Delete Memory") return;
+          await this.connection.client.deleteWorkspaceMemory(
+            this.requireMemoryWorkspace(workspaceId),
+            this.requireMemoryId(message.memoryId),
+          );
+          await this.loadMemory(workspaceId);
+        });
+        return;
+      case "updateWorkspaceMemorySettings":
+        await this.run(`memory:settings:${workspaceId || ""}`, async () => {
+          await this.connection.client.updateWorkspaceMemorySettings(
+            this.requireMemoryWorkspace(workspaceId),
+            (message.payload || {}) as WorkspaceMemoryInput,
+          );
+          await this.loadMemory(workspaceId);
+        });
+        return;
+      case "openMemoryPath":
+        await this.run(`memory:path:${workspaceId || ""}:${filePath}`, () => this.openMemoryPath(
+          this.requireMemoryWorkspace(workspaceId),
+          filePath,
+        ));
+        return;
       case "setToken":
         await this.run("setToken", async () => {
           if (await this.connection.setToken()) await this.store.refresh();
@@ -224,6 +315,65 @@ export class ReviewChangesWebviewProvider implements vscode.WebviewViewProvider,
     }
   }
 
+  private async loadMemory(workspaceId?: string): Promise<void> {
+    const resolvedWorkspaceId = this.requireMemoryWorkspace(workspaceId);
+    const previous = this.memory;
+    this.memory = {
+      workspace_id: resolvedWorkspaceId,
+      revision: previous?.revision || 0,
+      settings: previous?.settings || {
+        enabled: true,
+        auto_load: true,
+        include_recent_tasks: true,
+        semantic_search: true,
+      },
+      counts: previous?.counts || { total: 0, active: 0, pinned: 0, needs_review: 0 },
+      semantic: previous?.semantic,
+      outbox: previous?.outbox,
+      brief: previous?.brief || "",
+      items: previous?.items || [],
+      read_only: previous?.read_only,
+      loading: true,
+    };
+    await this.postState();
+    try {
+      const snapshot = await this.connection.client.getWorkspaceMemory(resolvedWorkspaceId);
+      this.memory = { ...snapshot, loading: false };
+    } catch (error) {
+      this.memory = {
+        ...this.memory,
+        loading: false,
+        error: error instanceof Error ? error.message : "Workspace memory could not be loaded.",
+      };
+      throw error;
+    }
+  }
+
+  private requireMemoryWorkspace(workspaceId?: string): string {
+    const resolved = workspaceId || this.memory?.workspace_id ||
+      this.store.current.selectedWorkspaceKey?.replace(/^workspace:/, "");
+    if (!resolved) throw new Error("A workspace is required for memory management.");
+    return resolved;
+  }
+
+  private requireMemoryId(memoryId?: string): string {
+    if (!memoryId) throw new Error("A workspace memory item is required.");
+    return memoryId;
+  }
+
+  private async openMemoryPath(workspaceId: string, relativePath: string): Promise<void> {
+    if (!relativePath) return;
+    const workspace = this.controlStore.current.workspaces.find((item) => item.id === workspaceId);
+    if (!workspace?.opened) throw new Error("Open this workspace in VS Code before navigating to its related path.");
+    const root = path.resolve(workspace.root);
+    const target = path.resolve(root, relativePath);
+    const relative = path.relative(root, target);
+    if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
+      throw new Error("The related memory path is outside the selected workspace.");
+    }
+    await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(vscode.Uri.file(target)));
+  }
+
   private async run(name: string, action: () => Promise<void>): Promise<void> {
     if (this.busyAction) return;
     this.busyAction = name;
@@ -266,6 +416,7 @@ export class ReviewChangesWebviewProvider implements vscode.WebviewViewProvider,
         ).length,
       ),
       changes: current.changes,
+      memory: this.memory,
       control: this.controlStore.current,
       host: {
         kind: "vscode",

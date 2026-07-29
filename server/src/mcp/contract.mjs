@@ -4,7 +4,7 @@
 
 import { createHash } from "node:crypto";
 
-export const CATALOG_VERSION = 8;
+export const CATALOG_VERSION = 14;
 
 export const MODEL_TOOL_NAMES = new Set([
   "lca_status",
@@ -41,6 +41,7 @@ export const MODEL_TOOL_NAMES = new Set([
   "todo_scan",
   "skills",
   "notes",
+  "workspace_memory",
   "figma",
   "lca_input"
 ]);
@@ -74,7 +75,8 @@ export const STORAGE_REQUIRED_TOOLS = new Set([
   "security_scan",
   "todo_scan",
   "skills",
-  "notes"
+  "notes",
+  "workspace_memory"
 ]);
 
 export const TASK_CONTEXT_TOOLS = new Set([
@@ -106,7 +108,8 @@ export const TASK_CONTEXT_TOOLS = new Set([
   "security_scan",
   "todo_scan",
   "skills",
-  "notes"
+  "notes",
+  "workspace_memory"
 ]);
 
 export const TASK_ACTIVITY_TOOLS = new Set([
@@ -123,5 +126,6 @@ export const TASK_ACTIVITY_TOOLS = new Set([
   "run_changed_tests",
   "verify_changes",
   "skills",
-  "notes"
+  "notes",
+  "workspace_memory"
 ]);

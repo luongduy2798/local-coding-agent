@@ -9,6 +9,7 @@ import {
   type WorkspaceRoute,
 } from "./control-center.js";
 import { createControlCenterHostBridge } from "./host-bridge.js";
+import { WorkspaceMemoryRoute } from "./memory-view.js";
 import type {
   ControlCenterStateMessage as HostMessage,
   ControlCenterViewState as ViewState,
@@ -138,7 +139,11 @@ function App(): React.JSX.Element {
   const [state, setState] = useState<ViewState>(initialState);
   const [route, setRoute] = useState<WorkspaceRoute>(() => {
     const saved = host.getState() as { route?: { kind?: string } } | undefined;
-    return saved?.route?.kind === "history" ? { kind: "history" } : { kind: "tasks" };
+    return saved?.route?.kind === "history"
+      ? { kind: "history" }
+      : saved?.route?.kind === "memory"
+        ? { kind: "memory" }
+        : { kind: "tasks" };
   });
   const [historyReturnKey, setHistoryReturnKey] = useState<string | undefined>();
 
@@ -176,7 +181,7 @@ function App(): React.JSX.Element {
   };
 
   return (
-    <main className={`app-shell workspace-shell ${connected && route.kind === "tasks" ? "feed-mode" : ""}`}>
+    <main className={`app-shell workspace-shell ${connected && route.kind === "tasks" ? "feed-mode" : ""}`}> 
       <WorkspaceHeader
         control={state.control}
         capabilities={state.host?.capabilities || host.capabilities}
@@ -193,6 +198,11 @@ function App(): React.JSX.Element {
           setHistoryReturnKey(state.selectedWorkspaceKey);
           setRoute({ kind: "history" });
           post("viewWorkspaceHistory", undefined, undefined, undefined, workspaceId);
+        }}
+        onViewMemory={(workspaceId) => {
+          setHistoryReturnKey(state.selectedWorkspaceKey);
+          setRoute({ kind: "memory" });
+          post("viewWorkspaceMemory", undefined, undefined, undefined, workspaceId);
         }}
       />
 
@@ -242,6 +252,27 @@ function App(): React.JSX.Element {
               ))}
             </div>
           )}
+        />
+      )}
+
+      {connected && route.kind === "memory" && (
+        <WorkspaceMemoryRoute
+          memory={state.memory}
+          workspaceLabel={currentWorkspace?.label || "Current workspace"}
+          busyAction={state.busyAction}
+          trusted={state.trusted}
+          onBack={() => {
+            setRoute({ kind: "tasks" });
+            if (historyReturnKey) post("selectWorkspace", undefined, undefined, historyReturnKey);
+          }}
+          onRefresh={() => post("refreshWorkspaceMemory", undefined, undefined, undefined, currentWorkspaceId)}
+          onRetryFailed={() => post("retryFailedWorkspaceMemory", undefined, undefined, undefined, currentWorkspaceId)}
+          onSave={(payload) => post("saveWorkspaceMemory", undefined, undefined, undefined, currentWorkspaceId, payload)}
+          onUpdate={(memoryId, payload) => post("updateWorkspaceMemory", undefined, undefined, undefined, currentWorkspaceId, payload, memoryId)}
+          onTransition={(memoryId, action) => post("transitionWorkspaceMemory", undefined, undefined, action, currentWorkspaceId, undefined, memoryId)}
+          onDelete={(memoryId) => post("deleteWorkspaceMemory", undefined, undefined, undefined, currentWorkspaceId, undefined, memoryId)}
+          onSettings={(payload) => post("updateWorkspaceMemorySettings", undefined, undefined, undefined, currentWorkspaceId, payload)}
+          onOpenPath={(path) => post("openMemoryPath", undefined, path, undefined, currentWorkspaceId)}
         />
       )}
 
@@ -864,8 +895,10 @@ function post(
   path?: string,
   value?: string,
   workspaceId?: string,
+  payload?: Record<string, unknown>,
+  memoryId?: string,
 ): void {
-  const key = [type, workspaceId || "", changeId || "", path || "", value || ""].join(":");
+  const key = [type, workspaceId || "", changeId || "", memoryId || "", path || "", value || "", JSON.stringify(payload || {})].join(":");
   const now = Date.now();
   const previous = recentMessages.get(key) || 0;
   if (now - previous < 500) return;
@@ -881,6 +914,8 @@ function post(
     path,
     value,
     workspaceId,
+    payload,
+    memoryId,
     revision: latestViewRevision,
     requestId: `${now}-${++messageSequence}`,
   });

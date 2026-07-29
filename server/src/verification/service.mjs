@@ -173,12 +173,12 @@ export async function verifyWorkspaceChanges({
     unmanaged_state_unknown: finalUnmanagedState.unknown === true,
     transaction_in_doubt: transactionInDoubt(selected.workspace.id)
   });
-  const [reviewInventory, worktreeEvidence, stagedEvidence] = await Promise.all([
-    collectReviewInventory(selected, rootDir),
-    collectTrackedReviewDiff(selected, rootDir, "unstaged"),
-    collectTrackedReviewDiff(selected, rootDir, "staged")
+  const reviewInventory = await collectReviewInventory(selected, rootDir);
+  const [worktreeEvidence, stagedEvidence, untrackedEvidence] = await Promise.all([
+    collectTrackedReviewDiff(selected, rootDir, "unstaged", reviewInventory),
+    collectTrackedReviewDiff(selected, rootDir, "staged", reviewInventory),
+    collectUntrackedReviewDiff(selected, reviewInventory)
   ]);
-  const untrackedEvidence = await collectUntrackedReviewDiff(selected, reviewInventory);
   const reviewEvidence = [worktreeEvidence, stagedEvidence, untrackedEvidence];
   const reviewEvidenceComplete = reviewInventory.complete === true &&
     reviewEvidence.every((entry) => entry.complete === true);
