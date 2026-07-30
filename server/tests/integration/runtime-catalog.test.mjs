@@ -154,6 +154,7 @@ try {
   const verifyTool = tools.find((tool) => tool.name === "verify_changes");
   assert.deepEqual(verifyTool?.inputSchema?.properties?.strategy?.enum, ["required", "impacted", "full"]);
   assert.deepEqual(verifyTool?.inputSchema?.properties?.completion_policy?.enum, ["requested", "required"]);
+  assert.equal(verifyTool?.inputSchema?.properties?.adopt_unmanaged, undefined);
   assert.match(verifyTool?.description || "", /Canonical verification tool/i);
 
   const codeQueryTool = tools.find((tool) => tool.name === "code_query");
@@ -213,6 +214,7 @@ try {
   assert.match(taskCloseTool?.description || "", /not-requested verification does not make completed work incomplete/i);
   const reviewTool = tools.find((tool) => tool.name === "review_diff");
   assert.deepEqual(reviewTool?.inputSchema?.properties?.scope?.enum, ["task", "workspace"]);
+  assert.match(reviewTool?.description || "", /never falls back to workspace review/i);
   assert.deepEqual(reviewTool?.inputSchema?.properties?.response_mode?.enum, ["auto", "compact", "full", "diagnostic"]);
   assert.deepEqual(applyPatchTool?.inputSchema?.properties?.response_mode?.enum, ["auto", "compact", "full", "diagnostic"]);
   const memoryUpdateItems = taskCloseTool?.inputSchema?.properties?.memory_updates?.items;

@@ -59,12 +59,27 @@ test("non-Git shell mutation fingerprint ignores reads and detects same-size sou
     assert.notEqual(blocked.data.status, "PASS");
     assert.ok(blocked.data.incomplete_reasons.includes("UNMANAGED_CHANGES"));
 
-    const adopted = await callTool(runtime.port, sessionId, 6, "verify_changes", {
+    const bypassAttempt = await callTool(runtime.port, sessionId, 6, "verify_changes", {
       task_token: taskToken,
       adopt_unmanaged: true
     });
-    assert.equal(adopted.data.unmanaged_changes.adopted, true);
-    assert.equal(adopted.data.incomplete_reasons.includes("UNMANAGED_CHANGES"), false);
+    assert.notEqual(bypassAttempt.data.status, "PASS");
+    assert.equal(bypassAttempt.data.unmanaged_changes.detected, true);
+    assert.equal(Object.hasOwn(bypassAttempt.data.unmanaged_changes, "adopted"), false);
+    assert.ok(bypassAttempt.data.incomplete_reasons.includes("UNMANAGED_CHANGES"));
+
+    const completeClose = await callTool(runtime.port, sessionId, 8, "task_close", {
+      task_token: taskToken
+    });
+    assert.equal(completeClose.data.ok, false);
+    assert.ok(completeClose.data.incomplete_reasons.includes("UNMANAGED_CHANGES"));
+
+    const failedClose = await callTool(runtime.port, sessionId, 9, "task_close", {
+      task_token: taskToken,
+      status: "failed"
+    });
+    assert.equal(failedClose.data.ok, true);
+    assert.equal(failedClose.data.integrity_status, "unmanaged_changes");
   } finally {
     if (runtime && sessionId) {
       await fetch(`http://127.0.0.1:${runtime.port}/mcp`, {

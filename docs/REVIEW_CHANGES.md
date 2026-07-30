@@ -32,8 +32,9 @@ generic message. They never contain command text, stdout, stderr, environment va
 or secrets.
 
 Shell/Git mutations are not atomic or automatically undoable. If their before/after manifest
-shows a tracked source change, the workspace becomes `unmanaged_changes`; `verify_changes`
-returns `INCOMPLETE` until the diff is reviewed and explicitly adopted.
+shows a tracked source change, the workspace becomes `unmanaged_changes`; it cannot be adopted
+into Review Changes, `verify_changes` remains `INCOMPLETE`, and a complete task close is blocked.
+Restore the source and reapply the intended change through `apply_patch` to create an exact journal.
 
 ## Mutation pipeline
 

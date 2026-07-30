@@ -662,7 +662,7 @@ export async function reviewWorkspaceDiff({
   if (findings.length >= 150) incompleteReasons.push("finding_limit_reached");
   const reasons = dedupe(incompleteReasons);
   const p1 = findings.filter((finding) => finding.priority === "P1").length;
-  const unmanaged = unmanagedState.detected === true && unmanagedState.adopted !== true;
+  const unmanaged = unmanagedState.detected === true;
   const riskVerdict = p1 > 0
     ? "BLOCK"
     : findings.length > 0 || unmanaged
@@ -705,7 +705,6 @@ export async function reviewWorkspaceDiff({
       unmanaged_state: {
         known: unmanagedState.unknown !== true,
         detected: unmanaged,
-        adopted: unmanagedState.adopted === true,
         ...(unmanagedState.unknown ? { error_code: unmanagedState.error_code } : {})
       }
     },

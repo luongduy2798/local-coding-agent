@@ -414,14 +414,21 @@ try {
   });
   assert.equal(unmanagedClose.data.ok, false);
   assert.ok(unmanagedClose.data.incomplete_reasons.includes("UNMANAGED_CHANGES"));
-  const adoptedVerification = await callTool(runtime.port, sessionId, 23, "verify_changes", {
+  const bypassVerification = await callTool(runtime.port, sessionId, 23, "verify_changes", {
     task_token: unmanagedTask.task_token,
     adopt_unmanaged: true
   });
-  assert.equal(adoptedVerification.data.status, "PASS");
+  assert.notEqual(bypassVerification.data.status, "PASS");
+  assert.ok(bypassVerification.data.incomplete_reasons.includes("UNMANAGED_CHANGES"));
   assert.equal((await callTool(runtime.port, sessionId, 24, "task_close", {
     task_token: unmanagedTask.task_token
-  })).data.ok, true);
+  })).data.ok, false);
+  const unmanagedFailedClose = await callTool(runtime.port, sessionId, 241, "task_close", {
+    task_token: unmanagedTask.task_token,
+    status: "failed"
+  });
+  assert.equal(unmanagedFailedClose.data.ok, true);
+  assert.equal(unmanagedFailedClose.data.integrity_status, "unmanaged_changes");
 
   const newFileTask = await openTask(runtime.port, sessionId, 25, "Untracked file verification");
   await callTool(runtime.port, sessionId, 26, "apply_patch", {
@@ -462,7 +469,8 @@ try {
     task_token: committedTask.task_token,
     adopt_unmanaged: true
   });
-  assert.equal(committedVerification.data.status, "PASS");
+  assert.notEqual(committedVerification.data.status, "PASS");
+  assert.ok(committedVerification.data.incomplete_reasons.includes("UNMANAGED_CHANGES"));
   assert.equal(committedVerification.data.verification.changes.head_changed, true);
   assert.ok(committedVerification.data.verification.changes.files.some((entry) =>
     entry.location.path === "src/value.js" && entry.committed === true
@@ -470,8 +478,14 @@ try {
   const committedClose = await callTool(runtime.port, sessionId, 67, "task_close", {
     task_token: committedTask.task_token
   });
-  assert.equal(committedClose.data.ok, true);
-  assert.equal(committedClose.data.completion_guard.workspaces[0].verification.head_changed, true);
+  assert.equal(committedClose.data.ok, false);
+  assert.ok(committedClose.data.incomplete_reasons.includes("UNMANAGED_CHANGES"));
+  const committedFailedClose = await callTool(runtime.port, sessionId, 671, "task_close", {
+    task_token: committedTask.task_token,
+    status: "failed"
+  });
+  assert.equal(committedFailedClose.data.ok, true);
+  assert.equal(committedFailedClose.data.integrity_status, "unmanaged_changes");
 
   const journalTask = await openTask(runtime.port, sessionId, 29, "Journal failure");
   const journalApply = await callTool(runtime.port, sessionId, 30, "apply_patch", {

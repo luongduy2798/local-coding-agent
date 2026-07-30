@@ -8,7 +8,6 @@ import path from "node:path";
 let PRIMARY_ROOT;
 let RG_BIN;
 let SEARCH_OUTPUT_DEFAULT;
-let adoptUnmanagedChange;
 let assertCommandAllowed;
 let attachContext;
 let collectReviewInventory;
@@ -37,7 +36,6 @@ export function configureVerificationServices(dependencies) {
     PRIMARY_ROOT,
     RG_BIN,
     SEARCH_OUTPUT_DEFAULT,
-    adoptUnmanagedChange,
     assertCommandAllowed,
     attachContext,
     collectReviewInventory,
@@ -70,8 +68,7 @@ export async function verifyWorkspaceChanges({
   include,
   timeout_ms = 120_000,
   stop_on_failure = true,
-  dry_run = false,
-  adopt_unmanaged = false
+  dry_run = false
 } = {}) {
   const selected = await resolveWorkspacePath(cwd, { workspaceId: workspace_id, taskToken: task_token });
   const rootDir = selected.workspace.canonicalRoot;
@@ -80,14 +77,11 @@ export async function verifyWorkspaceChanges({
     selected.workspace.id,
     selected.task?.id || null
   );
-  const initiallyUnmanaged = unmanagedState.detected === true && unmanagedState.adopted !== true;
-  if (adopt_unmanaged && initiallyUnmanaged) {
-    await adoptUnmanagedChange(selected.workspace.id, selected.task?.id || null);
-  }
+  const initiallyUnmanaged = unmanagedState.detected === true;
 
   const initialPlan = await runtime.verification.plan({
     include,
-    unmanaged_changes: initiallyUnmanaged && !adopt_unmanaged,
+    unmanaged_changes: initiallyUnmanaged,
     unmanaged_state_unknown: unmanagedState.unknown === true,
     transaction_in_doubt: transactionInDoubt(selected.workspace.id),
     refresh: true,
@@ -103,8 +97,7 @@ export async function verifyWorkspaceChanges({
       workspace: { workspace_id: selected.workspace.id, path: "." },
       plan: initialPlan,
       unmanaged_changes: {
-        detected: initiallyUnmanaged,
-        adopted: Boolean(adopt_unmanaged && initiallyUnmanaged)
+        detected: initiallyUnmanaged
       }
     };
   }
@@ -166,8 +159,7 @@ export async function verifyWorkspaceChanges({
     selected.workspace.id,
     selected.task?.id || null
   );
-  const unmanagedDetected =
-    finalUnmanagedState.detected === true && finalUnmanagedState.adopted !== true;
+  const unmanagedDetected = finalUnmanagedState.detected === true;
   const evaluated = runtime.verification.evaluate(initialPlan, gateResults, {
     unmanaged_changes: unmanagedDetected,
     unmanaged_state_unknown: finalUnmanagedState.unknown === true,
@@ -261,12 +253,11 @@ export async function verifyWorkspaceChanges({
       persisted: Boolean(verificationEvidence),
       state_known: verificationEvidence?.state?.state_known === true
     },
-      unmanaged_changes: {
-        detected: unmanagedDetected,
-        adopted: Boolean(adopt_unmanaged && initiallyUnmanaged),
-        state_known: finalUnmanagedState.unknown !== true,
-        ...(finalUnmanagedState.unknown ? { error_code: finalUnmanagedState.error_code } : {})
-      },
+    unmanaged_changes: {
+      detected: unmanagedDetected,
+      state_known: finalUnmanagedState.unknown !== true,
+      ...(finalUnmanagedState.unknown ? { error_code: finalUnmanagedState.error_code } : {})
+    },
     incomplete_reasons: uniqueReasons
   };
 }

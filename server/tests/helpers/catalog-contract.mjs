@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Lương Duy
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-export const EXPECTED_CATALOG_VERSION = 15;
+export const EXPECTED_CATALOG_VERSION = 17;
 export const EXPECTED_TOOLS = Object.freeze([
   "lca_status",
   "workspace_list",

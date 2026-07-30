@@ -94,7 +94,6 @@ import {
 } from "../review/report.mjs";
 import {
   REAL_ROOTS,
-  adoptUnmanagedChange,
   canonicalize,
   captureVerificationWorkspaceState,
   configureWorkspaceContext,
@@ -507,7 +506,6 @@ configureVerificationServices({
   PRIMARY_ROOT,
   RG_BIN,
   SEARCH_OUTPUT_DEFAULT,
-  adoptUnmanagedChange,
   assertCommandAllowed,
   attachContext,
   collectReviewInventory,

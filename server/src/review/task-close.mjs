@@ -37,11 +37,11 @@ export function createTaskCloseService({
       const transactionBlocked = transactionInDoubt(workspaceId);
       if (transactionBlocked) integrityReasons.push("TRANSACTION_IN_DOUBT");
 
-      let unmanaged = { detected: false, adopted: false, unknown: true };
+      let unmanaged = { detected: false, unknown: true };
       try {
         unmanaged = await unmanagedChangeState(workspaceId, task.id);
         if (unmanaged.unknown === true) integrityReasons.push("UNMANAGED_STATE_UNKNOWN");
-        else if (unmanaged.detected === true && unmanaged.adopted !== true) integrityReasons.push("UNMANAGED_CHANGES");
+        else if (unmanaged.detected === true) integrityReasons.push("UNMANAGED_CHANGES");
       } catch {
         integrityReasons.push("UNMANAGED_STATE_UNKNOWN");
       }
@@ -54,7 +54,7 @@ export function createTaskCloseService({
           const evidence = await readTaskVerificationEvidence(task.id, workspaceId);
           const currentPlan = await runtime.verification.plan({
             include: evidence.ok ? evidence.artifact.requested_gates : verificationPolicy.gates,
-            unmanaged_changes: unmanaged.detected === true && unmanaged.adopted !== true,
+            unmanaged_changes: unmanaged.detected === true,
             unmanaged_state_unknown: unmanaged.unknown === true,
             transaction_in_doubt: transactionBlocked,
             refresh: true,
@@ -83,7 +83,7 @@ export function createTaskCloseService({
               duration_ms: gate.duration_ms
             }]));
             const evaluated = runtime.verification.evaluate(currentPlan, gateResults, {
-              unmanaged_changes: unmanaged.detected === true && unmanaged.adopted !== true,
+              unmanaged_changes: unmanaged.detected === true,
               unmanaged_state_unknown: unmanaged.unknown === true,
               transaction_in_doubt: transactionBlocked
             });
@@ -126,7 +126,7 @@ export function createTaskCloseService({
         workspace_id: workspaceId,
         ok: blockingReasons.length === 0,
         transaction_in_doubt: transactionBlocked,
-        unmanaged_changes: unmanaged.detected === true && unmanaged.adopted !== true,
+        unmanaged_changes: unmanaged.detected === true,
         unmanaged_state_known: unmanaged.unknown !== true,
         baseline: taskWorkspaceBaseline(task, workspaceId),
         verification,

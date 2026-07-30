@@ -4,7 +4,7 @@
 
 import { createHash } from "node:crypto";
 
-export const CATALOG_VERSION = 16;
+export const CATALOG_VERSION = 17;
 
 export const MODEL_TOOL_NAMES = new Set([
   "lca_status",

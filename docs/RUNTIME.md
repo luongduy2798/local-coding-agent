@@ -67,7 +67,7 @@ Utilities/integration
 skills, workspace_memory, figma, lca_input
 ```
 
-The catalog does not change when mode or policy changes. `task_state`, `run_changed_tests`, and `notes` are consolidated out of the model catalog: their active responsibilities belong to action-based `task_plan`, strategy-based `verify_changes`, checkpoint, and Workspace Memory. The historical notes table remains for data compatibility. Legacy tool names are not registered or callable; stale clients receive an unknown-tool/catalog-refresh error. `lca_status` reports `catalog_version=15` and `catalog_hash` after the updated runtime is restarted.
+The catalog does not change when mode or policy changes. `task_state`, `run_changed_tests`, and `notes` are consolidated out of the model catalog: their active responsibilities belong to action-based `task_plan`, strategy-based `verify_changes`, checkpoint, and Workspace Memory. The historical notes table remains for data compatibility. Legacy tool names are not registered or callable; stale clients receive an unknown-tool/catalog-refresh error. `lca_status` reports `catalog_version=17` and `catalog_hash` after the updated runtime is restarted.
 
 Catalog size is guarded by broad transport safety ceilings—96,000 raw bytes and 24,000 compressed-equivalent bytes—not by a schema-minification target. Tool descriptions, typed enums, field constraints, and argument guidance must not be shortened merely to stay near the former 35 KB measurement. Runtime catalog tests also assert that `workspace_memory` and `task_close.memory_updates` continue to publish their supported actions and typed memory fields.
 
@@ -187,7 +187,7 @@ The filesystem transaction and each workspace's Review Changes journal are separ
 
 `run_command`, `run_commands`, background `process`, and mutating Git commands are not atomic or automatically undoable. The runtime records a privacy-preserving activity plus before/after change fingerprints. It does not store command text, stdout, stderr, environment variables, or secrets in the activity journal.
 
-If a command changes tracked source outside `apply_patch`, the workspace is marked `unmanaged_changes`. `verify_changes` is the canonical evidence path: `strategy=required` runs required gates, `impacted` runs package-aware affected tests, and `full` requests lint/typecheck/test/build. Raw `run_command`/`run_commands` output is not completion-guard evidence, and `verify_changes` must not return `PASS` while unmanaged changes remain. Review the resulting diff, then explicitly adopt the changes through the verification flow only when they are understood. Missing/unsupported required gates also produce `INCOMPLETE`, not a false pass.
+If a command changes tracked source outside `apply_patch`, the workspace is marked `unmanaged_changes`. This is an integrity violation, not a change set that can be adopted: `verify_changes` remains `INCOMPLETE`, `review_diff(scope=task)` requires exact journal evidence and never falls back to the workspace diff, and `task_close(status=complete)` remains blocked. Restore the source and reapply the intended edit through `apply_patch`; a deliberately abandoned task may be closed as `failed` or `incomplete` with its non-clean integrity evidence preserved. Missing/unsupported required gates also produce `INCOMPLETE`, not a false pass.
 
 ## Upgrade and rollback
 

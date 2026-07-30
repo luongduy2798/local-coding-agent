@@ -136,7 +136,7 @@ lca_status # mặc định cho `lca` / `call lca`; kiểm tra runtime, catalog, 
 lca_input  # chỉ mở Apps SDK widget khi yêu cầu rõ widget/composer/PiP
 ```
 
-`lca_status` trả `catalog_version=15` và `catalog_hash`. Khi catalog thay đổi, hãy refresh connector một lần và mở chat mới; tên tool cũ không còn callable và client stale sẽ nhận lỗi kèm hướng dẫn refresh.
+`lca_status` trả `catalog_version=17` và `catalog_hash`. Khi catalog thay đổi, hãy refresh connector một lần và mở chat mới; tên tool cũ không còn callable và client stale sẽ nhận lỗi kèm hướng dẫn refresh.
 
 Mỗi tool có exact `discovery-group:*` tags để dynamic discovery nạp một nhóm workflow trong một lần. App-level instructions chỉ công bố prefix và label tách rời để query nhóm không match nhầm toàn catalog. ChatGPT không nên tự nghĩ query như `write`/`edit`, gọi catalog không có query, hoặc fallback sang toàn bộ 34 tool khi group bị thiếu.
 
@@ -252,7 +252,7 @@ LCA runtime dùng catalog cố định 34 tool, không đổi theo mode/policy. 
 
 Trạng thái release được ghi theo số đo, không hiểu “10/10” là không bao giờ sai. Catalog v15 có 34 tool, hash tên tool `fc8b432ebdde919a`, kích thước `tools/list` 45.486 byte raw/7.641 byte Brotli, thấp hơn trần an toàn 96.000/24.000 byte. Tool-selection eval trên 28 tình huống đạt top-1 96,43%, top-2 100%, median/p95 rank đều 1; mọi adversarial scenario trong discovery subset chọn canonical tool top-1 và mọi expected tool nằm top-2. Benchmark cold-builder gần nhất trên 100k file đạt index 9,89 giây, snapshot warm 0,04 ms, query warm p95 0,04 ms, freshness 238,80 ms, RSS sau GC 120,17 MB, cache hai workspace hot 23,46 MB và event-loop p99 11,96 ms; toàn bộ SLA 100k trong benchmark đều pass. Performance fixture v15 đo dispatch p95 0,003 ms và `lca_status` handler/server-total p95 0,8/1,3 ms. Xem bằng chứng, phạm vi và các giới hạn semantic còn lại tại [docs/RUNTIME.md](docs/RUNTIME.md#measured-release-status-and-known-limits).
 
-`run_command`, `run_commands`, `process` và Git có thể làm thay đổi filesystem nhưng không được tuyên bố atomic/undoable. LCA so sánh before/after manifest; nếu shell sửa tracked source, workspace bị đánh dấu `unmanaged_changes` cho đến khi thay đổi được review/adopt.
+`run_command`, `run_commands`, `process` và Git có thể làm thay đổi filesystem nhưng không được tuyên bố atomic/undoable. LCA so sánh before/after manifest; nếu chúng sửa tracked source, workspace bị đánh dấu `unmanaged_changes`. Trạng thái này không thể adopt thành task journal hoặc đóng `complete`: phải khôi phục source rồi reapply bằng `apply_patch`; task bị bỏ dở vẫn có thể đóng `failed`/`incomplete` và giữ nguyên integrity evidence.
 
 Review Changes không phụ thuộc Git. Mỗi task giữ các operation riêng, nhưng card được tổng hợp từ trạng thái trước operation đầu tiên đến trạng thái sau operation cuối cùng. Undo task chạy operation theo thứ tự mới → cũ; Reapply chạy cũ → mới. File text nhỏ có before/after snapshot để hỗ trợ Diff, Undo, Partial Undo và Reapply. File lớn, binary và directory chỉ lưu metadata nên không bị backend giả vờ rằng có thể phục hồi an toàn. Rename được quản lý như atomic group và Undo/Reapply luôn kiểm tra conflict trước khi ghi đè.
 

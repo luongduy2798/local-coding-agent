@@ -71,7 +71,20 @@ test("review_diff aggregates task workspaces, inventories every source and pagin
     });
     const taskId = opened.data.task.id;
 
-    const first = await callTool(runtime.port, sessionId, 5, "review_diff", { page_size: 1 });
+    const missingJournal = await callTool(runtime.port, sessionId, 5, "review_diff", { page_size: 1 });
+    assert.equal(missingJournal.result?.isError, undefined, missingJournal.text);
+    assert.equal(missingJournal.data.scope.mode, "task");
+    assert.equal(missingJournal.data.complete, false);
+    assert.equal(missingJournal.data.verdict, "INCOMPLETE");
+    assert.ok(missingJournal.data.scope.workspaces.every((entry) =>
+      entry.error === "JOURNAL_EVIDENCE_MISSING"
+    ));
+    assert.equal(missingJournal.data.inventory.total, 0);
+
+    const first = await callTool(runtime.port, sessionId, 51, "review_diff", {
+      scope: "workspace",
+      page_size: 1
+    });
     assert.equal(first.result?.isError, undefined, first.text);
     assert.equal(first.data.workspaces.length, 2);
     assert.equal(first.data.complete, true);
@@ -99,6 +112,7 @@ test("review_diff aggregates task workspaces, inventories every source and pagin
     }
 
     const second = await callTool(runtime.port, sessionId, 6, "review_diff", {
+      scope: "workspace",
       page_size: 1,
       cursor: first.data.pagination.next_cursor
     });
@@ -117,6 +131,7 @@ test("review_diff aggregates task workspaces, inventories every source and pagin
 
     await writeFile(path.join(workspaceA, "src/chunk-a.txt"), "c\n".repeat(3_000), "utf8");
     const oversizedTracked = await callTool(runtime.port, sessionId, 71, "review_diff", {
+      scope: "workspace",
       workspace_id: workspaceAId
     });
     assert.equal(oversizedTracked.data.verdict, "INCOMPLETE");
@@ -136,6 +151,7 @@ test("review_diff aggregates task workspaces, inventories every source and pagin
     const largePath = path.join(workspaceA, "large-untracked.txt");
     await writeFile(largePath, "x".repeat(210_000), "utf8");
     const truncated = await callTool(runtime.port, sessionId, 8, "review_diff", {
+      scope: "workspace",
       workspace_id: workspaceAId
     });
     assert.equal(truncated.data.verdict, "INCOMPLETE");
@@ -158,6 +174,7 @@ test("review_diff aggregates task workspaces, inventories every source and pagin
     await mkdir(path.dirname(unmanagedArtifact), { recursive: true });
     await writeFile(unmanagedArtifact, "{ corrupt unmanaged state", "utf8");
     const unknownUnmanaged = await callTool(runtime.port, sessionId, 9, "review_diff", {
+      scope: "workspace",
       workspace_id: workspaceAId
     });
     assert.equal(unknownUnmanaged.data.verdict, "INCOMPLETE");

@@ -212,7 +212,8 @@ export async function markUnmanagedChange({
     assertUnmanagedManifestWritable(manifest);
     const current = manifest.workspaces?.[workspaceId] || { detected: true, events: [] };
     current.detected = true;
-    current.adopted = false;
+    delete current.adopted;
+    delete current.adopted_at;
     current.updated_at = isoNow();
     current.events = [...(current.events || []), {
       at: current.updated_at,
@@ -232,43 +233,22 @@ export async function markUnmanagedChange({
 
 export async function unmanagedChangeState(workspaceId, taskId) {
   const key = unmanagedChangeKey(workspaceId, taskId);
-  if (UNMANAGED_WORKSPACE_CHANGES.has(key)) return { detected: true, adopted: false };
-  if (!taskId) return { detected: false, adopted: false };
+  if (UNMANAGED_WORKSPACE_CHANGES.has(key)) return { detected: true };
+  if (!taskId) return { detected: false };
   const manifest = await readUnmanagedManifest(taskId);
   if (manifest.state_known === false) {
     return {
       detected: false,
-      adopted: false,
       unknown: true,
       error_code: manifest.error_code || "UNMANAGED_STATE_UNKNOWN"
     };
   }
   const state = manifest.workspaces?.[workspaceId];
-  if (state?.detected && !state?.adopted) {
+  if (state?.detected) {
     UNMANAGED_WORKSPACE_CHANGES.add(key);
     return state;
   }
-  return state || { detected: false, adopted: false };
-}
-
-export async function adoptUnmanagedChange(workspaceId, taskId) {
-  const key = unmanagedChangeKey(workspaceId, taskId);
-  if (!taskId) {
-    UNMANAGED_WORKSPACE_CHANGES.delete(key);
-    return;
-  }
-  await withUnmanagedManifestLock(taskId, async () => {
-    const manifest = await readUnmanagedManifest(taskId);
-    assertUnmanagedManifestWritable(manifest);
-    const current = manifest.workspaces?.[workspaceId];
-    if (current) {
-      current.adopted = true;
-      current.adopted_at = isoNow();
-      manifest.updated_at = current.adopted_at;
-      await atomicWriteJson(unmanagedArtifactPath(taskId), manifest);
-    }
-    UNMANAGED_WORKSPACE_CHANGES.delete(key);
-  });
+  return state || { detected: false };
 }
 
 export function taskArtifactPath(task, fileName, fallbackPath) {

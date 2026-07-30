@@ -4,6 +4,13 @@ All notable changes to Local Coding Agent are documented in this file.
 
 ## [Unreleased]
 
+### Journal integrity hardening
+
+- Removed `verify_changes.adopt_unmanaged`; tracked source mutations outside `apply_patch` remain integrity violations and can never be promoted into an exact task journal.
+- Made `task_close(status=complete)` fail closed for every unmanaged mutation while still allowing an abandoned task to close as `failed` or `incomplete` with non-clean integrity evidence preserved.
+- Made `review_diff(scope=task)` require exact journal evidence and return `INCOMPLETE` instead of falling back to a workspace diff when the journal is missing or unmanaged.
+- Kept quick-edit/normal/complex orchestration, response modes, adaptive Workspace Memory, multi-workspace transactions, verification policies, Review Changes, Undo and Reapply unchanged; bumped the model catalog schema to version 17.
+
 ### Profile-preserving latency and completion semantics
 
 - Kept discovery groups, model-selected `quick_edit`/`normal`/`complex` profiles, adaptive Workspace Memory, task isolation, journaled mutation, Review Changes and Undo/Reapply intact while reducing repeated work around them.

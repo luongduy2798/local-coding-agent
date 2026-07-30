@@ -243,7 +243,15 @@ function createTaskSnapshotDiff(filePath, beforeContent, afterContent, beforeExi
 async function loadTaskReviewScope({ getChangeJournal, task, workspaceId }) {
   if (!task || !getChangeJournal) return null;
   if (["unmanaged_changes", "unmanaged_state_unknown"].includes(task.orchestration?.integrity_status)) {
-    return { mode: "workspace", paths: null, diff: null, unavailable: [], error: null };
+    return {
+      mode: "task",
+      paths: [],
+      diff: null,
+      unavailable: [],
+      error: task.orchestration.integrity_status === "unmanaged_changes"
+        ? "UNMANAGED_CHANGES"
+        : "UNMANAGED_STATE_UNKNOWN"
+    };
   }
   try {
     const journal = await getChangeJournal(workspaceId);
@@ -276,15 +284,14 @@ async function loadTaskReviewScope({ getChangeJournal, task, workspaceId }) {
       error: null
     };
   } catch (error) {
-    if (error?.code === "change_not_found") {
-      return { mode: "workspace", paths: null, diff: null, unavailable: [], error: null };
-    }
     return {
-      mode: "workspace",
-      paths: null,
+      mode: "task",
+      paths: [],
       diff: null,
       unavailable: [],
-      error: error?.code || "TASK_REVIEW_SCOPE_UNAVAILABLE"
+      error: error?.code === "change_not_found"
+        ? "JOURNAL_EVIDENCE_MISSING"
+        : error?.code || "TASK_REVIEW_SCOPE_UNAVAILABLE"
     };
   }
 }
@@ -337,7 +344,7 @@ export function registerReviewTools(mcp, dependencies) {
     "review_diff",
     {
       title: "Review diff",
-      description: "Canonical review of the current task change set. scope=task (default) uses compact journal before/after diffs and limits Git evidence to task paths; scope=workspace explicitly reviews all staged, unstaged and untracked changes in the selected workspace/cwd. Unmanaged or unavailable task scope falls back to workspace review. Incomplete evidence never returns CLEAN or PASS.",
+      description: "Canonical review of the current task change set. scope=task (default) requires compact journal before/after diffs and limits Git evidence to task paths; missing, unmanaged, or unavailable task journal evidence returns INCOMPLETE and never falls back to workspace review. scope=workspace explicitly reviews all staged, unstaged and untracked changes in the selected workspace/cwd.",
       inputSchema: {
         staged: z.boolean().optional().describe("Compatibility hint from V4; V5 still inventories and reviews all three change sources."),
         cwd: z.string().optional(),

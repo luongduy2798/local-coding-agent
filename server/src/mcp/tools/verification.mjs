@@ -46,8 +46,7 @@ export function registerVerificationTools(mcp, dependencies) {
         include: z.array(z.enum(ALL_GATES)).optional().describe("Optional gate filter for strategy=required/full. strategy=impacted always selects tests."),
         timeout_ms: z.number().int().min(1000).max(600000).optional(),
         stop_on_failure: z.boolean().optional(),
-        dry_run: z.boolean().optional(),
-        adopt_unmanaged: z.boolean().optional().describe("After reviewing the reported diff, explicitly adopt shell-made tracked changes into this task.")
+        dry_run: z.boolean().optional()
       }
     },
     async (input) => {
@@ -137,7 +136,7 @@ export function registerVerificationTools(mcp, dependencies) {
     const unmanagedBefore = await unmanagedChangeState(selected.workspace.id, selected.task?.id || null);
     const initialPlan = await selected.runtime.verification.plan({
       include: ["test"],
-      unmanaged_changes: unmanagedBefore.detected === true && unmanagedBefore.adopted !== true,
+      unmanaged_changes: unmanagedBefore.detected === true,
       unmanaged_state_unknown: unmanagedBefore.unknown === true,
       transaction_in_doubt: transactionInDoubt(selected.workspace.id),
       refresh: true,
@@ -267,7 +266,7 @@ export function registerVerificationTools(mcp, dependencies) {
       { ...initialPlan, gates: plannedGates },
       results,
       {
-        unmanaged_changes: finalUnmanaged.detected === true && finalUnmanaged.adopted !== true,
+        unmanaged_changes: finalUnmanaged.detected === true,
         unmanaged_state_unknown: finalUnmanaged.unknown === true,
         transaction_in_doubt: transactionInDoubt(selected.workspace.id)
       }
@@ -307,7 +306,7 @@ export function registerVerificationTools(mcp, dependencies) {
         persisted: Boolean(evidence),
         state_known: evidence?.state?.state_known === true
       },
-      unmanaged_changes: finalUnmanaged.detected === true && finalUnmanaged.adopted !== true,
+      unmanaged_changes: finalUnmanaged.detected === true,
       unmanaged_state_unknown: finalUnmanaged.unknown === true
     };
   }

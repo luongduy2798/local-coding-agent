@@ -178,8 +178,7 @@ export function registerSystemTools(mcp, dependencies) {
         })
       }, () => withRequestSpan("task_close_preflight", () => preflightTaskClose(openTask)));
       const effectiveStatus = status;
-      const integrityBlockers = preflight.integrity_reasons || [];
-      if (!preflight.ok && (effectiveStatus === "complete" || integrityBlockers.length > 0)) {
+      if (!preflight.ok && effectiveStatus === "complete") {
         return respond({
           ok: false,
           status: "INCOMPLETE",
