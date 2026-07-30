@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import { createHash, randomBytes } from "node:crypto";
-import { realpath } from "node:fs/promises";
+import { readFile, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import { WorkspaceRegistryError } from "../../workspace/registry.mjs";
@@ -73,12 +73,60 @@ export function registerWorkspaceTools(mcp, dependencies) {
     pageScope,
     reg,
     registry,
+    resolveWorkspacePath,
     sanitizeGraphSnapshot,
     selectWorkspace,
     storageError,
     taskOpenPayload,
     taskRouter
   } = dependencies;
+
+  async function readFocusedTarget(task, target) {
+    if (!target) return null;
+    const workspaceId = target.workspace_id || task.primary_workspace_id;
+    const base = {
+      workspace_id: workspaceId,
+      path: target.path
+    };
+    if (!task.workspace_ids.includes(workspaceId)) {
+      return { ...base, available: false, error_code: "WORKSPACE_NOT_ATTACHED" };
+    }
+    try {
+      const selected = await resolveWorkspacePath(target.path, {
+        workspaceId,
+        taskToken: task.task_token,
+        requireTask: true
+      });
+      const info = await stat(selected.path);
+      if (!info.isFile()) return { ...base, available: false, error_code: "FOCUSED_TARGET_NOT_FILE" };
+      if (info.size > 4 * 1024 * 1024) {
+        return { ...base, available: false, error_code: "FOCUSED_TARGET_TOO_LARGE", size: info.size };
+      }
+      const source = await readFile(selected.path);
+      if (source.includes(0)) return { ...base, available: false, error_code: "FOCUSED_TARGET_BINARY" };
+      const text = source.toString("utf8").replace(/\r\n?/g, "\n");
+      const lines = text.split("\n");
+      const startLine = Math.max(1, Number(target.start_line) || 1);
+      const lineCount = Math.max(1, Math.min(500, Number(target.line_count) || 120));
+      const maxChars = Math.max(256, Math.min(20_000, Number(target.max_chars) || 12_000));
+      const selectedLines = lines.slice(startLine - 1, startLine - 1 + lineCount);
+      const joined = selectedLines.join("\n");
+      const content = joined.slice(0, maxChars);
+      return {
+        ...base,
+        available: true,
+        version: createHash("sha256").update(source).digest("hex"),
+        start_line: startLine,
+        returned_lines: selectedLines.length,
+        total_lines: lines.length,
+        content,
+        truncated: content.length < joined.length || startLine - 1 + selectedLines.length < lines.length
+      };
+    } catch (error) {
+      return { ...base, available: false, error_code: error?.code || "FOCUSED_TARGET_UNAVAILABLE" };
+    }
+  }
+
   reg(
     mcp,
     "workspace_list",
@@ -227,7 +275,14 @@ export function registerWorkspaceTools(mcp, dependencies) {
           mode: z.enum(["not_requested", "requested", "required"]),
           gates: z.array(z.enum(["lint", "typecheck", "test", "build"])).max(4).optional()
         }).optional().describe("Completion verification policy. Defaults to not_requested; required blocks a complete close until current evidence passes."),
-        response_mode: z.enum(RESPONSE_MODES).optional().describe("auto, compact, full, or diagnostic response shaping."),
+        response_mode: z.enum(RESPONSE_MODES).optional().describe("auto, minimal, compact, full, or diagnostic response shaping."),
+        focused_target: z.object({
+          workspace_id: z.string().optional().describe("Attached workspace containing the target; defaults to the primary workspace."),
+          path: z.string().min(1).max(2000).describe("Known workspace-relative UTF-8 file target to return with task_open."),
+          start_line: z.number().int().min(1).optional(),
+          line_count: z.number().int().min(1).max(500).optional(),
+          max_chars: z.number().int().min(256).max(20000).optional()
+        }).optional().describe("Optional bounded target evidence returned without a separate read_file call. It does not scan the workspace."),
         relevant_paths: z.array(z.object({
           workspace_id: z.string().optional().describe("Attached workspace for this relevance hint; defaults to the primary workspace."),
           path: z.string().min(1).max(2000).describe("Workspace-relative file or directory used by light Memory matching.")
@@ -243,7 +298,7 @@ export function registerWorkspaceTools(mcp, dependencies) {
         }).optional()
       }
     },
-    async ({ objective, title, complexity_hint, complexity_override = false, memory_mode = "auto", include_recent_tasks = false, verification_policy, response_mode = "auto", relevant_paths = [], primary_workspace_id, conversation_workspace_token, attached_workspace_ids = [], task_token, resume }) => {
+    async ({ objective, title, complexity_hint, complexity_override = false, memory_mode = "auto", include_recent_tasks = false, verification_policy, response_mode = "auto", focused_target, relevant_paths = [], primary_workspace_id, conversation_workspace_token, attached_workspace_ids = [], task_token, resume }) => {
       const responseMode = normalizeResponseMode(response_mode);
       if (!taskRouter || !registry) {
         throw new Error(`Multi-workspace task storage unavailable: ${storageError?.message || "unknown error"}`);
@@ -269,7 +324,8 @@ export function registerWorkspaceTools(mcp, dependencies) {
             conversation_workspace_token: conversationToken,
             conversation_workspace_id: resumed.primary_workspace_id
           } : {}),
-          task: await taskOpenPayload(resumed, { responseMode })
+          task: await taskOpenPayload(resumed, { responseMode }),
+          ...(focused_target ? { focused_target: await readFocusedTarget(resumed, focused_target) } : {})
         });
       }
 
@@ -331,7 +387,8 @@ export function registerWorkspaceTools(mcp, dependencies) {
         resumed: false,
         conversation_workspace_token: conversationToken,
         conversation_workspace_id: primaryId,
-        task: await taskOpenPayload(task, { responseMode })
+        task: await taskOpenPayload(task, { responseMode }),
+        ...(focused_target ? { focused_target: await readFocusedTarget(task, focused_target) } : {})
       });
     }
   );

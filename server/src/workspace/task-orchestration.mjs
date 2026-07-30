@@ -13,7 +13,7 @@ import {
 } from "./task-blockers.mjs";
 
 const PROFILES = new Set(["quick_edit", "normal", "complex"]);
-const PHASES = new Set(["opened", "discovering", "decision_ready", "mutating", "confirming", "blocked", "closing"]);
+const PHASES = new Set(["opened", "discovering", "decision_ready", "mutating", "confirming", "blocked", "closing", "closed"]);
 const EVIDENCE_STATES = new Set([
   "not_started",
   "insufficient",
@@ -576,7 +576,7 @@ export function finalizeTaskOrchestration(value, {
         : "not_applicable";
   return {
     ...state,
-    phase: "closing",
+    phase: "closed",
     execution_status: executionStatus,
     verification_status: verificationStatus,
     integrity_status: close_transaction_status === "recovery_pending" ? "recovery_required" : integrityStatus,
@@ -720,6 +720,7 @@ function profileBudgets(profile) {
 }
 
 function recommendedTransition(state) {
+  if (state.phase === "closed" || ["completed", "failed", "cancelled"].includes(state.execution_status)) return null;
   if (state.run_state === "waiting_for_user") return "report_blocker_and_wait_for_user";
   if (state.run_state === "blocked") return "report_blocker";
   if (state.run_state === "retrying") return "retry_once_or_report_blocker";

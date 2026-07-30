@@ -9,10 +9,14 @@ import path from "node:path";
 import { z } from "zod";
 import { PatchTransactionError } from "../../mutation/patch-transaction.mjs";
 import { TaskRouterError } from "../../workspace/task-router.mjs";
+import { MAX_TASK_CLOSE_MEMORY_OPERATIONS } from "../../workspace/task-memory-outbox-policy.mjs";
 import { withRequestSpan } from "../../shared/utils.mjs";
+import { TASK_CLOSE_MEMORY_UPDATE_SCHEMA } from "./memory.mjs";
 import {
   RESPONSE_MODES,
   compactTask,
+  isMinimalResponse,
+  minimalTask,
   shouldCompactResponse
 } from "../response-mode.mjs";
 
@@ -81,7 +85,14 @@ function registerFsWriteTools(mcp) {
         task_title: z.string().min(1).max(180).optional(),
         task_token: z.string().optional(),
         workspace_id: z.string().optional(),
-        response_mode: z.enum(RESPONSE_MODES).optional().describe("auto, compact, full, or diagnostic response shaping."),
+        response_mode: z.enum(RESPONSE_MODES).optional().describe("auto, minimal, compact, full, or diagnostic response shaping."),
+        close_on_success: z.boolean().optional().describe("After a successful journaled apply, request safe task closure through the existing completion guard. Defaults to false."),
+        close_options: z.object({
+          title: z.string().max(180).optional().describe("Optional final Review Changes title used by the internal task_close handler."),
+          memory_updates: z.array(TASK_CLOSE_MEMORY_UPDATE_SCHEMA).max(MAX_TASK_CLOSE_MEMORY_OPERATIONS).optional().describe(
+            "Optional durable Workspace Memory operations forwarded unchanged to the existing task_close outbox path."
+          )
+        }).optional().describe("Options forwarded only when close_on_success performs the internal task close."),
         diff: z.string().optional(),
         operations: z
           .array(
@@ -101,7 +112,7 @@ function registerFsWriteTools(mcp) {
           .optional()
       }
     },
-    async ({ action = "apply", task_title, task_token, workspace_id, response_mode = "auto", diff, operations }) => {
+    async ({ action = "apply", task_title, task_token, workspace_id, response_mode = "auto", close_on_success = false, diff, operations }) => {
       if (!patchCoordinator) {
         throw new PatchTransactionError(
           "PATCH_TRANSACTION_UNAVAILABLE",
@@ -142,9 +153,14 @@ function registerFsWriteTools(mcp) {
           mutation_performed: false,
           workspace_set_frozen: context.task?.workspace_set_frozen === true
         };
-        return jsonResult(shouldCompactResponse(response_mode, context.task?.effective_profile)
-          ? compactPatchPayload(previewPayload, context.operations)
-          : previewPayload);
+        if (isMinimalResponse(response_mode)) {
+          return jsonResult(minimalPatchPayload(previewPayload, context.operations));
+        }
+        return jsonResult(shouldCompactResponse(
+          response_mode,
+          context.task?.effective_profile,
+          ["quick_edit", "normal", "complex"]
+        ) ? compactPatchPayload(previewPayload, context.operations) : previewPayload);
       }
       const applied = await withRequestSpan("patch_transaction", () => runPatchTransactionWithJournals({
         operations: context.operations,
@@ -175,6 +191,7 @@ function registerFsWriteTools(mcp) {
         change_id: applied.changes.length === 1 ? applied.changes[0].change_id : null,
         change_ids: Object.fromEntries(applied.changes.map((entry) => [entry.workspace_id, entry.change_id])),
         memory_freshness: memoryFreshness,
+        close_requested: close_on_success === true,
         review_index: {
           ready: applied.journalErrors.length === 0,
           mutation_epoch: Number(context.task?.orchestration?.mutation_epoch || 0) + 1,
@@ -187,14 +204,54 @@ function registerFsWriteTools(mcp) {
           }))
         }
       };
-      return jsonResult(shouldCompactResponse(response_mode, context.task?.effective_profile)
-        ? compactPatchPayload(payload, context.operations)
-        : payload);
+      if (isMinimalResponse(response_mode)) {
+        return jsonResult(minimalPatchPayload(payload, context.operations));
+      }
+      return jsonResult(shouldCompactResponse(
+        response_mode,
+        context.task?.effective_profile,
+        ["quick_edit", "normal", "complex"]
+      ) ? compactPatchPayload(payload, context.operations) : payload);
     }
   );
 
 
 
+}
+
+function minimalPatchPayload(payload, operations = []) {
+  const changeIds = payload.change_ids || {};
+  return {
+    ok: payload.ok !== false,
+    action: payload.action || "apply",
+    status: payload.status,
+    transaction_id: payload.transaction_id || payload.id || null,
+    task_id: payload.routing_task_id || payload.task_id || payload.task?.id || null,
+    mode: payload.mode,
+    applied: payload.applied ?? payload.operation_count ?? 0,
+    task: minimalTask(payload.task),
+    mutation_performed: payload.mutation_performed !== false,
+    close_requested: payload.close_requested === true,
+    results: (payload.results || []).map((result) => ({
+      workspace_id: result.workspace_id,
+      op: result.op,
+      path: result.path,
+      rename_to: result.rename_to || null,
+      version: result.version || result.after?.version || null,
+      ok: result.ok !== false
+    })),
+    change_id: payload.change_id || null,
+    change_ids: changeIds,
+    journal_complete: payload.journal_complete !== false,
+    journal_errors: payload.journal_errors || [],
+    undoable: payload.journal_complete !== false && Boolean(payload.change_id || Object.keys(changeIds).length),
+    paths: (payload.review_index?.paths || operations).map((operation) => ({
+      workspace_id: operation.workspace_id,
+      path: operation.path,
+      operation: operation.operation || operation.op,
+      rename_to: operation.rename_to || null
+    }))
+  };
 }
 
 function compactPatchPayload(payload, operations = []) {
@@ -209,6 +266,7 @@ function compactPatchPayload(payload, operations = []) {
     task: compactTask(payload.task),
     mutation_performed: payload.mutation_performed !== false,
     workspace_set_frozen: payload.workspace_set_frozen ?? payload.task?.workspace_set_frozen === true,
+    close_requested: payload.close_requested === true,
     results: payload.results || [],
     changes: payload.changes || [],
     change_id: payload.change_id || null,

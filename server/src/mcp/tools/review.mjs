@@ -7,7 +7,29 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import { withRequestSpan } from "../../shared/utils.mjs";
-import { RESPONSE_MODES, shouldCompactResponse } from "../response-mode.mjs";
+import { RESPONSE_MODES, isMinimalResponse, shouldCompactResponse } from "../response-mode.mjs";
+
+function minimalReviewPayload(payload) {
+  return {
+    task_id: payload.task_id || null,
+    workspace_id: payload.workspace_id || null,
+    mutation_epoch: payload.mutation_epoch || 0,
+    ok: payload.ok === true,
+    verdict: payload.verdict,
+    complete: payload.complete === true,
+    evidence_revision: payload.evidence_revision,
+    transaction_in_doubt: payload.transaction_in_doubt === true,
+    unmanaged_changes: payload.unmanaged_changes === true,
+    unmanaged_state_unknown: payload.unmanaged_state_unknown === true,
+    incomplete_reasons: payload.incomplete_reasons || [],
+    findings_count: payload.findings_count || 0,
+    findings: payload.findings || [],
+    p1: payload.p1 || 0,
+    p2: payload.p2 || 0,
+    p3: payload.p3 || 0,
+    message: payload.message
+  };
+}
 
 function compactReviewPayload(payload) {
   return {
@@ -322,7 +344,7 @@ export function registerReviewTools(mcp, dependencies) {
         workspace_id: z.string().optional(),
         task_token: z.string().optional(),
         scope: z.enum(["task", "workspace"]).optional().describe("task (default) reviews the active task change set; workspace reviews every staged, unstaged and untracked Git change under cwd."),
-        response_mode: z.enum(RESPONSE_MODES).optional().describe("auto, compact, full, or diagnostic response shaping."),
+        response_mode: z.enum(RESPONSE_MODES).optional().describe("auto, minimal, compact, full, or diagnostic response shaping."),
         cursor: z.string().max(500).optional().describe("Opaque cursor returned by a prior review_diff page."),
         page_size: z.number().int().min(1).max(REVIEW_PAGE_SIZE_MAX).optional()
       }
@@ -465,6 +487,7 @@ export function registerReviewTools(mcp, dependencies) {
             ? "No staged, unstaged or untracked changes were found in the reviewed task workspaces."
             : "Review completed for staged, unstaged and untracked changes."
       };
+      if (isMinimalResponse(response_mode)) return jsonResult(minimalReviewPayload(payload));
       return jsonResult(shouldCompactResponse(response_mode, routedTask?.effective_profile)
         ? compactReviewPayload(payload)
         : payload);

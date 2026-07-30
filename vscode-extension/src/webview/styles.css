@@ -1809,6 +1809,20 @@ button {
   padding: 6px 2px;
 }
 
+.timeline-internal {
+  margin-left: 18px;
+}
+
+.timeline-internal::before {
+  position: absolute;
+  top: 16px;
+  left: -8px;
+  width: 8px;
+  height: 1px;
+  background: var(--vscode-widget-border, var(--vscode-panel-border));
+  content: "";
+}
+
 .timeline-marker {
   z-index: 1;
   display: grid;
@@ -1839,6 +1853,26 @@ button {
   color: var(--vscode-progressBar-background);
 }
 
+.timeline-source-agent_call .timeline-marker {
+  border-color: color-mix(in srgb, var(--vscode-focusBorder) 65%, var(--vscode-panel-border));
+}
+
+.timeline-source-automatic .timeline-marker,
+.timeline-source-background .timeline-marker {
+  color: var(--vscode-descriptionForeground);
+  border-style: dashed;
+}
+
+.timeline-source-guard .timeline-marker {
+  color: var(--vscode-editorWarning-foreground);
+  border-color: color-mix(in srgb, var(--vscode-editorWarning-foreground) 60%, transparent);
+}
+
+.timeline-source-recovery .timeline-marker {
+  color: var(--vscode-testing-iconFailed, #f85149);
+  border-color: color-mix(in srgb, var(--vscode-testing-iconFailed, #f85149) 60%, transparent);
+}
+
 .timeline-skipped .timeline-marker,
 .timeline-duplicate .timeline-marker {
   color: var(--vscode-descriptionForeground);
@@ -1860,7 +1894,37 @@ button {
 }
 
 .timeline-copy strong {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
   font-size: 10px;
+}
+
+.activity-source-badge {
+  flex: 0 0 auto;
+  padding: 1px 5px;
+  border: 1px solid color-mix(in srgb, var(--vscode-widget-border, var(--vscode-panel-border)) 75%, transparent);
+  border-radius: 999px;
+  color: var(--vscode-descriptionForeground);
+  font-size: 7px;
+  font-style: normal;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.activity-source-badge.source-agent_call {
+  color: var(--vscode-focusBorder);
+  background: color-mix(in srgb, var(--vscode-focusBorder) 10%, transparent);
+}
+
+.activity-source-badge.source-guard {
+  color: var(--vscode-editorWarning-foreground);
+}
+
+.activity-source-badge.source-recovery {
+  color: var(--vscode-testing-iconFailed, #f85149);
 }
 
 .timeline-copy span {

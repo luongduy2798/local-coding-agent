@@ -58,7 +58,10 @@ export async function readControlActivities({ auditPath, enabled, runtimeId = nu
         activity.startedAt,
         activity.finishedAt,
         activity.taskId,
-        activity.workspaceIds
+        activity.workspaceIds,
+        activity.source,
+        activity.parentInvocationId,
+        activity.detail
       ]))).digest("hex").slice(0, 16),
       updatedAt: new Date().toISOString()
     };
@@ -100,7 +103,7 @@ function projectLine(line) {
     const runtimeId = safeIdentifier(value.runtime_id, 160);
     return phase && runtimeId ? { kind: "runtime", phase, ts, runtimeId } : null;
   }
-  if (value.kind !== "tool") return null;
+  if (!["tool", "activity"].includes(value.kind)) return null;
   const tool = safeTool(value.tool);
   if (!tool) return null;
   const rawPhase = String(value.phase || "finished");
@@ -108,12 +111,15 @@ function projectLine(line) {
   const requestId = safeIdentifier(value.request_id ?? value.requestId, 180);
   const invocationId = safeIdentifier(value.invocation_id, 180) || `legacy:${requestId || "none"}:${tool}:${ts}`;
   return {
-    kind: "tool",
+    kind: value.kind,
     phase,
     ts,
     invocationId,
     runtimeId: safeIdentifier(value.runtime_id, 180),
     tool,
+    source: value.kind === "activity" ? safeActivitySource(value.activity_source) : "agent_call",
+    parentInvocationId: safeIdentifier(value.parent_invocation_id, 180),
+    detail: safeDisplayText(value.activity_detail, 240),
     taskId: safeTaskId(value.task_id),
     workspaceIds: safeWorkspaceIds(value.workspace_ids),
     ok: typeof value.ok === "boolean" ? value.ok : null,
@@ -196,6 +202,9 @@ function activityFrom(event, { existing, status, ok, startedAt, finishedAt, dura
     invocationId: event.invocationId,
     runtimeId: event.runtimeId || existing?.runtimeId || null,
     tool: event.tool,
+    source: event.source || existing?.source || "agent_call",
+    parentInvocationId: event.parentInvocationId || existing?.parentInvocationId || null,
+    detail: event.detail || existing?.detail || null,
     taskId: event.taskId || existing?.taskId || null,
     workspaceIds: event.workspaceIds?.length ? event.workspaceIds : existing?.workspaceIds || [],
     status,
@@ -246,6 +255,17 @@ function safeLowerIdentifier(value) {
 }
 function safeTaskId(value) {
   return safeIdentifier(value, 180);
+}
+function safeActivitySource(value) {
+  const text = safeLowerIdentifier(value);
+  return ["agent_call", "automatic", "background", "guard", "recovery"].includes(text)
+    ? text
+    : "automatic";
+}
+function safeDisplayText(value, max = 240) {
+  if (typeof value !== "string") return null;
+  const text = value.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim();
+  return text ? text.slice(0, max) : null;
 }
 function safeWorkspaceIds(value) {
   return Array.isArray(value) ? value.map((item) => safeIdentifier(item, 180)).filter(Boolean).slice(0, 8) : [];

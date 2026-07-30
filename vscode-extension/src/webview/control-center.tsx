@@ -23,6 +23,9 @@ export interface ToolActivityView {
   invocationId: string;
   runtimeId: string | null;
   tool: string;
+  source: "agent_call" | "automatic" | "background" | "guard" | "recovery";
+  parentInvocationId: string | null;
+  detail: string | null;
   taskId: string | null;
   workspaceIds: string[];
   status: "started" | "finished" | "failed" | "interrupted";
@@ -493,6 +496,7 @@ export interface TaskPresentation {
   latestAt: string | null;
   verification: "PASS" | "INCOMPLETE" | "FAIL" | null;
   toolCallCount: number;
+  internalActionCount: number;
   redundantCallCount: number;
   usefulCallCount: number;
   elapsedMs: number | null;
@@ -528,9 +532,11 @@ export function buildWorkspaceTasks(
       const latestActivity = [...activities].sort((left, right) => activityTimestamp(right) - activityTimestamp(left))[0];
       const verification = latestVisibleVerification(activities);
       const timing = taskTiming(task, activities);
-      const observedRedundantCallCount = activities.filter(isRedundantActivity).length;
+      const agentActivities = activities.filter((activity) => activitySource(activity) === "agent_call");
+      const internalActionCount = activities.length - agentActivities.length;
+      const observedRedundantCallCount = agentActivities.filter(isRedundantActivity).length;
       const orchestrationCalls = task.orchestration?.counters?.total_calls || 0;
-      const toolCallCount = Math.max(activities.length, orchestrationCalls);
+      const toolCallCount = agentActivities.length > 0 ? agentActivities.length : orchestrationCalls;
       const redundantCallCount = Math.max(
         observedRedundantCallCount,
         task.orchestration?.counters?.duplicate_calls || 0,
@@ -546,6 +552,7 @@ export function buildWorkspaceTasks(
         latestAt: latestActivity?.finishedAt || latestActivity?.startedAt || task.updatedAt,
         verification,
         toolCallCount,
+        internalActionCount,
         redundantCallCount,
         usefulCallCount: Math.max(0, toolCallCount - redundantCallCount),
         ...timing,
@@ -729,7 +736,7 @@ function TaskBlock({
   const showAllActivities = taskActivitiesExpanded(activityDisclosure, latest);
   const visibleActivities = showAllActivities ? groupedActivities : groupedActivities.slice(-3);
   const hiddenActivityCount = Math.max(0, groupedActivities.length - visibleActivities.length);
-  const earlierCallCount = groupedActivities
+  const earlierActivityCount = groupedActivities
     .slice(0, hiddenActivityCount)
     .reduce((count, activity) => count + (activity.repeatCount || 1), 0);
   const profile = item.task.effectiveProfile;
@@ -776,7 +783,8 @@ function TaskBlock({
           <div className="task-card-meta">
             {item.task.createdAt && <span>Started {relativeTime(item.task.createdAt)}</span>}
             {item.runningProcessCount > 0 && <span>{item.runningProcessCount} running process{item.runningProcessCount === 1 ? "" : "es"}</span>}
-            {item.toolCallCount > 0 && <span>{item.toolCallCount} call{item.toolCallCount === 1 ? "" : "s"}</span>}
+            {item.toolCallCount > 0 && <span>{item.toolCallCount} agent call{item.toolCallCount === 1 ? "" : "s"}</span>}
+            {item.internalActionCount > 0 && <span>{item.internalActionCount} internal action{item.internalActionCount === 1 ? "" : "s"}</span>}
             {item.redundantCallCount > 0 && <span className="redundant-count">{item.redundantCallCount} redundant</span>}
             {item.elapsedMs !== null && (
               <span title={detached
@@ -850,15 +858,18 @@ function TaskBlock({
               {visibleActivities.map((activity) => {
                 const interruptedByDetach = detached && activity.status === "started";
                 return (
-                <li className={`timeline-item timeline-${interruptedByDetach ? "interrupted" : activity.status} ${activity.policySkip ? "timeline-skipped" : ""} ${activity.duplicate ? "timeline-duplicate" : ""}`} key={activity.invocationId}>
+                <li className={`timeline-item timeline-${interruptedByDetach ? "interrupted" : activity.status} timeline-source-${activitySource(activity)} ${activitySource(activity) === "agent_call" ? "" : "timeline-internal"} ${activity.policySkip ? "timeline-skipped" : ""} ${activity.duplicate ? "timeline-duplicate" : ""}`} key={activity.invocationId}>
                   <span className="timeline-marker">
                     {activity.status === "started" && !interruptedByDetach
                       ? <RotatingDots compact label={`${activityLabel(activity.tool)} running`} />
                       : <Icon name={interruptedByDetach ? "stop" : activity.status === "finished" ? "check" : "warning"} />}
                   </span>
                   <div className="timeline-copy">
-                    <strong>{activityPurposeLabel(activity)}{activity.repeatCount > 1 ? ` · ${activity.repeatCount} attempts` : ""}</strong>
-                    <span title={activity.tool}>{activity.tool}</span>
+                    <strong>
+                      {activityPurposeLabel(activity)}{activity.repeatCount > 1 ? ` · ${activity.repeatCount} attempts` : ""}
+                      <small className={`activity-source-badge source-${activitySource(activity)}`}>{activitySourceLabel(activity)}</small>
+                    </strong>
+                    <span title={activity.parentInvocationId ? `Parent ${activity.parentInvocationId}` : activity.tool}>{activity.tool}</span>
                     <span>
                       {activity.cacheHit
                         ? `Cached duplicate · ${relativeTime(activity.finishedAt || activity.startedAt)}`
@@ -869,8 +880,8 @@ function TaskBlock({
                           : interruptedByDetach
                             ? `Interrupted after ${formatDuration(detachedActivityDuration(activity, item.task.detachedAt || item.task.updatedAt))} · session detached ${relativeTime(item.task.detachedAt || item.task.updatedAt || activity.startedAt)}`
                           : activity.status === "started"
-                            ? `Running ${formatDuration(liveDuration(activity))} · started ${relativeTime(activity.startedAt)}`
-                            : `${formatDuration(activity.durationMs || 0)} · completed ${relativeTime(activity.finishedAt || activity.startedAt)}`}
+                            ? `${activity.detail ? `${activity.detail} · ` : ""}Running ${formatDuration(liveDuration(activity))} · started ${relativeTime(activity.startedAt)}`
+                            : `${activity.detail ? `${activity.detail} · ` : ""}${formatDuration(activity.durationMs || 0)} · completed ${relativeTime(activity.finishedAt || activity.startedAt)}`}
                       {isUserVisibleOrchestrationNoticeCode(activity.orchestrationNoticeCode) ? ` · ${activity.orchestrationNoticeCode}` : ""}
                       {visibleActivityVerification(activity) ? ` · ${visibleActivityVerification(activity)}` : ""}
                       {activity.errorCode ? ` · ${activity.errorCode}` : ""}
@@ -894,8 +905,8 @@ function TaskBlock({
                     <span className="timeline-copy">
                       <strong>
                         {showAllActivities
-                          ? "Show fewer calls"
-                          : `${earlierCallCount} earlier call${earlierCallCount === 1 ? "" : "s"}`}
+                          ? "Show fewer actions"
+                          : `${earlierActivityCount} earlier action${earlierActivityCount === 1 ? "" : "s"}`}
                       </strong>
                     </span>
                   </button>
@@ -931,6 +942,21 @@ export function activityPurposeLabel(activity: Pick<ToolActivityView, "tool" | "
   return activity.purpose ? humanizeTool(activity.purpose) : activityLabel(activity.tool);
 }
 
+function activitySource(activity: Pick<ToolActivityView, "source">): ToolActivityView["source"] {
+  return activity.source || "agent_call";
+}
+
+function activitySourceLabel(activity: Pick<ToolActivityView, "source">): string {
+  const labels: Record<ToolActivityView["source"], string> = {
+    agent_call: "Agent call",
+    automatic: "Automatic",
+    background: "Background",
+    guard: "Guard",
+    recovery: "Recovery",
+  };
+  return labels[activitySource(activity)];
+}
+
 export function activityLabel(tool: string): string {
   const labels: Record<string, string> = {
     lca_status: "Check LCA status",
@@ -941,6 +967,10 @@ export function activityLabel(tool: string): string {
     task_plan: "Plan the work",
     task_checkpoint: "Save task checkpoint",
     task_close: "Close task",
+    completion_guard: "Run completion guard",
+    finalize_review_changes: "Finalize Review Changes",
+    memory_persistence: "Queue Memory persistence",
+    journal_recovery: "Recover journal state",
     workspace_snapshot: "Inspect workspace",
     project_profile: "Inspect project setup",
     code_query: "Inspect code structure",
@@ -1004,9 +1034,10 @@ export function makeUnassignedPresentation(
     fileCount: unassignedChanges.reduce((count, change) => count + change.files.length, 0),
     latestAt: [...activities].sort((left, right) => activityTimestamp(right) - activityTimestamp(left))[0]?.finishedAt || now,
     verification: null,
-    toolCallCount: activities.length,
-    redundantCallCount: activities.filter(isRedundantActivity).length,
-    usefulCallCount: activities.filter((activity) => !isRedundantActivity(activity)).length,
+    toolCallCount: activities.filter((activity) => activitySource(activity) === "agent_call").length,
+    internalActionCount: activities.filter((activity) => activitySource(activity) !== "agent_call").length,
+    redundantCallCount: activities.filter((activity) => activitySource(activity) === "agent_call" && isRedundantActivity(activity)).length,
+    usefulCallCount: activities.filter((activity) => activitySource(activity) === "agent_call" && !isRedundantActivity(activity)).length,
     elapsedMs: null,
     activeToolTimeMs: mergedActivityDurationMs(activities),
     betweenCallsMs: null,
@@ -1143,7 +1174,9 @@ export function groupRepeatedActivities(activities: ToolActivityView[]): Grouped
   for (const activity of activities) {
     const previous = grouped[grouped.length - 1];
     const samePurpose = Boolean(activity.purposeFingerprint) && previous?.purposeFingerprint === activity.purposeFingerprint;
-    const groupable = Boolean(previous) && (
+    const sameSource = Boolean(previous) && activitySource(previous) === activitySource(activity);
+    const sameParent = Boolean(previous) && previous.parentInvocationId === activity.parentInvocationId;
+    const groupable = Boolean(previous) && sameSource && sameParent && (
       samePurpose || (
         isRedundantActivity(activity) && isRedundantActivity(previous) &&
         previous.tool === activity.tool &&

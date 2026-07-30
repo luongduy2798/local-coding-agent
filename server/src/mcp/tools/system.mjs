@@ -12,6 +12,9 @@ import {
   RESPONSE_MODES,
   compactCompletionGuard,
   compactTask,
+  isMinimalResponse,
+  minimalCompletionGuard,
+  minimalTask,
   shouldCompactResponse
 } from "../response-mode.mjs";
 import {
@@ -130,13 +133,18 @@ export function registerSystemTools(mcp, dependencies) {
         title: z.string().max(180).optional(),
         status: z.enum(["complete", "incomplete", "failed"]).optional(),
         task_token: z.string().optional(),
-        response_mode: z.enum(RESPONSE_MODES).optional().describe("auto, compact, full, or diagnostic response shaping."),
+        response_mode: z.enum(RESPONSE_MODES).optional().describe("auto, minimal, compact, full, or diagnostic response shaping."),
         memory_updates: z.array(TASK_CLOSE_MEMORY_UPDATE_SCHEMA).max(MAX_TASK_CLOSE_MEMORY_OPERATIONS).optional().describe(
           "Optional compact durable workspace Memory operations. Default to zero updates; routine edits and task logs do not belong in Memory. Normal tasks should usually save at most one item and complex tasks at most two. Accepted updates are durably queued with task closure and persisted asynchronously."
         )
       }
     },
-    async ({ title, status = "complete", task_token, response_mode = "auto", memory_updates = [] }) => {
+    async ({ title, status = "complete", task_token, response_mode = "auto", memory_updates = [] }, extra) => {
+      const internalActivity = extra?.lcaInternalActivity;
+      const runInternalActivity = (meta, operation) => internalActivity?.run
+        ? internalActivity.run(meta, operation)
+        : operation({ invocationId: null });
+      const recordInternalActivity = (meta) => internalActivity?.record?.(meta);
       if (!taskRouter) {
         const reviewTasks = [{
           workspace_id: primaryWorkspaceId,
@@ -146,13 +154,29 @@ export function registerSystemTools(mcp, dependencies) {
       }
 
       const openTask = await currentTask({ taskToken: task_token, required: true });
-      const compact = shouldCompactResponse(response_mode, openTask.effective_profile);
+      const minimal = isMinimalResponse(response_mode);
+      const compact = shouldCompactResponse(
+        response_mode,
+        openTask.effective_profile,
+        ["quick_edit", "normal", "complex"]
+      );
       const respond = (payload) => {
         const enriched = enrichTaskClosePayload(payload, openTask);
+        if (minimal) return jsonResult(minimalTaskClosePayload(enriched));
         return jsonResult(compact ? compactTaskClosePayload(enriched) : enriched);
       };
       await applyTaskCloseTestDelay(openTask);
-      const preflight = await withRequestSpan("task_close_preflight", () => preflightTaskClose(openTask));
+      const preflight = await runInternalActivity({
+        tool: "completion_guard",
+        source: "guard",
+        outcome: (value) => ({
+          ok: value?.ok === true,
+          detail: value?.ok === true
+            ? "Passed"
+            : `Blocked · ${(value?.incomplete_reasons || []).join(", ") || "completion requirements not met"}`,
+          errorCode: value?.ok === true ? null : "COMPLETION_GUARD_BLOCKED"
+        })
+      }, () => withRequestSpan("task_close_preflight", () => preflightTaskClose(openTask)));
       const effectiveStatus = status;
       const integrityBlockers = preflight.integrity_reasons || [];
       if (!preflight.ok && (effectiveStatus === "complete" || integrityBlockers.length > 0)) {
@@ -212,6 +236,13 @@ export function registerSystemTools(mcp, dependencies) {
       // keeps ordinary corruption failures in all-before state.
       const prepared = await withRequestSpan("task_close_prepare_journals", () => prepareTaskJournals(openTask));
       if (!prepared.ok) {
+        recordInternalActivity({
+          tool: "journal_recovery",
+          source: "recovery",
+          detail: "Review Changes journal preparation failed",
+          ok: false,
+          errorCode: "JOURNAL_FINALIZATION_FAILED"
+        });
         return respond({
           ok: false,
           status: "INCOMPLETE",
@@ -286,6 +317,15 @@ export function registerSystemTools(mcp, dependencies) {
           prepared.entries,
           intent.completed_workspace_ids
         );
+        recordInternalActivity({
+          tool: "journal_recovery",
+          source: "recovery",
+          detail: rolledBack.ok
+            ? `Rolled back partial journal close for ${journalFailureWorkspaceId}`
+            : `Recovery required for ${journalFailureWorkspaceId}`,
+          ok: rolledBack.ok,
+          errorCode: rolledBack.ok ? null : "TASK_CLOSE_RECOVERY_REQUIRED"
+        });
         intent.status = rolledBack.ok ? "rolled_back" : "in_doubt";
         intent.updated_at = isoNow();
         intent.failed_workspace_id = journalFailureWorkspaceId;
@@ -308,6 +348,11 @@ export function registerSystemTools(mcp, dependencies) {
       }
 
       const reviewTasks = finalized.filter((entry) => entry.task);
+      recordInternalActivity({
+        tool: "finalize_review_changes",
+        source: "automatic",
+        detail: `Finalized ${reviewTasks.length} change set${reviewTasks.length === 1 ? "" : "s"}`
+      });
       const finalOrchestration = finalizeTaskOrchestration(openTask.orchestration, {
         requested_status: effectiveStatus,
         preflight,
@@ -328,6 +373,15 @@ export function registerSystemTools(mcp, dependencies) {
           prepared.entries,
           intent.completed_workspace_ids
         );
+        recordInternalActivity({
+          tool: "journal_recovery",
+          source: "recovery",
+          detail: rolledBack.ok
+            ? "Rolled back finalized journals after task-router close failure"
+            : "Task close recovery required after router failure",
+          ok: rolledBack.ok,
+          errorCode: rolledBack.ok ? "TASK_ROUTER_CLOSE_FAILED" : "TASK_CLOSE_RECOVERY_REQUIRED"
+        });
         intent.status = rolledBack.ok ? "rolled_back" : "in_doubt";
         intent.updated_at = isoNow();
         intent.rollback_failed_workspace_ids = rolledBack.failed_workspace_ids;
@@ -353,6 +407,13 @@ export function registerSystemTools(mcp, dependencies) {
       intent.router_status = routedTask.status;
       const intentDurable = await atomicWriteJson(intentPath, intent).then(() => true, () => false);
       if (preparedMemory.jobs.length) memoryOutbox.wake();
+      recordInternalActivity({
+        tool: "memory_persistence",
+        source: "background",
+        detail: preparedMemory.jobs.length
+          ? `Queued ${preparedMemory.jobs.length} durable Memory update${preparedMemory.jobs.length === 1 ? "" : "s"}`
+          : "Skipped — no durable Memory updates"
+      });
       const lifecycle = routedTask.orchestration || finalOrchestration;
       return respond({
         ok: true,
@@ -667,6 +728,24 @@ function enrichTaskClosePayload(payload, task) {
     verification_status: payload.verification_status || guard?.verification_status || orchestration?.verification_status || null,
     integrity_status: payload.integrity_status || guard?.integrity_status || orchestration?.integrity_status || null,
     review_status: payload.review_status || orchestration?.review_status || null
+  };
+}
+
+function minimalTaskClosePayload(payload) {
+  return {
+    ok: payload.ok === true,
+    status: payload.status,
+    requested_status: payload.requested_status,
+    execution_status: payload.execution_status || payload.task?.orchestration?.execution_status || null,
+    verification_status: payload.verification_status || payload.completion_guard?.verification_status || null,
+    integrity_status: payload.integrity_status || payload.completion_guard?.integrity_status || null,
+    review_status: payload.review_status || payload.task?.orchestration?.review_status || null,
+    task: minimalTask(payload.task),
+    completion_guard: minimalCompletionGuard(payload.completion_guard),
+    incomplete_reasons: payload.incomplete_reasons || [],
+    close_transaction: payload.close_transaction || null,
+    review_changes_count: (payload.review_changes_tasks || []).length,
+    memory_persistence_status: payload.memory_persistence?.status || null
   };
 }
 

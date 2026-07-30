@@ -6,6 +6,7 @@ import { randomUUID } from "node:crypto";
 import { TaskRouterError } from "../workspace/task-router.mjs";
 import { operationalPayloadSuccess } from "../workspace/task-blockers.mjs";
 import { withDiscoveryGroups } from "./discovery-groups.mjs";
+import { shapeOrchestrationForResponse } from "./response-mode.mjs";
 import {
   advanceTaskOrchestration,
   inspectTaskTool,
@@ -38,8 +39,116 @@ export function createToolRegistrar({
   truncateUtf8
 }) {
   const taskOperations = new Map();
+  const rawHandlers = new Map();
   const evidenceCache = new Map();
   const evidenceCacheLimit = 128;
+
+  function createInternalActivityApi({ parentInvocationId, task, workspaceIds, requestId }) {
+    const emit = ({
+      invocationId,
+      phase,
+      tool,
+      source,
+      detail = null,
+      startedAt,
+      finishedAt = null,
+      durationMs = null,
+      ok = null,
+      errorCode = null,
+      parentId = parentInvocationId
+    }) => {
+      if (!auditEnabled) return;
+      audit({
+        ts: finishedAt || startedAt,
+        kind: "activity",
+        phase,
+        invocation_id: invocationId,
+        parent_invocation_id: parentId || null,
+        activity_source: source,
+        activity_detail: detail,
+        runtime_id: runtimeId,
+        request_id: requestId || null,
+        tool,
+        task_id: task?.id || null,
+        effective_profile: task?.effective_profile || null,
+        workspace_ids: workspaceIds,
+        started_at: startedAt,
+        finished_at: finishedAt,
+        duration_ms: durationMs,
+        ok,
+        error_code: errorCode
+      });
+    };
+    return {
+      async run(meta, operation) {
+        const invocationId = randomUUID();
+        const startedAt = isoNow();
+        const startedMs = performance.now();
+        emit({
+          invocationId,
+          phase: "started",
+          tool: meta.tool,
+          source: meta.source || "automatic",
+          detail: meta.detail || null,
+          startedAt,
+          parentId: meta.parentInvocationId || parentInvocationId
+        });
+        try {
+          const value = await operation({ invocationId });
+          const outcome = typeof meta.outcome === "function" ? meta.outcome(value) || {} : {};
+          const ok = outcome.ok !== false;
+          const finishedAt = isoNow();
+          emit({
+            invocationId,
+            phase: ok ? "finished" : "failed",
+            tool: meta.tool,
+            source: meta.source || "automatic",
+            detail: outcome.detail || meta.detail || null,
+            startedAt,
+            finishedAt,
+            durationMs: roundMs(performance.now() - startedMs),
+            ok,
+            errorCode: outcome.errorCode || null,
+            parentId: meta.parentInvocationId || parentInvocationId
+          });
+          return value;
+        } catch (error) {
+          const finishedAt = isoNow();
+          emit({
+            invocationId,
+            phase: "failed",
+            tool: meta.tool,
+            source: meta.source || "automatic",
+            detail: meta.detail || null,
+            startedAt,
+            finishedAt,
+            durationMs: roundMs(performance.now() - startedMs),
+            ok: false,
+            errorCode: String(error?.code || "INTERNAL_ACTIVITY_FAILED"),
+            parentId: meta.parentInvocationId || parentInvocationId
+          });
+          throw error;
+        }
+      },
+      record(meta) {
+        const timestamp = isoNow();
+        const ok = meta.ok !== false;
+        emit({
+          invocationId: randomUUID(),
+          phase: ok ? "finished" : "failed",
+          tool: meta.tool,
+          source: meta.source || "automatic",
+          detail: meta.detail || null,
+          startedAt: timestamp,
+          finishedAt: timestamp,
+          durationMs: 0,
+          ok,
+          errorCode: meta.errorCode || null,
+          parentId: meta.parentInvocationId || parentInvocationId
+        });
+      }
+    };
+  }
 
   function enforceResultBudget(result, maxBytes) {
     const boundedMax = Math.max(1_024, Math.min(
@@ -134,11 +243,21 @@ export function createToolRegistrar({
   }
 
   return function reg(mcp, name, definition, handler) {
+    rawHandlers.set(name, handler);
     mcp.registerTool(name, withDiscoveryGroups(name, definition), async (args, extra) => {
       const startedAt = isoNow();
       const startedMs = performance.now();
       const invocationId = randomUUID();
       const taskBefore = await resolveCurrentTask(currentTask, taskRouter, name, args);
+      const initialWorkspaceIds = collectWorkspaceIds(args, taskBefore);
+      const requestId = requestContext.getStore()?.requestId || null;
+      const internalActivity = createInternalActivityApi({
+        parentInvocationId: invocationId,
+        task: taskBefore,
+        workspaceIds: initialWorkspaceIds,
+        requestId
+      });
+      const handlerExtra = { ...(extra || {}), lcaInternalActivity: internalActivity };
       if (name === "task_close" && taskBefore && taskBefore.status !== "open") {
         return structuredResult({
           ok: true,
@@ -149,7 +268,6 @@ export function createToolRegistrar({
         });
       }
       let inspection = taskBefore ? inspectTaskTool({ task: taskBefore, tool: name, args: args ?? {} }) : null;
-      const initialWorkspaceIds = collectWorkspaceIds(args, taskBefore);
       if (auditEnabled) {
         audit({
           ts: startedAt,
@@ -237,7 +355,7 @@ export function createToolRegistrar({
           await enforcePolicy(name, args ?? {});
           const validationArgs = cachedEvidenceValidationArgs(name, args ?? {}, cached, firstText);
           const validationResult = validationArgs
-            ? await withTaskOperation(name, validationArgs, () => handler(validationArgs, extra))
+            ? await withTaskOperation(name, validationArgs, () => handler(validationArgs, handlerExtra))
             : null;
           if (validationResult && cachedEvidenceUnchanged(name, validationResult, firstText)) {
             skipped = true;
@@ -262,12 +380,12 @@ export function createToolRegistrar({
             result = mergeValidatedEvidence(name, cached, validationResult, firstText);
             if (!result?.isError) rememberEvidence(evidenceCache, cacheKey, result, evidenceCacheLimit);
           } else {
-            result = await withTaskOperation(name, args ?? {}, () => handler(args ?? {}, extra));
+            result = await withTaskOperation(name, args ?? {}, () => handler(args ?? {}, handlerExtra));
             rememberEvidence(evidenceCache, cacheKey, result, evidenceCacheLimit);
           }
         } else {
           await enforcePolicy(name, args ?? {});
-          result = await withTaskOperation(name, args ?? {}, () => handler(args ?? {}, extra));
+          result = await withTaskOperation(name, args ?? {}, () => handler(args ?? {}, handlerExtra));
           if (cacheKey && isVersionedEvidenceTool(name) && !result?.isError) {
             rememberEvidence(evidenceCache, cacheKey, result, evidenceCacheLimit);
           }
@@ -292,21 +410,164 @@ export function createToolRegistrar({
           inspection,
           skipped
         });
-        await taskRouter?.updateOrchestration({
+        const updatedTask = await taskRouter?.updateOrchestration({
           taskId: taskBefore.id,
           orchestration: observation.state,
           effectiveProfile: observation.state.effective_profile,
           profileConfidence: observation.state.confidence
-        }).catch(() => {});
-        result = appendOrchestration(result, observation.public, firstText);
+        }).catch(() => null);
+        let responseOrchestration = observation.public;
+        if (
+          name === "apply_patch" &&
+          args?.close_on_success === true &&
+          operationalSuccess &&
+          payload?.mutation_performed !== false &&
+          payload?.journal_complete !== false
+        ) {
+          const closeHandler = rawHandlers.get("task_close");
+          const taskForClose = updatedTask || await currentTask({
+            taskToken: args?.task_token || taskBefore.task_token,
+            required: false
+          });
+          const closeArgs = {
+            task_token: args?.task_token || taskForClose?.task_token || taskBefore.task_token,
+            status: "complete",
+            response_mode: args?.response_mode || "auto",
+            ...(args?.close_options?.title ? { title: args.close_options.title } : {}),
+            ...(Array.isArray(args?.close_options?.memory_updates)
+              ? { memory_updates: args.close_options.memory_updates }
+              : {})
+          };
+          let closePayload;
+          if (!closeHandler) {
+            internalActivity.record({
+              tool: "task_close",
+              source: "automatic",
+              detail: "Unavailable — internal task_close handler missing",
+              ok: false,
+              errorCode: "TASK_CLOSE_HANDLER_UNAVAILABLE"
+            });
+            closePayload = {
+              ok: false,
+              status: "UNAVAILABLE",
+              incomplete_reasons: ["TASK_CLOSE_HANDLER_UNAVAILABLE"]
+            };
+          } else {
+            try {
+              closePayload = await internalActivity.run({
+                tool: "task_close",
+                source: "automatic",
+                detail: "Triggered by close_on_success",
+                outcome: (value) => ({
+                  ok: value?.ok === true,
+                  detail: value?.ok === true ? "Completed automatically" : "Automatic close blocked",
+                  errorCode: value?.ok === true ? null : String(value?.status || "TASK_CLOSE_BLOCKED")
+                })
+              }, async ({ invocationId: closeInvocationId }) => {
+                if (taskForClose) {
+                  const closeInspection = inspectTaskTool({
+                    task: taskForClose,
+                    tool: "task_close",
+                    args: closeArgs
+                  });
+                  const closeObservation = advanceTaskOrchestration({
+                    task: taskForClose,
+                    tool: "task_close",
+                    args: closeArgs,
+                    success: true,
+                    resultPayload: null,
+                    invocationId: closeInvocationId,
+                    finishedAt: isoNow(),
+                    inspection: closeInspection,
+                    skipped: false
+                  });
+                  await taskRouter?.updateOrchestration({
+                    taskId: taskForClose.id,
+                    orchestration: closeObservation.state,
+                    effectiveProfile: closeObservation.state.effective_profile,
+                    profileConfidence: closeObservation.state.confidence
+                  }).catch(() => null);
+                  responseOrchestration = closeObservation.public;
+                }
+                const closeExtra = {
+                  ...handlerExtra,
+                  lcaInternalActivity: createInternalActivityApi({
+                    parentInvocationId: closeInvocationId,
+                    task: taskForClose || taskBefore,
+                    workspaceIds: collectWorkspaceIds(closeArgs, taskForClose || taskBefore),
+                    requestId
+                  })
+                };
+                const closeResult = await withTaskOperation(
+                  "task_close",
+                  closeArgs,
+                  () => closeHandler(closeArgs, closeExtra)
+                );
+                return parseStructuredPayload(closeResult, firstText) || {
+                  ok: false,
+                  status: "INVALID_RESPONSE",
+                  incomplete_reasons: ["TASK_CLOSE_RESPONSE_INVALID"]
+                };
+              });
+            } catch (error) {
+              closePayload = {
+                ok: false,
+                status: "ERROR",
+                incomplete_reasons: [String(error?.code || "TASK_CLOSE_FAILED")]
+              };
+            }
+          }
+          result = appendAutoClose(result, closePayload, firstText);
+          payload = parseStructuredPayload(result, firstText);
+          if (closePayload?.task?.orchestration) {
+            responseOrchestration = publicTaskOrchestration(
+              closePayload.task.orchestration,
+              closePayload.task.effective_profile || observation.state.effective_profile
+            );
+          } else if (closePayload) {
+            responseOrchestration = {
+              ...responseOrchestration,
+              ...(closePayload.execution_status ? { execution_status: closePayload.execution_status } : {}),
+              ...(closePayload.verification_status ? { verification_status: closePayload.verification_status } : {}),
+              ...(closePayload.integrity_status ? { integrity_status: closePayload.integrity_status } : {}),
+              ...(closePayload.review_status ? { review_status: closePayload.review_status } : {}),
+              ...(closePayload.ok === true ? { phase: "closed", recommended_transition: null } : {})
+            };
+          }
+        }
+        result = appendOrchestration(result, shapeOrchestrationForResponse(responseOrchestration, {
+          mode: args?.response_mode,
+          profile: observation.state.effective_profile,
+          compactProfiles: ["task_open", "apply_patch", "task_close"].includes(name)
+            ? ["quick_edit", "normal", "complex"]
+            : ["quick_edit", "normal"],
+          minimalWhenCompact: ["task_open", "apply_patch", "task_close"].includes(name)
+        }), firstText);
         payload = parseStructuredPayload(result, firstText);
       } else if (taskBefore && name === "task_close" && observation) {
-        result = appendOrchestration(result, observation.public, firstText);
+        const finalTask = payload?.task && typeof payload.task === "object" ? payload.task : null;
+        const finalOrchestration = finalTask?.orchestration
+          ? publicTaskOrchestration(finalTask.orchestration, finalTask.effective_profile || observation.state.effective_profile)
+          : observation.public;
+        result = appendOrchestration(result, shapeOrchestrationForResponse(finalOrchestration, {
+          mode: args?.response_mode,
+          profile: finalTask?.effective_profile || observation.state.effective_profile,
+          compactProfiles: ["quick_edit", "normal", "complex"],
+          minimalWhenCompact: true
+        }), firstText);
         payload = parseStructuredPayload(result, firstText);
       } else if (name === "task_open" && payload?.task?.orchestration) {
         result = appendOrchestration(
           result,
-          publicTaskOrchestration(payload.task.orchestration, payload.task.effective_profile),
+          shapeOrchestrationForResponse(
+            publicTaskOrchestration(payload.task.orchestration, payload.task.effective_profile),
+            {
+              mode: args?.response_mode,
+              profile: payload.task.effective_profile,
+              compactProfiles: ["quick_edit", "normal", "complex"],
+              minimalWhenCompact: true
+            }
+          ),
           firstText
         );
         payload = parseStructuredPayload(result, firstText);
@@ -350,7 +611,7 @@ export function createToolRegistrar({
         toolMetrics.largestOutputTool = name;
       }
       const resultTask = objectValue(payload?.task) || objectValue(payload?.checkpoint?.task);
-      const publicOrchestration = observation?.public || resultTask?.orchestration || payload?.orchestration || null;
+      const publicOrchestration = resultTask?.orchestration || payload?.orchestration || observation?.public || null;
       audit({
         ts: finishedAt,
         kind: "tool",
@@ -473,6 +734,31 @@ function rememberEvidence(cache, key, result, limit) {
   if (cache.has(key)) cache.delete(key);
   cache.set(key, cloneToolResult(result));
   while (cache.size > limit) cache.delete(cache.keys().next().value);
+}
+
+function appendAutoClose(result, closePayload, firstText) {
+  const payload = parseStructuredPayload(result, firstText);
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return result;
+  const task = closePayload?.task && typeof closePayload.task === "object"
+    ? closePayload.task
+    : null;
+  return replaceFirstText(result, JSON.stringify({
+    ...payload,
+    ...(task ? { task } : {}),
+    auto_close: {
+      requested: true,
+      ok: closePayload?.ok === true,
+      status: closePayload?.status || null,
+      task_status: task?.status || null,
+      execution_status: closePayload?.execution_status || task?.orchestration?.execution_status || null,
+      verification_status: closePayload?.verification_status || task?.orchestration?.verification_status || null,
+      integrity_status: closePayload?.integrity_status || task?.orchestration?.integrity_status || null,
+      review_status: closePayload?.review_status || task?.orchestration?.review_status || null,
+      incomplete_reasons: closePayload?.incomplete_reasons || [],
+      close_transaction: closePayload?.close_transaction || null,
+      memory_persistence: closePayload?.memory_persistence || null
+    }
+  }));
 }
 
 function appendOrchestration(result, orchestration, firstText) {

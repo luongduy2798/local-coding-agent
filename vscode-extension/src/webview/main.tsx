@@ -518,7 +518,7 @@ function ChangeCard({
   compact?: boolean;
 }): React.JSX.Element {
   const [expanded, setExpanded] = useState(!compact);
-  const title = useMemo(() => changeTitle(change), [change]);
+  const title = useMemo(() => compact ? "Change set" : changeTitle(change), [change, compact]);
   const canUndoChange = ["applied", "reapplied", "partially_undone"].includes(change.status);
   const canReapplyChange = ["undone", "partially_undone"].includes(change.status);
   const disabled = Boolean(state.busyAction);

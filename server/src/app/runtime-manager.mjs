@@ -12,7 +12,13 @@ import {
 import { discoverTypeScriptSemanticAdapter } from "../coding/semantic/typescript-adapter.mjs";
 import { PatchTransactionCoordinator } from "../mutation/patch-transaction.mjs";
 import { boundedNumber, withRequestSpan } from "../shared/utils.mjs";
-import { compactTask, shouldCompactResponse } from "../mcp/response-mode.mjs";
+import {
+  compactTask,
+  compactWorkspaceMemory,
+  isMinimalResponse,
+  minimalTask,
+  shouldCompactResponse
+} from "../mcp/response-mode.mjs";
 import { VerificationPlanner } from "../verification/planner.mjs";
 import { WorkspaceGraph } from "../workspace/graph/workspace-graph.mjs";
 import { prewarmWorkspaceGraphInChild } from "../workspace/graph/prewarm.mjs";
@@ -463,7 +469,25 @@ export function createRuntimeManager({
       workspace_state: workspaceState,
       workspace_memory: workspaceMemory
     };
-    if (!shouldCompactResponse(responseMode, task.effective_profile)) return fullTask;
+    if (isMinimalResponse(responseMode)) {
+      return {
+        ...minimalTask(fullTask),
+        workspace_set_version: task.version,
+        workspace_state: workspaceState.map((workspace) => ({
+          workspace_id: workspace.workspace_id,
+          baseline_known: workspace.baseline_known,
+          branch: workspace.branch,
+          clean: workspace.clean,
+          dirty_unknown: workspace.dirty_unknown
+        })),
+        workspace_memory: compactWorkspaceMemory(workspaceMemory, { minimal: true })
+      };
+    }
+    if (!shouldCompactResponse(
+      responseMode,
+      task.effective_profile,
+      ["quick_edit", "normal", "complex"]
+    )) return fullTask;
     return {
       ...compactTask(fullTask),
       workspace_set_version: task.version,
@@ -477,7 +501,7 @@ export function createRuntimeManager({
         dirty_summary: workspace.dirty?.summary || null,
         captured_at: workspace.captured_at
       })),
-      workspace_memory: workspaceMemory
+      workspace_memory: compactWorkspaceMemory(workspaceMemory)
     };
   }
 
