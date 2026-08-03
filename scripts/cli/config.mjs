@@ -107,6 +107,7 @@ Usage:
   node scripts/local-coding-agent.mjs workspace use <path|workspace-id>
   node scripts/local-coding-agent.mjs workspace archive <path|workspace-id>
   node scripts/local-coding-agent.mjs workspace restore <path|workspace-id>
+  node scripts/local-coding-agent.mjs workspace rebind <path|workspace-id>
   node scripts/local-coding-agent.mjs workspace remove <path|workspace-id>
   node scripts/local-coding-agent.mjs approval list
   node scripts/local-coding-agent.mjs approval approve <request-id>

@@ -72,6 +72,10 @@ try {
   const selectedBById = await runJson("workspace", "use", selectedB.workspace.id);
   assert.equal(selectedBById.workspace.id, selectedB.workspace.id);
   assert.equal(selectedBById.default_workspace_id, selectedB.workspace.id);
+  const reboundA = await runJson("workspace", "rebind", workspaceAId);
+  assert.equal(reboundA.action, "rebind");
+  assert.equal(reboundA.workspace.id, workspaceAId);
+  assert.equal(reboundA.workspace.metadata.identity_version, 2);
 
   await expectCliFailure(
     () => run("workspace", "archive", roots.b, "--json"),
@@ -104,6 +108,10 @@ try {
     assert.equal(livePreview.summary.workspace_id, workspaceAId);
     await expectCliFailure(
       () => run("workspace", "archive", workspaceAId, "--json"),
+      /requires port .* to be free|requires the supervisor/i
+    );
+    await expectCliFailure(
+      () => run("workspace", "rebind", workspaceAId, "--json"),
       /requires port .* to be free|requires the supervisor/i
     );
     await expectCliFailure(

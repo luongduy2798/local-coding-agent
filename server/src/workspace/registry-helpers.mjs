@@ -277,13 +277,24 @@ export async function canonicalWorkspaceRoot(input) {
     canonical,
     key: normalizedPathKey(canonical),
     rootIdentity: filesystemIdentity(info, canonical),
+    legacyRootIdentity: legacyFilesystemIdentity(info, canonical),
     git: git
       ? { is_repository: true, identity: git.identity }
-      : { is_repository: false, identity: null }
+      : { is_repository: false, identity: null },
+    legacyGitIdentity: git?.legacyIdentity || null
   };
 }
 
 function filesystemIdentity(info, canonical) {
+  const inode = Number(info?.ino || 0);
+  const birthtime = Math.trunc(Number(info?.birthtimeMs || 0));
+  const material = inode > 0
+    ? `${normalizedPathKey(canonical)}:${inode}:${birthtime}`
+    : `${normalizedPathKey(canonical)}:${birthtime}`;
+  return `fs2_${createHash("sha256").update(material).digest("hex").slice(0, 32)}`;
+}
+
+function legacyFilesystemIdentity(info, canonical) {
   const inode = Number(info?.ino || 0);
   const device = Number(info?.dev || 0);
   const birthtime = Number(info?.birthtimeMs || 0);
@@ -336,12 +347,17 @@ export async function discoverGitWorkspace(start) {
         if (commonTarget) commonDirectory = await realpath(path.resolve(gitDirectory, commonTarget));
       }
       const identityInfo = await stat(commonDirectory);
-      const stableMaterial = `${identityInfo.dev}:${identityInfo.ino}`;
-      const fallbackMaterial = `${stableMaterial}:${normalizedPathKey(commonDirectory)}`;
-      const material = Number(identityInfo.ino) > 0 ? stableMaterial : fallbackMaterial;
+      const inode = Number(identityInfo.ino || 0);
+      const birthtime = Math.trunc(Number(identityInfo.birthtimeMs || 0));
+      const key = normalizedPathKey(commonDirectory);
+      const material = inode > 0 ? `${key}:${inode}:${birthtime}` : `${key}:${birthtime}`;
+      const legacyStableMaterial = `${identityInfo.dev}:${identityInfo.ino}`;
+      const legacyFallbackMaterial = `${legacyStableMaterial}:${key}`;
+      const legacyMaterial = inode > 0 ? legacyStableMaterial : legacyFallbackMaterial;
       return {
         root: cursor,
-        identity: `git_${createHash("sha256").update(material).digest("hex").slice(0, 32)}`
+        identity: `git2_${createHash("sha256").update(material).digest("hex").slice(0, 32)}`,
+        legacyIdentity: `git_${createHash("sha256").update(legacyMaterial).digest("hex").slice(0, 32)}`
       };
     }
     const parent = path.dirname(cursor);
@@ -375,16 +391,23 @@ export async function workspaceIdentityAvailable({
   try {
     const current = await canonicalWorkspaceRoot(requestedRoot);
     if (current.key !== normalizedPathKey(canonicalRoot)) return false;
-    if (metadata.root_identity && metadata.root_identity !== current.rootIdentity) return false;
-    const expectedGit = metadata.git;
-    if (expectedGit && (
-      Boolean(expectedGit.is_repository) !== Boolean(current.git.is_repository) ||
-      String(expectedGit.identity || "") !== String(current.git.identity || "")
-    )) return false;
-    return true;
+    return workspaceIdentityMatches(metadata, current);
   } catch {
     return false;
   }
+}
+
+export function workspaceIdentityMatches(metadata, canonical) {
+  if (metadata?.root_identity && ![
+    canonical.rootIdentity,
+    canonical.legacyRootIdentity
+  ].includes(metadata.root_identity)) return false;
+  const expectedGit = metadata?.git;
+  if (!expectedGit) return true;
+  if (Boolean(expectedGit.is_repository) !== Boolean(canonical.git.is_repository)) return false;
+  return [canonical.git.identity, canonical.legacyGitIdentity]
+    .map((identity) => String(identity || ""))
+    .includes(String(expectedGit.identity || ""));
 }
 
 export async function canonicalizeTarget(root, input) {

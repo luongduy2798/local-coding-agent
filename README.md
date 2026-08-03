@@ -94,6 +94,7 @@ lca workspace list
 lca workspace use /path/to/repo
 lca workspace archive <path|workspace-id> # tạm ẩn, giữ ID/task/history
 lca workspace restore <path|workspace-id> # khôi phục workspace đã archive
+lca workspace rebind <path|workspace-id>  # xác nhận lại identity sau khi volume/repo thực sự đổi
 lca workspace remove <path|workspace-id>  # xóa vĩnh viễn dữ liệu LCA, không xóa source repo
 lca config    # mở TUI cấu hình mode/policy/workspace/port
 lca doctor    # kiểm tra cấu hình local

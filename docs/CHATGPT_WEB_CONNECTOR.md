@@ -113,6 +113,7 @@ lca workspace list
 lca workspace use /repo/khac
 lca workspace archive <path|workspace-id>
 lca workspace restore <path|workspace-id>
+lca workspace rebind <path|workspace-id>
 lca workspace remove <path|workspace-id>
 ```
 

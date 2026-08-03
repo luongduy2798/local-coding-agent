@@ -19,6 +19,7 @@ import {
   validateTransactionState,
   validateWorkspaceId,
   workspaceIdentityAvailable,
+  workspaceIdentityMatches,
   workspaceFromRow
 } from "./registry-helpers.mjs";
 import {
@@ -176,7 +177,8 @@ export class WorkspaceRegistry {
     const nextMetadata = {
       ...(metadata || {}),
       git: canonical.git,
-      root_identity: canonical.rootIdentity
+      root_identity: canonical.rootIdentity,
+      identity_version: 2
     };
     if (existing) {
       if ((existing.registration_state || "active") === "archived") {
@@ -187,7 +189,7 @@ export class WorkspaceRegistry {
         );
       }
       const existingMetadata = safeJsonParse(existing.metadata_json);
-      if (workspaceIdentityChanged(existingMetadata, canonical)) {
+      if (!workspaceIdentityMatches(existingMetadata, canonical)) {
         throw new WorkspaceRegistryError(
           "WORKSPACE_IDENTITY_CHANGED",
           "The registered workspace path now points to a different filesystem or Git identity.",
@@ -380,15 +382,9 @@ export class WorkspaceRegistry {
       );
     }
     const canonical = await canonicalWorkspaceRoot(workspace.root);
-    const expectedGit = workspace.metadata?.git || {};
-    const gitIdentityChanged = Boolean(expectedGit.is_repository) !== Boolean(canonical.git.is_repository) ||
-      String(expectedGit.identity || "") !== String(canonical.git.identity || "");
-    const rootIdentityChanged = workspace.metadata?.root_identity &&
-      workspace.metadata.root_identity !== canonical.rootIdentity;
     if (
       canonical.key !== normalizedPathKey(workspace.canonicalRoot) ||
-      gitIdentityChanged ||
-      rootIdentityChanged
+      !workspaceIdentityMatches(workspace.metadata, canonical)
     ) {
       throw new WorkspaceRegistryError(
         "WORKSPACE_IDENTITY_CHANGED",
@@ -402,6 +398,51 @@ export class WorkspaceRegistry {
     }
     const row = await restoreWorkspaceRecord(this.#database, workspace.id, nowIso());
     return { restored: true, workspace: workspaceFromRow(row) };
+  }
+
+  async rebindWorkspace(workspaceId) {
+    this.#assertOpen();
+    const workspace = await this.getWorkspace(workspaceId, {
+      refreshAvailability: false,
+      allowArchived: true
+    });
+    if (workspace.metadata?.trusted !== true) {
+      throw new WorkspaceRegistryError(
+        "WORKSPACE_TRUST_REQUIRED",
+        "Trust this workspace explicitly before rebinding it.",
+        { workspaceId: workspace.id, root: workspace.canonicalRoot }
+      );
+    }
+    const canonical = await canonicalWorkspaceRoot(workspace.root);
+    if (canonical.key !== normalizedPathKey(workspace.canonicalRoot)) {
+      throw new WorkspaceRegistryError(
+        "WORKSPACE_CANONICAL_PATH_CHANGED",
+        "The workspace canonical path changed and cannot be rebound in place.",
+        {
+          workspaceId: workspace.id,
+          expectedRoot: workspace.canonicalRoot,
+          actualRoot: canonical.canonical
+        }
+      );
+    }
+    const timestamp = nowIso();
+    const metadata = {
+      ...workspace.metadata,
+      git: canonical.git,
+      root_identity: canonical.rootIdentity,
+      identity_version: 2,
+      identity_rebound_at: timestamp
+    };
+    const row = await this.#database.get(
+      `
+        UPDATE workspaces
+        SET metadata_json = ?, availability = 'available', updated_at = ?
+        WHERE id = ?
+        RETURNING *
+      `,
+      [JSON.stringify(metadata), timestamp, workspace.id]
+    );
+    return { rebound: true, workspace: workspaceFromRow(row) };
   }
 
   async deleteWorkspaceRecords(workspaceId, inspection) {
@@ -603,15 +644,6 @@ export class WorkspaceRegistry {
     this.#hotWorkspaces.clear();
     await this.#database.close();
   }
-}
-
-function workspaceIdentityChanged(metadata, canonical) {
-  if (metadata?.root_identity && metadata.root_identity !== canonical.rootIdentity) return true;
-  const expectedGit = metadata?.git;
-  return Boolean(expectedGit) && (
-    Boolean(expectedGit.is_repository) !== Boolean(canonical.git.is_repository) ||
-    String(expectedGit.identity || "") !== String(canonical.git.identity || "")
-  );
 }
 
 export { StorageError };

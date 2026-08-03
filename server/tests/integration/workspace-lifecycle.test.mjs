@@ -135,6 +135,11 @@ try {
     "WORKSPACE_TRUST_REQUIRED",
     WorkspaceRegistryError
   );
+  await expectCode(
+    registry.rebindWorkspace(registered.untrusted.id),
+    "WORKSPACE_TRUST_REQUIRED",
+    WorkspaceRegistryError
+  );
 
   await registry.archiveWorkspace(registered.identity.id);
   const movedIdentityRoot = `${roots.identity}-moved`;
@@ -177,6 +182,17 @@ try {
     }),
     "WORKSPACE_IDENTITY_CHANGED",
     WorkspaceRegistryError
+  );
+  const reboundActiveIdentity = await registry.rebindWorkspace(registered["active-identity"].id);
+  assert.equal(reboundActiveIdentity.workspace.id, registered["active-identity"].id);
+  assert.equal(reboundActiveIdentity.workspace.availability, "available");
+  assert.equal(reboundActiveIdentity.workspace.metadata.identity_version, 2);
+  assert.match(reboundActiveIdentity.workspace.metadata.root_identity, /^fs2_[a-f0-9]{32}$/);
+  assert.equal(
+    (await registry.registerWorkspace(roots["active-identity"], {
+      metadata: { label: "replacement", trusted: true, source: "test" }
+    })).created,
+    false
   );
 
   await registry.selectWorkspace(registered.a.id, { scope: "default" });

@@ -457,6 +457,26 @@ async function workspaceCommand(rest, flags) {
       await registry.close();
     }
   }
+  if (sub === "rebind") {
+    if (!reference) throw new Error("Usage: lca workspace rebind <path|workspace-id>");
+    const opts = effectiveOptions(flags);
+    await assertCliRuntimeStopped(opts, { operation: "Workspace identity rebind" });
+    const registry = await openCliWorkspaceRegistry(opts);
+    try {
+      const workspace = await findCliWorkspace(registry, reference);
+      if (!workspace) throw new Error(`Workspace not found: ${reference}`);
+      const result = await registry.rebindWorkspace(workspace.id);
+      if (flags.json) {
+        printWorkspaceResult({ ok: true, action: "rebind", ...result }, flags);
+        return;
+      }
+      console.log(`Workspace identity rebound: ${workspace.id} (${workspace.canonicalRoot})`);
+      console.log("Existing tasks, journal, and history were preserved.");
+      return;
+    } finally {
+      await registry.close();
+    }
+  }
   if (sub === "remove") {
     if (!reference) throw new Error("Usage: lca workspace remove <path|workspace-id>");
     const opts = effectiveOptions(flags);

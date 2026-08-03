@@ -89,6 +89,7 @@ lca workspace list
 lca workspace use /path/to/another-repo
 lca workspace archive <path|workspace-id>
 lca workspace restore <path|workspace-id>
+lca workspace rebind <path|workspace-id>
 lca workspace remove <path|workspace-id>
 ```
 
@@ -96,7 +97,7 @@ lca workspace remove <path|workspace-id>
 
 `workspace_select` changes the default workspace for the next task in that MCP session. It does not modify an open task. A moved/deleted root, canonical-path change, overlap, or unsafe symlink is rejected; LCA never silently falls back to `cwd` or another workspace.
 
-`archive` is reversible and preserves the workspace ID, task/journal/blob/index data, and read-only history. `restore` requires the original canonical filesystem/Git identity and explicit trust. `remove` means permanent LCA-data deletion, not source deletion: it requires a stopped runtime and exact label confirmation, and is blocked for the default/configured workspace, multi-workspace task history, or an incomplete transaction. Registering the same root after permanent removal creates a new workspace ID.
+`archive` is reversible and preserves the workspace ID, task/journal/blob/index data, and read-only history. `restore` requires the original canonical filesystem/Git identity and explicit trust. `rebind` is an explicit local recovery action for a trusted workspace whose physical directory or Git metadata was intentionally replaced; it requires a stopped runtime and preserves the existing workspace ID, tasks, journal, and history. Normal reboots and Git pulls keep the durable identity unchanged. `remove` means permanent LCA-data deletion, not source deletion: it requires a stopped runtime and exact label confirmation, and is blocked for the default/configured workspace, multi-workspace task history, or an incomplete transaction. Registering the same root after permanent removal creates a new workspace ID.
 
 ## Task binding and isolation
 
