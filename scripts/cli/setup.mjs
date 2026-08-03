@@ -23,6 +23,7 @@ import {
   assertSupportedNodeVersion
 } from "../process-lifecycle.mjs";
 import {
+  CLI_INSTALL_STATE_PATH,
   CONFIG_PATH,
   DEFAULT_PORT,
   DEFAULT_TUNNEL_VERSION,
@@ -481,6 +482,17 @@ async function verifyCliShim(cliPath) {
   console.log(`OK lca wrapper: ${cliPath}`);
 }
 
+function writeCliInstallState(cliPath) {
+  ensureConfigDir();
+  writeFileSync(CLI_INSTALL_STATE_PATH, `${JSON.stringify({
+    schemaVersion: 1,
+    path: cliPath,
+    node: process.execPath,
+    repoRoot: REPO_ROOT,
+    installedAt: new Date().toISOString()
+  }, null, 2)}\n`, "utf8");
+}
+
 async function installCliCommand() {
   const marker = "local-coding-agent lca wrapper";
   const cliScript = join(REPO_ROOT, "scripts", "local-coding-agent.mjs");
@@ -495,26 +507,30 @@ async function installCliCommand() {
     const psPath = join(binDir, "lca.ps1");
     for (const target of [cmdPath, psPath]) {
       if (existsSync(target) && !readFileSync(target, "utf8").includes(marker)) {
-        throw new Error(`Refusing to overwrite: ${target}`);
+        console.log(`WARN replacing an existing lca command during repair: ${target}`);
       }
     }
-    writeFileSync(cmdPath, `@echo off\r\nrem ${marker}\r\nwhere node >nul 2>nul\r\nif errorlevel 1 (\r\n  echo ERROR: Node.js ^>=${MIN_NODE_VERSION} is required but node was not found in PATH.\r\n  echo Install Node.js 22 LTS from https://nodejs.org/ or run winget install OpenJS.NodeJS.LTS, then open a new terminal.\r\n  exit /b 1\r\n)\r\nnode "${cliScript}" %*\r\nexit /b %ERRORLEVEL%\r\n`, "utf8");
-    writeFileSync(psPath, `# ${marker}\nif (-not (Get-Command node -ErrorAction SilentlyContinue)) {\n  Write-Error 'Node.js >=${MIN_NODE_VERSION} is required but node was not found in PATH. Install Node.js 22 LTS from https://nodejs.org/ or run winget install OpenJS.NodeJS.LTS, then open a new terminal.'\n  exit 1\n}\n& node "${cliScript}" @args\nexit $LASTEXITCODE\n`, "utf8");
+    const nodeExecutable = process.execPath;
+    writeFileSync(cmdPath, `@echo off\r\nrem ${marker}\r\nif not exist "${nodeExecutable}" (\r\n  echo ERROR: The Node.js executable saved by lca setup is unavailable: ${nodeExecutable}\r\n  echo Run scripts\\lca.cmd setup again from the current checkout.\r\n  exit /b 1\r\n)\r\n"${nodeExecutable}" "${cliScript}" %*\r\nexit /b %ERRORLEVEL%\r\n`, "utf8");
+    writeFileSync(psPath, `# ${marker}\n$node = ${JSON.stringify(nodeExecutable)}\n$cli = ${JSON.stringify(cliScript)}\nif (-not (Test-Path -LiteralPath $node)) {\n  Write-Error "The Node.js executable saved by lca setup is unavailable: $node. Run scripts\\lca.cmd setup again from the current checkout."\n  exit 1\n}\n& $node $cli @args\nexit $LASTEXITCODE\n`, "utf8");
     console.log(`Installed: ${cmdPath}`);
     const pathResult = await configureShellPath(binDir);
     if (pathResult.message) console.log(pathResult.message);
     if (!pathResult.active) console.log(`Current terminal fallback: "${cmdPath}"`);
+    writeCliInstallState(cmdPath);
     return cmdPath;
   }
   const target = join(binDir, "lca");
   if (existsSync(target) && !readFileSync(target, "utf8").includes(marker)) {
-    throw new Error(`Refusing to overwrite: ${target}`);
+    console.log(`WARN replacing an existing lca command during repair: ${target}`);
   }
-  writeFileSync(target, `#!/usr/bin/env bash\n# ${marker}\nif ! command -v node >/dev/null 2>&1; then\n  echo "ERROR: Node.js >=${MIN_NODE_VERSION} is required but node was not found in PATH." >&2\n  echo "Install Node.js 22 LTS from https://nodejs.org/ (or use your package/version manager), then open a new shell." >&2\n  exit 1\nfi\nexec node "${cliScript}" "$@"\n`, "utf8");
+  const nodeExecutable = process.execPath;
+  writeFileSync(target, `#!/usr/bin/env bash\n# ${marker}\nNODE_BIN=${JSON.stringify(nodeExecutable)}\nCLI_SCRIPT=${JSON.stringify(cliScript)}\nif [ ! -x "$NODE_BIN" ]; then\n  echo "ERROR: The Node.js executable saved by lca setup is unavailable: $NODE_BIN" >&2\n  echo "Run bash scripts/lca setup again from the current checkout." >&2\n  exit 1\nfi\nexec "$NODE_BIN" "$CLI_SCRIPT" "$@"\n`, "utf8");
   await chmod(target, 0o755);
   console.log(`Installed: ${target}`);
   const pathResult = await configureShellPath(binDir);
   if (pathResult.message) console.log(pathResult.message);
+  writeCliInstallState(target);
   return target;
 }
 
@@ -593,21 +609,45 @@ async function findVsCodeCli() {
   return "";
 }
 
+function clearVsCodeObsoleteEntries(installRoot, extensionPrefix) {
+  const obsoletePath = join(installRoot, ".obsolete");
+  const obsolete = readJsonFile(obsoletePath, {});
+  if (!obsolete || typeof obsolete !== "object" || Array.isArray(obsolete)) return;
+  const filtered = Object.fromEntries(
+    Object.entries(obsolete).filter(([key]) => !key.startsWith(extensionPrefix))
+  );
+  if (Object.keys(filtered).length === Object.keys(obsolete).length) return;
+  if (Object.keys(filtered).length) {
+    writeFileSync(obsoletePath, `${JSON.stringify(filtered, null, 2)}\n`, "utf8");
+  } else {
+    rmSync(obsoletePath, { force: true });
+  }
+}
+
 async function setupVsCodeExtension() {
   if (!existsSync(VSCODE_EXTENSION_DIR)) {
     throw new Error(`VS Code extension source is missing: ${VSCODE_EXTENSION_DIR}`);
   }
   const npm = process.platform === "win32" ? "npm.cmd" : "npm";
-  if (!existsSync(join(VSCODE_EXTENSION_DIR, "node_modules"))) {
-    await runChecked("vscode-extension install", npm, ["install"], { cwd: VSCODE_EXTENSION_DIR });
-  }
+  const manifest = readVsCodeExtensionManifest();
+  const extensionId = `${manifest.publisher}.${manifest.name}`;
+  const dependencyArgs = existsSync(join(VSCODE_EXTENSION_DIR, "package-lock.json")) ? ["ci"] : ["install"];
+  await runChecked("vscode-extension install", npm, dependencyArgs, { cwd: VSCODE_EXTENSION_DIR });
   await runChecked("vscode-extension build", npm, ["run", "build"], { cwd: VSCODE_EXTENSION_DIR });
 
-  const manifest = readVsCodeExtensionManifest();
+  const cli = await findVsCodeCli();
+  if (cli) {
+    const removed = await capture(cli, ["--uninstall-extension", extensionId]);
+    const message = `${removed.stdout || ""}\n${removed.stderr || ""}`.trim();
+    if (removed.code !== 0 && !/not installed|is not installed|extension.*not found/i.test(message)) {
+      console.log(`WARN VS Code could not unregister the previous extension: ${message || `exit ${removed.code}`}`);
+    }
+  }
   const installRoot = vscodeExtensionInstallRoot();
   const extensionPrefix = `${manifest.publisher}.${manifest.name}-`;
   const target = vscodeExtensionTarget(manifest);
   mkdirSync(installRoot, { recursive: true });
+  clearVsCodeObsoleteEntries(installRoot, extensionPrefix);
   for (const entry of readdirSync(installRoot, { withFileTypes: true })) {
     if (!entry.isDirectory() || !entry.name.startsWith(extensionPrefix)) continue;
     const previous = join(installRoot, entry.name);
@@ -736,15 +776,18 @@ async function setup(flags, services = {}) {
     console.log(`Config file: ${CONFIG_PATH}`);
     console.log(`Environment file: ${ENV_LOCAL_PATH}`);
 
-    printStep(1, 9, "Check prerequisites");
+    printStep(1, 10, "Check prerequisites");
     await checkPrerequisites(selected);
 
-    printStep(2, 9, "Choose tunnel mode");
+    printStep(2, 10, "Stop the existing runtime safely");
+    if (services.stop) await services.stop(stripRuntimeFields(cfg));
+
+    printStep(3, 10, "Choose tunnel mode");
     const useTunnel = await promptYesNo(rl, "Use ChatGPT Web tunnel", !cfg.noTunnel);
     cfg.noTunnel = !useTunnel;
     if (useTunnel) await openKeyPages(rl);
 
-    printStep(3, 9, "Configure local environment");
+    printStep(4, 10, "Configure local environment");
     const envValues = readRepoEnvFile();
     if (useTunnel) {
       cfg.tunnelId = await promptLine(rl, "Tunnel ID", flags.tunnelId || (!isPlaceholder(envValues.CONTROL_PLANE_TUNNEL_ID) ? envValues.CONTROL_PLANE_TUNNEL_ID : cfg.tunnelId));
@@ -766,8 +809,8 @@ async function setup(flags, services = {}) {
       console.log("Tunnel disabled; .env.local can be filled later.");
     }
 
-    printStep(4, 9, "Configure agent defaults");
-    cfg.node = cfg.node || "node";
+    printStep(5, 10, "Configure agent defaults");
+    cfg.node = flags.node || process.execPath;
     cfg.workspace = resolveSetupWorkspace(flags.workspace);
     const explicitSecurity = Boolean(flags.mode || flags.policy);
     const alreadyConsented =
@@ -789,14 +832,10 @@ async function setup(flags, services = {}) {
     console.log(`Access: ${cfg.mode}/${cfg.policy}`);
     console.log(`MCP port: ${cfg.port}`);
 
-    printStep(5, 9, "Install server dependencies");
-    if (!existsSync(join(SERVER_DIR, "node_modules"))) {
-      await installDeps(cfg);
-    } else {
-      console.log("Server dependencies already installed.");
-    }
+    printStep(6, 10, "Repair server dependencies");
+    await installDeps(cfg);
 
-    printStep(6, 9, "Connect Figma Desktop MCP");
+    printStep(7, 10, "Connect Figma Desktop MCP");
     const useFigmaDesktop = await promptYesNo(rl, "Enable Figma Desktop integration", true);
     if (useFigmaDesktop) {
       await services.ensureFigmaDesktopConnected(rl, { interactive: true, failOnMissing: false });
@@ -804,19 +843,20 @@ async function setup(flags, services = {}) {
       console.log("Skipped. Run `lca figma` later.");
     }
 
-    printStep(7, 9, "Install tunnel-client");
+    printStep(8, 10, "Install tunnel-client");
     if (useTunnel) {
       cfg.tunnelBin = cfg.tunnelBin || defaultTunnelBinForPlatform(selected);
-      if (!existsSync(cfg.tunnelBin)) {
-        try {
-          cfg.tunnelBin = await downloadTunnelClient(selected, cfg.tunnelBin);
-        } catch (error) {
+      const hadExistingTunnel = existsSync(cfg.tunnelBin);
+      try {
+        cfg.tunnelBin = await downloadTunnelClient(selected, cfg.tunnelBin);
+      } catch (error) {
+        if (hadExistingTunnel && existsSync(cfg.tunnelBin)) {
+          console.log(`WARN tunnel-client refresh failed; keeping the existing binary: ${error.message}`);
+        } else {
           console.log(`Download failed: ${error.message}`);
           cfg.tunnelBin = await promptLine(rl, "Manual tunnel-client path", cfg.tunnelBin);
           if (!existsSync(cfg.tunnelBin)) throw new Error(`Tunnel client not found: ${cfg.tunnelBin}`);
         }
-      } else {
-        console.log(`Using existing tunnel-client: ${cfg.tunnelBin}`);
       }
       cfg.profileDir = cfg.profileDir || join(REPO_ROOT, "tools", "profiles");
       cfg.profile = cfg.profile || "local-coding-agent";
@@ -825,13 +865,14 @@ async function setup(flags, services = {}) {
       console.log("Tunnel disabled.");
     }
 
-    printStep(8, 9, "Save config and install lca command");
+    printStep(9, 10, "Save config and reinstall CLI/VS Code integration");
     cfg.runtimeKey = "";
     validate(cfg);
     await saveConfig(stripRuntimeFields(cfg));
     const cliPath = await installCliCommand();
+    await setupVsCodeExtension();
 
-    printStep(9, 9, "Verify runtime");
+    printStep(10, 10, "Start and verify the repaired runtime");
     await verifyCliShim(cliPath);
     await services.start({
       ...stripRuntimeFields(cfg),
@@ -839,7 +880,15 @@ async function setup(flags, services = {}) {
       save: false
     });
     await services.status({ json: false });
-    console.log("\nSetup complete.");
+    try {
+      await openVsCodeExtension(
+        { workspace: cfg.workspace },
+        { detectWorkspaceRoot: async () => cfg.workspace }
+      );
+    } catch (error) {
+      console.log(`WARN runtime is ready, but VS Code could not be opened automatically: ${error.message}`);
+    }
+    console.log("\nSetup/repair complete. Existing database, tasks and Workspace Memory were preserved.");
     console.log("Daily use:");
     if (process.platform === "win32") {
       console.log("  Open a new terminal");
@@ -857,7 +906,8 @@ async function setup(flags, services = {}) {
 
 async function installDeps(opts) {
   const npm = process.platform === "win32" ? "npm.cmd" : "npm";
-  const child = spawnLogged("install", npm, ["install"], { cwd: SERVER_DIR });
+  const dependencyArgs = existsSync(join(SERVER_DIR, "package-lock.json")) ? ["ci"] : ["install"];
+  const child = spawnLogged("install", npm, dependencyArgs, { cwd: SERVER_DIR });
   const code = await new Promise((resolveExit) => child.on("exit", resolveExit));
   if (code !== 0) throw new Error(`npm install failed with exit code ${code}`);
   console.log("Install complete.");

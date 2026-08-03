@@ -1,5 +1,7 @@
 import { spawn } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
 import os from "node:os";
+import path from "node:path";
 import * as vscode from "vscode";
 import type { AuditStatus, TaskDescriptor, WorkspaceDescriptor } from "../api/api-types.js";
 
@@ -28,7 +30,7 @@ export async function connectLcaToWorkspace(workspace: string): Promise<void> {
 }
 
 export async function startLca(cwd?: string): Promise<void> {
-  await runLca(["start", "--background"], cwd);
+  await runLca(["start", "--bg"], cwd);
 }
 
 export async function stopLca(cwd?: string): Promise<void> {
@@ -118,8 +120,43 @@ export async function readLcaInstanceNonce(workspace: string): Promise<string | 
 }
 
 async function runLca(args: string[], cwd?: string): Promise<string> {
-  const cli = vscode.workspace.getConfiguration("lca").get<string>("cliPath", "lca");
+  const cli = resolveLcaCli();
   return run(cli, args, cwd || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || os.homedir());
+}
+
+function resolveLcaCli(): string {
+  const configured = vscode.workspace.getConfiguration("lca").get<string>("cliPath", "lca").trim() || "lca";
+  if (configured !== "lca") return configured;
+  const home = os.homedir();
+  const installed = readInstalledCliPath(home);
+  const candidates = process.platform === "win32"
+    ? [
+        installed,
+        path.join(process.env.LOCALAPPDATA || path.join(home, "AppData", "Local"), "LocalCodingAgent", "bin", "lca.cmd"),
+      ]
+    : [
+        installed,
+        path.join(home, ".local", "bin", "lca"),
+        path.join(home, "bin", "lca"),
+        process.platform === "darwin"
+          ? path.join(home, "Library", "Application Support", "LocalCodingAgent", "bin", "lca")
+          : path.join(process.env.XDG_CONFIG_HOME || path.join(home, ".config"), "LocalCodingAgent", "bin", "lca"),
+      ];
+  return candidates.find((candidate) => candidate && existsSync(candidate)) || configured;
+}
+
+function readInstalledCliPath(home: string): string {
+  const configRoot = process.platform === "win32"
+    ? path.join(process.env.APPDATA || path.join(home, "AppData", "Roaming"), "LocalCodingAgent")
+    : process.platform === "darwin"
+      ? path.join(home, "Library", "Application Support", "LocalCodingAgent")
+      : path.join(process.env.XDG_CONFIG_HOME || path.join(home, ".config"), "LocalCodingAgent");
+  try {
+    const state = JSON.parse(readFileSync(path.join(configRoot, "cli-install.json"), "utf8")) as { path?: unknown };
+    return String(state.path || "").trim();
+  } catch {
+    return "";
+  }
 }
 
 function run(command: string, args: string[], cwd: string): Promise<string> {

@@ -2,7 +2,7 @@
   "name": "local-coding-agent-vscode",
   "displayName": "Local Coding Agent",
   "description": "Operate Local Coding Agent workspaces and tasks, and review task-scoped changes.",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "publisher": "luongduy",
   "private": true,
   "license": "AGPL-3.0-or-later",

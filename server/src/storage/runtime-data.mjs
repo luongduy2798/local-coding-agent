@@ -57,6 +57,8 @@ export async function prepareRuntimeDataDirectory({
 } = {}) {
   const paths = resolveRuntimeDataPaths({ agentDataDir, configRoot });
   await mkdir(paths.dataRoot, { recursive: true, mode: 0o700 });
+  const active = await activeRuntimeFastPath(paths);
+  if (active) return active;
   if (assertStopped && await needsStoppedRuntimeGuard(paths)) await assertStopped();
 
   const releaseLock = await acquireMigrationLock(paths);
@@ -65,6 +67,19 @@ export async function prepareRuntimeDataDirectory({
   } finally {
     await releaseLock();
   }
+}
+
+async function activeRuntimeFastPath(paths) {
+  const [target, savedIntent] = await Promise.all([
+    entryIdentity(paths.runtimeDir),
+    readJson(paths.intentPath)
+  ]);
+  if (!target || savedIntent) return null;
+  const activation = await readJson(path.join(paths.runtimeDir, ACTIVATION_FILE));
+  if (activation?.active !== true || activation?.migration_version !== MIGRATION_VERSION) return null;
+  const source = await entryIdentity(paths.legacyDir);
+  if (source && !activationMatchesSource(activation, source)) return null;
+  return activationResult(paths, "active", source);
 }
 
 async function needsStoppedRuntimeGuard(paths) {
@@ -274,7 +289,8 @@ export async function validateRuntimeTree(root, { validate = true, faultAt = "",
   const pending = [root];
   while (pending.length) {
     const current = pending.pop();
-    const info = await lstat(current);
+    const info = await lstat(current).catch((error) => error?.code === "ENOENT" ? null : Promise.reject(error));
+    if (!info) continue;
     if (info.isDirectory()) {
       for (const entry of await readdir(current)) pending.push(path.join(current, entry));
       continue;
@@ -416,7 +432,8 @@ async function syncTree(root) {
   const directories = [];
   while (pending.length) {
     const current = pending.pop();
-    const info = await lstat(current);
+    const info = await lstat(current).catch((error) => error?.code === "ENOENT" ? null : Promise.reject(error));
+    if (!info) continue;
     if (info.isDirectory()) {
       directories.push(current);
       for (const entry of await readdir(current)) pending.push(path.join(current, entry));

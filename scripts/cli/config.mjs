@@ -27,11 +27,13 @@ export const CONFIG_PATH = process.env.LCA_CONFIG_PATH || defaultConfigPath();
 export const PID_PATH = join(dirname(CONFIG_PATH), "processes.json");
 export const LOG_PATH = join(dirname(CONFIG_PATH), "launcher.log");
 export const VSCODE_EXTENSION_STATE_PATH = join(dirname(CONFIG_PATH), "vscode-extension.json");
+export const CLI_INSTALL_STATE_PATH = join(dirname(CONFIG_PATH), "cli-install.json");
 export const INTEGRATIONS_STATE_PATH = join(dirname(CONFIG_PATH), "integrations.json");
 export const RELEASE_MIGRATION_STATE_PATH = join(dirname(CONFIG_PATH), "release-migration.json");
 export const LEGACY_RELEASE_MIGRATION_STATE_PATH = join(dirname(CONFIG_PATH), "v5-migration.json");
 export const RELEASE_MIGRATION_BACKUP_DIR = join(dirname(CONFIG_PATH), "migration-backups");
 export const RELEASE_MIGRATION_LOCK_DIR = join(dirname(CONFIG_PATH), "release-migration.lock");
+export const START_LOCK_DIR = join(dirname(CONFIG_PATH), "startup.lock");
 export const DEFAULT_PORT = "8789";
 export const DEFAULT_TUNNEL_VERSION = process.env.TUNNEL_CLIENT_VERSION || "v0.0.10";
 export const DEFAULT_FIGMA_DESKTOP_MCP_URL = "http://127.0.0.1:3845/mcp";
@@ -91,6 +93,8 @@ function usage() {
 Usage:
   lca
   lca run
+  lca setup [options]
+  lca start [--bg|--foreground]
   node scripts/local-coding-agent.mjs setup [options]
   node scripts/local-coding-agent.mjs ui
   node scripts/local-coding-agent.mjs integrations list
@@ -134,7 +138,8 @@ Common options:
   --port <port>               MCP server port
   --auth-token <token>        Optional MCP bearer token
   --node <path>               Node executable
-  --background                Keep server/tunnel running after this command exits
+  --background, --bg          Keep server/tunnel running after this command exits
+  --foreground                Keep the supervisor attached to this terminal
 
 Tunnel options:
   --no-tunnel                 Start only the local MCP server
@@ -157,7 +162,10 @@ Fast path:
   scripts\\lca.cmd setup       # Windows
   bash scripts/lca setup       # macOS/Linux
   node scripts/local-coding-agent.mjs setup
-  lca                         # From any repo, set workspace to git root and run
+  lca setup                   # Repeat anytime to repair/reinstall everything
+  lca                         # From any repo, set workspace to git root and start in background
+  lca start --bg              # Explicit background alias
+  lca start --foreground      # Debug attached to the current terminal
   lca ui                      # Open the standalone local Control Center
   lca integrations list       # Inspect VS Code, JetBrains and web integrations
   lca integrations setup web
@@ -178,18 +186,16 @@ Usage:
   scripts\\lca.cmd setup          # Windows
   node scripts/local-coding-agent.mjs setup
 
-The wizard uses only Node.js built-ins. It auto-detects the current OS, checks
-prerequisites, creates or updates .env.local, installs server dependencies,
-checks the local Figma Desktop MCP bridge, downloads tunnel-client when possible,
-writes local CLI config, installs the global lca command, and prints health/status checks.
+The wizard is also the repair/reinstall command. It auto-detects the current OS,
+checks prerequisites, preserves the existing runtime database, tasks and Workspace
+Memory, updates .env.local and config, stops the old runtime safely, reinstalls server
+and VS Code dependencies, rebuilds and replaces the VS Code extension, reinstalls the
+global lca command, starts a fresh background Supervisor, and opens a fresh VS Code
+window when available. Running setup again performs the same complete repair.
 The startup workspace defaults to this local-coding-agent repository; use
 --workspace only when you intentionally want a different startup workspace.
-It does not install editor integrations. Build or install optional Control Center hosts with:
 
-  lca integrations setup web
-  lca integrations setup vscode
-  lca integrations setup jetbrains
-
+Optional hosts remain available through "lca integrations", including JetBrains.
 Open the standalone local UI with lca ui. The old lca extension command remains a deprecated VS Code alias.
 
 Use --choose-os only when you want instruction mode for another OS.
@@ -239,8 +245,14 @@ function parseArgs(argv) {
         flags.node = next();
         break;
       case "--background":
+      case "--bg":
       case "--daemon":
         flags.background = true;
+        flags.foreground = false;
+        break;
+      case "--foreground":
+        flags.foreground = true;
+        flags.background = false;
         break;
       case "--no-tunnel":
         flags.noTunnel = true;

@@ -275,7 +275,8 @@ async function selectCliWorkspace(rootOrId) {
           label: basename(resolve(requested)),
           trusted: true,
           source: "cli"
-        }
+        },
+        repairIdentity: true
       });
       workspace = registered.workspace;
     }

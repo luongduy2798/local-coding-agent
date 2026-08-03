@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import { existsSync, rmSync } from "node:fs";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import {
   adoptProcessRecord,
@@ -16,6 +17,7 @@ import {
   SCRIPT_DIR,
   SERVER_DIR,
   SERVER_SCRIPT,
+  START_LOCK_DIR,
   SUPERVISOR_MAX_RESTARTS,
   SUPERVISOR_STABLE_WINDOW_MS,
   configId,
@@ -748,7 +750,63 @@ async function superviseRuntime(flags) {
   }
 }
 
-async function start(flags) {
+async function readStartLockOwner() {
+  try {
+    return JSON.parse(await readFile(join(START_LOCK_DIR, "owner.json"), "utf8"));
+  } catch (error) {
+    if (error?.code === "ENOENT" || error instanceof SyntaxError) return null;
+    throw error;
+  }
+}
+
+function processIsAlive(pid) {
+  try {
+    process.kill(Number(pid), 0);
+    return true;
+  } catch (error) {
+    return error?.code === "EPERM";
+  }
+}
+
+async function acquireStartLock({ timeoutMs = 45_000 } = {}) {
+  const nonce = newInstanceNonce();
+  const deadline = Date.now() + timeoutMs;
+  await mkdir(dirname(START_LOCK_DIR), { recursive: true, mode: 0o700 });
+  while (true) {
+    try {
+      await mkdir(START_LOCK_DIR, { mode: 0o700 });
+      await writeFile(
+        join(START_LOCK_DIR, "owner.json"),
+        `${JSON.stringify({ nonce, pid: process.pid, created_at: new Date().toISOString() }, null, 2)}\n`,
+        { encoding: "utf8", mode: 0o600 }
+      );
+      return async () => {
+        const owner = await readStartLockOwner();
+        if (owner?.nonce === nonce) await rm(START_LOCK_DIR, { recursive: true, force: true });
+      };
+    } catch (error) {
+      if (error?.code !== "EEXIST") {
+        await rm(START_LOCK_DIR, { recursive: true, force: true }).catch(() => {});
+        throw error;
+      }
+      let owner = await readStartLockOwner();
+      if (!owner?.pid) {
+        await new Promise((resolveWait) => setTimeout(resolveWait, 100));
+        owner = await readStartLockOwner();
+      }
+      if (!owner?.pid || !processIsAlive(owner.pid)) {
+        await rm(START_LOCK_DIR, { recursive: true, force: true });
+        continue;
+      }
+      if (Date.now() >= deadline) {
+        throw new Error(`Another lca start operation is still running in PID ${owner.pid}.`);
+      }
+      await new Promise((resolveWait) => setTimeout(resolveWait, 150));
+    }
+  }
+}
+
+async function startUnlocked(flags) {
   const opts = effectiveOptions(flags);
   validate(opts, { requireWorkspace: true, requireTunnel: true });
   if (!existsSync(join(SERVER_DIR, SERVER_SCRIPT))) throw new Error(`Missing ${SERVER_SCRIPT} in ${SERVER_DIR}`);
@@ -878,6 +936,15 @@ async function start(flags) {
   console.log("Running in background.");
 }
 
+async function start(flags) {
+  if (!flags.background) return startUnlocked(flags);
+  const release = await acquireStartLock();
+  try {
+    return await startUnlocked(flags);
+  } finally {
+    await release();
+  }
+}
 
 export {
   decodeSupervisorPayload,

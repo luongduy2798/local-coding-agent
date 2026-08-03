@@ -154,7 +154,7 @@ export class WorkspaceRegistry {
     return rows.map(transactionFromRow);
   }
 
-  async registerWorkspace(root, { metadata = {}, workspaceId } = {}) {
+  async registerWorkspace(root, { metadata = {}, workspaceId, repairIdentity = false } = {}) {
     this.#assertOpen();
     const canonical = await canonicalWorkspaceRoot(root);
     if (
@@ -189,7 +189,14 @@ export class WorkspaceRegistry {
         );
       }
       const existingMetadata = safeJsonParse(existing.metadata_json);
-      if (!workspaceIdentityMatches(existingMetadata, canonical)) {
+      const identityChanged = !workspaceIdentityMatches(existingMetadata, canonical);
+      const canRepairIdentity = Boolean(
+        repairIdentity &&
+        existingMetadata.trusted === true &&
+        metadata?.trusted === true &&
+        canonical.key === existing.canonical_key
+      );
+      if (identityChanged && !canRepairIdentity) {
         throw new WorkspaceRegistryError(
           "WORKSPACE_IDENTITY_CHANGED",
           "The registered workspace path now points to a different filesystem or Git identity.",
@@ -198,7 +205,8 @@ export class WorkspaceRegistry {
       }
       const mergedMetadata = {
         ...existingMetadata,
-        ...nextMetadata
+        ...nextMetadata,
+        ...(identityChanged ? { identity_rebound_at: nowIso(), identity_rebound_by: "trusted-start-repair" } : {})
       };
       const updatedAt = nowIso();
       const updated = await this.#database.get(

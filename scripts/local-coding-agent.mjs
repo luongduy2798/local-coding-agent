@@ -87,6 +87,9 @@ async function main() {
   assertSupportedNodeVersion(process.versions.node, process.platform, { wsl: isWsl() });
   const argv = process.argv.slice(2);
   const { command, rest, flags } = parseArgs(argv);
+  const lifecycleFlags = flags.foreground
+    ? { ...flags, background: false }
+    : { ...flags, background: true };
   if (command !== "supervise" && process.env[SKIP_MIGRATION_RECOVERY_ENV] !== "1") {
     const recovery = await recoverPendingMigration(flags);
     if (recovery.handled && ["update", "rollback"].includes(command)) {
@@ -97,10 +100,10 @@ async function main() {
   }
   if (flags.help) return command === "setup" || command === "init" ? setupUsage() : usage();
   if (command === "help") return usage();
-  if (command === "run" || command === "here") return runCurrentWorkspace(flags);
+  if (command === "run" || command === "here") return runCurrentWorkspace(lifecycleFlags);
   if (command === "setup" || command === "init") {
     if (rest.length) throw new Error("Usage: lca setup");
-    return setup(flags, { detectWorkspaceRoot, ensureFigmaDesktopConnected, start, status });
+    return setup(flags, { detectWorkspaceRoot, ensureFigmaDesktopConnected, start, status, stop });
   }
   const controlCenterServices = { detectWorkspaceRoot, runningStatusForConfig, start };
   if (command === "ui" || command === "web") {
@@ -133,7 +136,7 @@ async function main() {
     if (rest.length) throw new Error("Invalid internal supervisor arguments.");
     return superviseRuntime(decodeSupervisorPayload());
   }
-  if (command === "start") return start(flags);
+  if (command === "start") return start(lifecycleFlags);
   if (command === "stop") return stop(flags);
   if (command === "status") return status(flags);
   if (command === "doctor") return doctor(flags);
