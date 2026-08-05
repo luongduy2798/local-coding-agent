@@ -518,7 +518,7 @@ function ChangeCard({
   compact?: boolean;
 }): React.JSX.Element {
   const [expanded, setExpanded] = useState(!compact);
-  const title = useMemo(() => compact ? "Change set" : changeTitle(change), [change, compact]);
+  const title = useMemo(() => changeTitle(change, !compact), [change, compact]);
   const canUndoChange = ["applied", "reapplied", "partially_undone"].includes(change.status);
   const canReapplyChange = ["undone", "partially_undone"].includes(change.status);
   const disabled = Boolean(state.busyAction);
@@ -921,7 +921,7 @@ function post(
   });
 }
 
-function changeTitle(change: ChangeRecord): string {
+function changeTitle(change: ChangeRecord, includeTaskTitle = true): string {
   const explicitTitle = change.title?.trim();
   if (explicitTitle && explicitTitle !== "LCA task") return explicitTitle;
   if (change.renameGroups.length === 1) {
@@ -939,8 +939,10 @@ function changeTitle(change: ChangeRecord): string {
     };
     return `${verb[file.operation]} ${file.path}`;
   }
-  const taskTitle = change.task_title?.trim();
-  if (taskTitle && taskTitle !== "LCA task") return taskTitle;
+  if (includeTaskTitle) {
+    const taskTitle = change.task_title?.trim();
+    if (taskTitle && taskTitle !== "LCA task") return taskTitle;
+  }
   return `Edited ${change.files.length} files`;
 }
 
