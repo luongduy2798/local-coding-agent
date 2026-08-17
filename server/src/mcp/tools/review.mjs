@@ -356,7 +356,8 @@ export function registerReviewTools(mcp, dependencies) {
         page_size: z.number().int().min(1).max(REVIEW_PAGE_SIZE_MAX).optional()
       }
     },
-    async ({ staged = false, cwd = ".", workspace_id, task_token, scope: requestedScope = "task", response_mode = "auto", cursor, page_size = REVIEW_PAGE_SIZE_DEFAULT }) => {
+    async ({ staged = false, cwd = ".", workspace_id, task_token, scope: explicitScope, response_mode = "auto", cursor, page_size = REVIEW_PAGE_SIZE_DEFAULT }) => {
+      const requestedScope = explicitScope || (staged ? "workspace" : "task");
       const routedTask = await currentTask({
         taskToken: task_token,
         required: !TEST_RUNTIME_DIAGNOSTICS

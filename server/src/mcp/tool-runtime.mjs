@@ -13,6 +13,8 @@ import {
   publicTaskOrchestration
 } from "../workspace/task-orchestration.mjs";
 
+const STRUCTURED_PAYLOAD_CACHE = new WeakMap();
+
 export function createToolRegistrar({
   audit,
   auditEnabled,
@@ -708,26 +710,29 @@ function mergeValidatedEvidence(tool, cachedResult, validationResult, firstText)
     ? cachedPayload.files[index]
     : file);
   const charsReturned = files.reduce((total, file) => total + String(file?.content || "").length, 0);
-  return replaceFirstText(validationResult, JSON.stringify({
+  return writeStructuredPayload(validationResult, {
     ...validationPayload,
     chars_returned: charsReturned,
     files
-  }));
+  });
 }
 
 function appendPayloadMetadata(result, metadata, firstText) {
   const payload = parseStructuredPayload(result, firstText);
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) return result;
-  return replaceFirstText(result, JSON.stringify({ ...payload, ...metadata }));
+  return writeStructuredPayload(result, { ...payload, ...metadata });
 }
 
 function cloneToolResult(result) {
-  return {
+  const clone = {
     ...result,
     content: Array.isArray(result?.content)
       ? result.content.map((entry) => entry && typeof entry === "object" ? { ...entry } : entry)
       : result?.content
   };
+  const payload = STRUCTURED_PAYLOAD_CACHE.get(result);
+  if (payload) STRUCTURED_PAYLOAD_CACHE.set(clone, payload);
+  return clone;
 }
 
 function rememberEvidence(cache, key, result, limit) {
@@ -742,7 +747,7 @@ function appendAutoClose(result, closePayload, firstText) {
   const task = closePayload?.task && typeof closePayload.task === "object"
     ? closePayload.task
     : null;
-  return replaceFirstText(result, JSON.stringify({
+  return writeStructuredPayload(result, {
     ...payload,
     ...(task ? { task } : {}),
     auto_close: {
@@ -758,28 +763,41 @@ function appendAutoClose(result, closePayload, firstText) {
       close_transaction: closePayload?.close_transaction || null,
       memory_persistence: closePayload?.memory_persistence || null
     }
-  }));
+  });
 }
 
 function appendOrchestration(result, orchestration, firstText) {
   const payload = parseStructuredPayload(result, firstText);
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) return result;
-  return replaceFirstText(result, JSON.stringify({
+  return writeStructuredPayload(result, {
     ...payload,
     orchestration: {
       ...(payload.orchestration && typeof payload.orchestration === "object" ? payload.orchestration : {}),
       ...orchestration
     }
-  }));
+  });
 }
 
 function parseStructuredPayload(result, firstText) {
+  if (!result || typeof result !== "object") return null;
+  const cached = STRUCTURED_PAYLOAD_CACHE.get(result);
+  if (cached) return cached;
   try {
     const payload = JSON.parse(firstText(result));
-    return payload && typeof payload === "object" && !Array.isArray(payload) ? payload : null;
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
+    STRUCTURED_PAYLOAD_CACHE.set(result, payload);
+    return payload;
   } catch {
     return null;
   }
+}
+
+function writeStructuredPayload(result, payload) {
+  const next = replaceFirstText(result, JSON.stringify(payload));
+  if (payload && typeof payload === "object" && !Array.isArray(payload)) {
+    STRUCTURED_PAYLOAD_CACHE.set(next, payload);
+  }
+  return next;
 }
 
 function replaceFirstText(result, text) {
@@ -797,19 +815,18 @@ function replaceFirstText(result, text) {
 }
 
 function structuredResult(payload, isError = false) {
-  return {
+  const result = {
     content: [{ type: "text", text: JSON.stringify(payload) }],
     ...(isError ? { isError: true } : {})
   };
+  if (payload && typeof payload === "object" && !Array.isArray(payload)) {
+    STRUCTURED_PAYLOAD_CACHE.set(result, payload);
+  }
+  return result;
 }
 
 function toolResultMetadata(result, { args, firstText, taskBefore, transportSuccess }) {
-  let payload = null;
-  try {
-    payload = JSON.parse(firstText(result));
-  } catch {
-    // Tool output is not structured JSON; only transport metadata is recorded.
-  }
+  const payload = parseStructuredPayload(result, firstText);
   const resultTask = objectValue(payload?.task) || objectValue(payload?.checkpoint?.task);
   const taskId = safeTaskId(resultTask?.id) || safeTaskId(payload?.task_id) || safeTaskId(taskBefore?.id);
   const workspaceIds = collectWorkspaceIds(args, taskBefore, resultTask, payload);

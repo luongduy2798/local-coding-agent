@@ -283,7 +283,6 @@ const {
   WORKSPACE_ID,
   WORKSPACE_IDLE_UNLOAD_MS
 } = await loadApplicationConfig();
-
 configureHttpHelpers({ allowedOrigins: ALLOWED_ORIGINS, host: HOST, port: PORT });
 configureSkillDiscovery({
   roots: ROOTS,

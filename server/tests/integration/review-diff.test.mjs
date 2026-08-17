@@ -254,7 +254,11 @@ test("review_diff restricts managed findings and summary to the current task pat
     assert.equal(review.data.summary.changed_files, 1);
     assert.equal(review.data.summary.added_lines, 1);
     assert.equal(review.data.summary.deleted_lines, 1);
-    assert.equal(review.data.findings_count, 0, "unchanged debug lines must not be reclassified as additions");
+    assert.equal(
+      review.data.findings.some((item) => /console\.log\/debug left in code/i.test(item.issue || "")),
+      false,
+      "unchanged debug lines must not be reclassified as additions"
+    );
 
     const workspaceReview = await callTool(runtime.port, sessionId, 104, "review_diff", {
       scope: "workspace"

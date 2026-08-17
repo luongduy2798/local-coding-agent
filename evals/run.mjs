@@ -296,7 +296,7 @@ async function runEvals(workspace) {
       const d = await parseJSON(r.text);
       check(
         "lca_status: returns fixed catalog and policy info",
-        d?.catalog_version === 15 &&
+        d?.catalog_version === 17 &&
           typeof d.policy === "string" &&
           ["strict", "balanced", "full"].includes(d.policy)
       );

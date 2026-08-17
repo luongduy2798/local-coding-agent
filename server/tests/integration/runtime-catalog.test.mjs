@@ -169,7 +169,7 @@ try {
   assert.deepEqual(taskOpenProperties.memory_mode?.enum, ["auto", "skip", "full"]);
   assert.ok(taskOpenProperties.include_recent_tasks);
   assert.ok(taskOpenProperties.relevant_paths);
-  assert.deepEqual(taskOpenProperties.response_mode?.enum, ["auto", "compact", "full", "diagnostic"]);
+  assert.deepEqual(taskOpenProperties.response_mode?.enum, ["auto", "minimal", "compact", "full", "diagnostic"]);
   assert.deepEqual(taskOpenProperties.verification_policy?.properties?.mode?.enum, ["not_requested", "requested", "required"]);
   assert.match(taskOpenTool?.description || "", /quick_edit receives light path-aware context/i);
 
@@ -210,13 +210,13 @@ try {
   }
 
   const taskCloseTool = tools.find((tool) => tool.name === "task_close");
-  assert.deepEqual(taskCloseTool?.inputSchema?.properties?.response_mode?.enum, ["auto", "compact", "full", "diagnostic"]);
+  assert.deepEqual(taskCloseTool?.inputSchema?.properties?.response_mode?.enum, ["auto", "minimal", "compact", "full", "diagnostic"]);
   assert.match(taskCloseTool?.description || "", /not-requested verification does not make completed work incomplete/i);
   const reviewTool = tools.find((tool) => tool.name === "review_diff");
   assert.deepEqual(reviewTool?.inputSchema?.properties?.scope?.enum, ["task", "workspace"]);
   assert.match(reviewTool?.description || "", /never falls back to workspace review/i);
-  assert.deepEqual(reviewTool?.inputSchema?.properties?.response_mode?.enum, ["auto", "compact", "full", "diagnostic"]);
-  assert.deepEqual(applyPatchTool?.inputSchema?.properties?.response_mode?.enum, ["auto", "compact", "full", "diagnostic"]);
+  assert.deepEqual(reviewTool?.inputSchema?.properties?.response_mode?.enum, ["auto", "minimal", "compact", "full", "diagnostic"]);
+  assert.deepEqual(applyPatchTool?.inputSchema?.properties?.response_mode?.enum, ["auto", "minimal", "compact", "full", "diagnostic"]);
   const memoryUpdateItems = taskCloseTool?.inputSchema?.properties?.memory_updates?.items;
   assert.equal(memoryUpdateItems?.type, "object", "task_close.memory_updates items must be typed objects");
   assert.deepEqual(
@@ -312,7 +312,7 @@ try {
   });
   assert.equal(registered.data.workspace.root.path, ".");
   assert.equal(registered.data.workspace.git_repository, true);
-  assert.match(registered.data.workspace.git_identity, /^git_[a-f0-9]{32}$/);
+  assert.match(registered.data.workspace.git_identity, /^git2_[a-f0-9]{32}$/);
   const workspaceBId = registered.data.workspace.workspace_id;
   const statusAfterRegister = await callTool(runtime.port, sessionId, 61, "lca_status", {});
   assert.ok(
@@ -359,7 +359,7 @@ try {
   assert.equal(opened.data.task.workspace_memory.effective_mode, "light");
   assert.equal(opened.data.task.workspace_memory.semantic_used, false);
   assert.equal(opened.data.task.workspace_memory.recent_tasks_included, false);
-  assert.deepEqual(opened.data.task.workspace_memory.recent_tasks, []);
+  assert.deepEqual(opened.data.task.workspace_memory.recent_task_ids, []);
   assert.ok(
     Buffer.byteLength(JSON.stringify(opened.data.task.workspace_memory), "utf8") <= 1_024,
     "quick_edit workspace memory payload must stay within 1 KiB"
