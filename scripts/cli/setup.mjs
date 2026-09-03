@@ -4,7 +4,6 @@
 
 import { spawn } from "node:child_process";
 import {
-  cpSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -609,18 +608,32 @@ async function findVsCodeCli() {
   return "";
 }
 
-function clearVsCodeObsoleteEntries(installRoot, extensionPrefix) {
-  const obsoletePath = join(installRoot, ".obsolete");
-  const obsolete = readJsonFile(obsoletePath, {});
-  if (!obsolete || typeof obsolete !== "object" || Array.isArray(obsolete)) return;
-  const filtered = Object.fromEntries(
-    Object.entries(obsolete).filter(([key]) => !key.startsWith(extensionPrefix))
-  );
-  if (Object.keys(filtered).length === Object.keys(obsolete).length) return;
-  if (Object.keys(filtered).length) {
-    writeFileSync(obsoletePath, `${JSON.stringify(filtered, null, 2)}\n`, "utf8");
-  } else {
-    rmSync(obsoletePath, { force: true });
+const VSCODE_VSCE_PACKAGE = "@vscode/vsce@3.9.2";
+
+async function packageVsCodeExtension(npm, manifest) {
+  const tempDir = mkdtempSync(join(os.tmpdir(), "lca-vscode-extension-"));
+  const vsixPath = join(tempDir, `${manifest.name}-${manifest.version}.vsix`);
+  try {
+    await runChecked(
+      "vscode-extension package",
+      npm,
+      [
+        "exec",
+        "--yes",
+        `--package=${VSCODE_VSCE_PACKAGE}`,
+        "--",
+        "vsce",
+        "package",
+        "--no-dependencies",
+        "--out",
+        vsixPath
+      ],
+      { cwd: VSCODE_EXTENSION_DIR }
+    );
+    return { tempDir, vsixPath };
+  } catch (error) {
+    rmSync(tempDir, { recursive: true, force: true });
+    throw error;
   }
 }
 
@@ -636,30 +649,41 @@ async function setupVsCodeExtension() {
   await runChecked("vscode-extension build", npm, ["run", "build"], { cwd: VSCODE_EXTENSION_DIR });
 
   const cli = await findVsCodeCli();
-  if (cli) {
+  if (!cli) {
+    throw new Error("Could not find the VS Code CLI required to install the local VSIX. Set VSCODE_CLI_PATH or install VS Code.");
+  }
+
+  const { tempDir, vsixPath } = await packageVsCodeExtension(npm, manifest);
+  try {
     const removed = await capture(cli, ["--uninstall-extension", extensionId]);
     const message = `${removed.stdout || ""}\n${removed.stderr || ""}`.trim();
     if (removed.code !== 0 && !/not installed|is not installed|extension.*not found/i.test(message)) {
       console.log(`WARN VS Code could not unregister the previous extension: ${message || `exit ${removed.code}`}`);
     }
+
+    await runChecked(
+      "vscode-extension register",
+      cli,
+      ["--install-extension", vsixPath, "--force"]
+    );
+    const registered = await capture(cli, ["--list-extensions", "--show-versions"]);
+    const expectedRegistration = `${extensionId}@${manifest.version}`.toLowerCase();
+    const registrations = `${registered.stdout || ""}\n${registered.stderr || ""}`
+      .split(/\r?\n/)
+      .map((line) => line.trim().toLowerCase())
+      .filter(Boolean);
+    if (registered.code !== 0 || !registrations.includes(expectedRegistration)) {
+      throw new Error(`VS Code did not register ${extensionId}@${manifest.version} after installing the local VSIX.`);
+    }
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
   }
-  const installRoot = vscodeExtensionInstallRoot();
-  const extensionPrefix = `${manifest.publisher}.${manifest.name}-`;
+
   const target = vscodeExtensionTarget(manifest);
-  mkdirSync(installRoot, { recursive: true });
-  clearVsCodeObsoleteEntries(installRoot, extensionPrefix);
-  for (const entry of readdirSync(installRoot, { withFileTypes: true })) {
-    if (!entry.isDirectory() || !entry.name.startsWith(extensionPrefix)) continue;
-    const previous = join(installRoot, entry.name);
-    if (resolve(previous) !== resolve(target)) rmSync(previous, { recursive: true, force: true });
-  }
-  rmSync(target, { recursive: true, force: true });
-  mkdirSync(target, { recursive: true });
-  for (const name of ["package.json", "README.md", "dist", "media"]) {
-    const source = join(VSCODE_EXTENSION_DIR, name);
-    if (existsSync(source)) cpSync(source, join(target, name), { recursive: true });
-  }
   const fingerprint = vscodeExtensionFingerprint(target);
+  if (!fingerprint) {
+    throw new Error(`VS Code registered ${extensionId}, but its installed files were not found at ${target}.`);
+  }
   writeVsCodeExtensionState({
     version: manifest.version,
     fingerprint,
