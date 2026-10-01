@@ -23,6 +23,10 @@ import {
   tunnelAssetUrl
 } from "./local-coding-agent.mjs";
 import {
+  vscodeExtensionInstallArgs,
+  vscodeExtensionPackageArgs
+} from "./cli/setup.mjs";
+import {
   MIN_NODE_VERSION,
   assertSupportedNodeVersion,
   compareNodeVersions,
@@ -76,6 +80,24 @@ test("setup defaults to its local-coding-agent repository unless workspace is ex
   const explicitWorkspace = resolve("isolated", "project");
   assert.equal(resolveSetupWorkspace("", repositoryRoot), repositoryRoot);
   assert.equal(resolveSetupWorkspace(explicitWorkspace, repositoryRoot), explicitWorkspace);
+});
+
+test("VS Code setup packages and installs a local VSIX without prompts", () => {
+  const vsixPath = resolve("isolated", "local-coding-agent-vscode-0.6.0.vsix");
+  assert.deepEqual(vscodeExtensionInstallArgs(vsixPath), [
+    "--install-extension",
+    vsixPath,
+    "--force"
+  ]);
+  assert.throws(
+    () => vscodeExtensionInstallArgs("luongduy.local-coding-agent-vscode"),
+    /requires a local \.vsix file, not a Marketplace extension ID/
+  );
+
+  const packageArgs = vscodeExtensionPackageArgs(vsixPath);
+  assert.equal(packageArgs.includes("--allow-missing-repository"), true);
+  assert.equal(packageArgs.includes("--skip-license"), true);
+  assert.deepEqual(packageArgs.slice(-2), ["--out", vsixPath]);
 });
 
 test("migration transaction persists restart and safety intent without secrets", () => {

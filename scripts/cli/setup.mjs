@@ -610,6 +610,32 @@ async function findVsCodeCli() {
 
 const VSCODE_VSCE_PACKAGE = "@vscode/vsce@3.9.2";
 
+function vscodeExtensionInstallArgs(vsixPath) {
+  const candidate = String(vsixPath || "").trim();
+  if (!candidate.toLowerCase().endsWith(".vsix")) {
+    throw new Error(
+      `VS Code extension installation requires a local .vsix file, not a Marketplace extension ID: ${candidate || "<empty>"}`
+    );
+  }
+  return ["--install-extension", candidate, "--force"];
+}
+
+function vscodeExtensionPackageArgs(vsixPath) {
+  return [
+    "exec",
+    "--yes",
+    `--package=${VSCODE_VSCE_PACKAGE}`,
+    "--",
+    "vsce",
+    "package",
+    "--no-dependencies",
+    "--allow-missing-repository",
+    "--skip-license",
+    "--out",
+    vsixPath
+  ];
+}
+
 async function packageVsCodeExtension(npm, manifest) {
   const tempDir = mkdtempSync(join(os.tmpdir(), "lca-vscode-extension-"));
   const vsixPath = join(tempDir, `${manifest.name}-${manifest.version}.vsix`);
@@ -617,17 +643,7 @@ async function packageVsCodeExtension(npm, manifest) {
     await runChecked(
       "vscode-extension package",
       npm,
-      [
-        "exec",
-        "--yes",
-        `--package=${VSCODE_VSCE_PACKAGE}`,
-        "--",
-        "vsce",
-        "package",
-        "--no-dependencies",
-        "--out",
-        vsixPath
-      ],
+      vscodeExtensionPackageArgs(vsixPath),
       { cwd: VSCODE_EXTENSION_DIR }
     );
     return { tempDir, vsixPath };
@@ -664,7 +680,7 @@ async function setupVsCodeExtension() {
     await runChecked(
       "vscode-extension register",
       cli,
-      ["--install-extension", vsixPath, "--force"]
+      vscodeExtensionInstallArgs(vsixPath)
     );
     const registered = await capture(cli, ["--list-extensions", "--show-versions"]);
     const expectedRegistration = `${extensionId}@${manifest.version}`.toLowerCase();
@@ -961,5 +977,7 @@ export {
   setup,
   setupVsCodeExtension,
   uninstallVsCodeExtension,
-  verifyCliShim
+  verifyCliShim,
+  vscodeExtensionInstallArgs,
+  vscodeExtensionPackageArgs
 };
